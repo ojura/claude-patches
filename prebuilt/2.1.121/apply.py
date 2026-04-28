@@ -30,13 +30,19 @@ VERSION = "2.1.121"
 def find_default_ext_dir():
     # Strongest signal: CLAUDE_CODE_EXECPATH (set by the IDE-hosted Claude
     # Code CLI) points at the extension install of the running session.
+    # Caveat: standalone CLI layout (~/.local/share/claude/...) also sets
+    # this var but isn't an extension install — match the structural name
+    # explicitly so it falls through to the glob fallback in that case.
     execpath = os.environ.get("CLAUDE_CODE_EXECPATH", "")
     if execpath:
         target = f"anthropic.claude-code-{VERSION}-linux-x64"
         parts = execpath.split("/")
         for i, p in enumerate(parts):
             if p == target:
-                return "/" + "/".join(parts[1:i+1])
+                candidate = "/" + "/".join(parts[1:i+1])
+                if os.path.isdir(candidate):
+                    return candidate
+                break
 
     pattern = os.path.expanduser(
         f"~/.*/extensions/anthropic.claude-code-{VERSION}-linux-x64"

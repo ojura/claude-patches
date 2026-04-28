@@ -53,15 +53,24 @@ def _version_key(v: str):
 def find_default_extension():
     # Strongest signal: when Claude Code (the CLI) is invoked from inside
     # an IDE, its extension host sets CLAUDE_CODE_EXECPATH pointing at the
-    # specific install hosting the running session. That's exactly the
-    # install we want to patch — guaranteed unambiguous even with multiple
-    # IDEs installed.
+    # specific install hosting the running session.
+    #
+    # CAVEAT: CLAUDE_CODE_EXECPATH is also set in the *standalone CLI*
+    # layout (e.g. ~/.local/share/claude/versions/X.Y.Z), which is NOT an
+    # extension install. The walk-the-components loop below only matches
+    # an "anthropic.claude-code-*-linux-x64" path component, so the
+    # standalone layout falls through to the glob fallback automatically.
+    # The os.path.exists check is the second line of defense.
     execpath = os.environ.get("CLAUDE_CODE_EXECPATH", "")
     if execpath:
         parts = execpath.split("/")
         for i, p in enumerate(parts):
             if p.startswith("anthropic.claude-code-") and p.endswith("-linux-x64"):
-                return "/" + "/".join(parts[1:i+1]) + "/extension.js"
+                candidate = "/" + "/".join(parts[1:i+1]) + "/extension.js"
+                if os.path.exists(candidate):
+                    return candidate
+                break  # found a match but it doesn't have extension.js;
+                       # don't keep walking, fall through to glob
 
     # Fallback: glob ~/.<ide>/extensions/ across all known IDE variants
     # (VS Code, Insiders, VSCodium, Antigravity, Cursor, etc.).

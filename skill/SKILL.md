@@ -68,13 +68,29 @@ else
 fi
 
 # --- Step 0b: locate the target install ---
+# CLAUDE_CODE_EXECPATH is set to different things in different layouts:
+#   - IDE-hosted: .../extensions/anthropic.claude-code-X.Y.Z-linux-x64/resources/native-binary/claude
+#   - Standalone CLI: ~/.local/share/claude/versions/X.Y.Z (no extension to patch)
+# Walk the path looking for an "anthropic.claude-code-*-linux-x64" component
+# so we don't get fooled by the standalone layout into picking ~/.local/share.
+EXT=
 if [ -n "${CLAUDE_CODE_EXECPATH:-}" ]; then
-  EXT="$(dirname "$(dirname "$(dirname "$CLAUDE_CODE_EXECPATH")")")"
-else
+  P="$CLAUDE_CODE_EXECPATH"
+  while [ "$P" != "/" ] && [ "$P" != "." ] && [ -n "$P" ]; do
+    case "$(basename "$P")" in
+      anthropic.claude-code-*-linux-x64)
+        if [ -f "$P/extension.js" ]; then EXT="$P"; fi
+        break
+        ;;
+    esac
+    P="$(dirname "$P")"
+  done
+fi
+if [ -z "$EXT" ]; then
   EXT="$(ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 2>/dev/null | sort -V | tail -1)"
 fi
-if [ -z "${EXT:-}" ] || [ ! -d "$EXT" ]; then
-  echo "ABORT: could not locate the extension install."
+if [ -z "$EXT" ] || [ ! -f "$EXT/extension.js" ]; then
+  echo "ABORT: could not locate the extension install. EXT='$EXT'"
   exit 1
 fi
 VER="$(basename "$EXT" | sed 's/^anthropic.claude-code-//; s/-linux-x64$//')"
