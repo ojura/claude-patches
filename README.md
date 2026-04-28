@@ -44,12 +44,8 @@ claude-patches/
 │                            # pristine .bak files, byte-stable verified.
 ├── docs/
 │   └── patches.md           # detailed per-patch documentation
-├── util/                    # MAINTAINER tools (push access required)
-│   ├── extract-splices.py   # diff a patched file against its .bak,
-│   │                        # emit minimal-context (old, new) splice pairs
-│   └── build-prebuilt.py    # synthesize a new prebuilt/<VER>/apply.py from
-│                            # a freshly-patched extension dir; validates
-│                            # byte-stability before writing
+├── util/                    # maintainer tools — see MAINTAINER.md
+├── MAINTAINER.md            # how to synthesize and push a new prebuilt
 └── README.md                # this file
 ```
 
@@ -102,37 +98,14 @@ in `SKILL.md`.
 
 ## For maintainers (push access)
 
-When a new Antigravity release lands and no prebuilt exists yet:
+If you have push access and need to add a prebuilt for a new
+Antigravity release, see [MAINTAINER.md](MAINTAINER.md). The short
+version: apply patches A–G locally first, then
+`python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>` synthesizes
+and byte-stability-validates a prebuilt apply script from the diff.
 
-1. Apply patches A–G to your local install via the skill (or by hand
-   following `skill/SKILL.md`). This produces the patched files plus
-   `*.bak` backups of the pristine pre-patch state.
-2. Run the maintainer tool to synthesize a prebuilt from the diff:
-
-   ```sh
-   python3 util/build-prebuilt.py \
-     ~/.antigravity/extensions/anthropic.claude-code-<VER>-linux-x64 \
-     prebuilt/<VER>
-   ```
-
-   The tool:
-   - Diffs each patched file against its `.bak` via `util/extract-splices.py`,
-   - Aggregates the splices into a self-contained `apply.py`,
-   - **Validates byte-stability**: applies the synthesized script to fresh
-     copies of the `.bak` files and confirms the output matches the
-     live patched files exactly. Refuses to write if anything diverges.
-
-3. Commit and push:
-
-   ```sh
-   git add prebuilt/<VER>/apply.py
-   git commit -m "prebuilt/<VER>: synthesized $(date +%Y-%m-%d)"
-   git push
-   ```
-
-End-users never run the `util/` tools. The prebuilt `apply.py` is
-self-contained — Python stdlib only, no dependencies on the rest of
-this repo. They can `curl` it directly:
+End-users never need `util/` — the prebuilt `apply.py` is
+self-contained (Python stdlib only) and curl-installable:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/<VER>/apply.py | python3
