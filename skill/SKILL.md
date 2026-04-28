@@ -11,35 +11,52 @@ changes variable names between releases, so do NOT blindly search-and-replace
 literal strings from prior versions — locate the pattern structurally, then
 edit.
 
-## Step 0 — self-update the skill (fast-forward only)
+## Step 0 — boot: self-update, locate install, try the prebuilt
 
-If this skill directory is a symlink to a clone of `ojura/claude-patches`,
-fast-forward the clone before doing anything else. This keeps the skill
-in sync with whatever a maintainer pushed from another machine.
+This single bash block does three things in one round-trip:
+
+1. **Self-update** the skill if it's a symlinked clone of
+   `ojura/claude-patches` (fast-forward only; aborts on dirty / non-FF
+   state with a helpful message).
+2. **Locate the target install** via `CLAUDE_CODE_EXECPATH` (the IDE-
+   hosted Claude Code CLI sets this directly to the running install)
+   or a fallback glob across `~/.<ide>/extensions/` for any IDE that
+   pulls from Open VSX (VS Code, Antigravity, Cursor, VSCodium, etc.).
+3. **Fetch the prebuilt for that version** and run it. Prebuilts are
+   self-validating (detect `pfg-v1` signature, idempotent, byte-stable
+   verified at synthesis time) — so this step either applies the
+   patches cleanly OR no-ops because they're already applied.
 
 ```sh
-SKILL_DIR=$(readlink -f ~/.claude/skills/patch-claude 2>/dev/null) || SKILL_DIR=
-if [ -n "$SKILL_DIR" ] && [ -d "$SKILL_DIR/../.git" ] || [ -d "$SKILL_DIR/.git" ]; then
-  REPO_ROOT="$(git -C "$SKILL_DIR" rev-parse --show-toplevel 2>/dev/null)"
+set -u
+
+# --- Step 0a: self-update via fast-forward, if symlinked-clone setup ---
+SKILL_DIR=$(readlink -f ~/.claude/skills/patch-claude 2>/dev/null || true)
+REPO_ROOT=
+if [ -n "$SKILL_DIR" ]; then
+  REPO_ROOT="$(git -C "$SKILL_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
 if [ -n "$REPO_ROOT" ]; then
   echo "Self-update: fetching $REPO_ROOT..."
   git -C "$REPO_ROOT" fetch --quiet origin
-  if git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null \
-     && [ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$(git -C "$REPO_ROOT" rev-parse origin/main)" ]; then
-    if git -C "$REPO_ROOT" diff --quiet HEAD && git -C "$REPO_ROOT" diff --cached --quiet; then
-      git -C "$REPO_ROOT" merge --ff-only --quiet origin/main && \
-        echo "  fast-forwarded to $(git -C "$REPO_ROOT" rev-parse --short HEAD)" && \
-        echo "  RESTART the skill — re-read SKILL.md from disk to pick up changes."
-      exit 0
+  HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  ORIGIN_SHA="$(git -C "$REPO_ROOT" rev-parse origin/main)"
+  if [ "$HEAD_SHA" != "$ORIGIN_SHA" ]; then
+    if git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main; then
+      if git -C "$REPO_ROOT" diff --quiet HEAD && git -C "$REPO_ROOT" diff --cached --quiet; then
+        git -C "$REPO_ROOT" merge --ff-only --quiet origin/main
+        echo "  fast-forwarded to $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+        echo "RESTART_SKILL: re-read SKILL.md from disk to pick up changes."
+        exit 0
+      else
+        echo "ABORT: clone has uncommitted local changes; resolve before retrying."
+        exit 1
+      fi
     else
-      echo "  ABORT: clone has uncommitted local changes; resolve before retrying."
+      echo "ABORT: local clone has commits not in origin/main (would require non-FF merge)."
+      echo "Resolve manually: cd $REPO_ROOT && git status; rebase or push first."
       exit 1
     fi
-  elif ! git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
-    echo "  ABORT: local clone has commits not in origin/main (would require non-FF merge)."
-    echo "  Resolve manually: cd $REPO_ROOT && git status; rebase or push your work first."
-    exit 1
   else
     echo "  already up to date with origin/main"
   fi
@@ -49,70 +66,48 @@ else
   echo "  git clone https://github.com/ojura/claude-patches ~/claude-patches;"
   echo "  ln -s ~/claude-patches/skill ~/.claude/skills/patch-claude"
 fi
-```
 
-After a successful fast-forward, **stop and re-invoke the skill** so you
-read the updated `SKILL.md` from disk. The script above exits with code 0
-on FF success and code 1 on abort (uncommitted changes or non-FF state).
-On "already up to date" or "not a symlinked clone", the rest of this
-skill executes as normal.
-
-## Step 1 — find the target version
-
-```
-# Prefer CLAUDE_CODE_EXECPATH (set by the IDE-hosted Claude Code session)
-# — points directly at the running install. Fall back to a glob across
-# all known IDE extension dirs (~/.<ide>/extensions/) if unset.
-if [ -n "$CLAUDE_CODE_EXECPATH" ]; then
+# --- Step 0b: locate the target install ---
+if [ -n "${CLAUDE_CODE_EXECPATH:-}" ]; then
   EXT="$(dirname "$(dirname "$(dirname "$CLAUDE_CODE_EXECPATH")")")"
 else
-  ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 2>/dev/null | sort -V | tail -1
+  EXT="$(ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 2>/dev/null | sort -V | tail -1)"
 fi
-```
+if [ -z "${EXT:-}" ] || [ ! -d "$EXT" ]; then
+  echo "ABORT: could not locate the extension install."
+  exit 1
+fi
+VER="$(basename "$EXT" | sed 's/^anthropic.claude-code-//; s/-linux-x64$//')"
+echo "Target: $EXT (version $VER)"
 
-Pick the newest. Confirm with the user only if there are multiple recent ones
-and it's ambiguous which is active. Let `EXT` refer to its absolute path
-below; let `VER` refer to the version string (e.g. `2.1.121`).
-
-### Step 1b — check for a comprehensive prebuilt at ojura/claude-patches
-
-A complete prebuilt covering **all patches A through G** lives in
-[ojura/claude-patches](https://github.com/ojura/claude-patches) under
-`prebuilt/<VER>/apply.py`. If one exists for `VER`, that's the entire
-patch operation in one command.
-
-**Just run it.** Do not pre-probe state first — no checking for `.bak`
-files, no grepping for verification anchors, no inspecting whether
-patches are already applied. The prebuilt is idempotent and
-self-validating: it detects the `pfg-v1` signature and prints
-"Already patched. Nothing to do." if so, or applies cleanly if not.
-Probing first wastes a turn and tells you nothing the prebuilt won't
-say in its output. (And note: the verification `grep` snippets in
-Steps 3–9 are written against the manual splices with placeholder
-param names like `V,K,B`; the prebuilt operates on the actual
-minified names from the live version, so those greps will return `0`
-on prebuilt-applied code even though everything is in fact patched.
-Trust the `pfg-v1` signature, not the manual-path greps.)
-
-```sh
+# --- Step 0c: try the prebuilt (covers all patches A–G in one shot) ---
 URL="https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py"
 if curl -fsSL -o /tmp/apply.py "$URL"; then
   echo "Prebuilt found for $VER — applying"
-  python3 /tmp/apply.py
-  # done — skip the rest of this skill
+  python3 /tmp/apply.py "$EXT"
+  echo "PATCHES_APPLIED: skill complete; reload VSCode."
+  exit 0
 else
-  echo "No prebuilt for $VER yet — will synthesize via Steps 2–9 below"
+  echo "No prebuilt for $VER — falling through to manual application (Steps 2–9 below)."
 fi
 ```
 
-If the prebuilt exists and runs cleanly (either applies fresh or
-reports "Already patched"): **the skill is complete**. Reload the
-VSCode window and you're done.
+**How to interpret the output**:
 
-If no prebuilt exists for `VER`, proceed through Steps 2–9 to apply
-each patch manually. Once all seven patches are applied successfully,
-**synthesize a prebuilt** via the maintainer tool and push it to the
-repo so the next user with `VER` can skip the synthesis:
+- `RESTART_SKILL` → stop and re-invoke the skill (the local clone got
+  fast-forwarded; SKILL.md on disk is now newer than what you read).
+- `PATCHES_APPLIED` → skill is complete. Tell the user to reload VSCode.
+  Do NOT run any verification greps — they target manual-path splices
+  with placeholder param names and will give false negatives on
+  prebuilt-applied code. The `pfg-v1` signature embedded in
+  `extension.js` is the authoritative check, and the prebuilt verifies
+  it itself.
+- `ABORT: ...` → stop and surface the message to the user; don't try
+  to "fix" the abort condition automatically.
+- `No prebuilt for $VER` → fall through to Steps 2–9 below, applying
+  each patch manually. After successful manual application,
+  **synthesize a prebuilt** via the maintainer tool and push it so the
+  next user with `VER` can skip the synthesis:
 
 ```sh
 git clone https://github.com/ojura/claude-patches /tmp/claude-patches
@@ -124,12 +119,19 @@ git push
 ```
 
 `util/build-prebuilt.py` diffs each patched file against its `.bak`,
-extracts the splice pairs, and writes a self-contained apply script that
-validates byte-stable against the live patched files before being saved.
+extracts the splice pairs, and writes a self-contained apply script
+that validates byte-stable against the live patched files before being
+saved.
 
 (Patches F and G are also available as a version-tolerant fallback at
-`skill/apply-patch-fg.py` — useful if you want to script just F+G across
-multiple versions without per-version commit overhead.)
+`skill/apply-patch-fg.py` — useful if you want to script just F+G
+across multiple versions without per-version commit overhead.)
+
+---
+
+The remaining steps below are only relevant if Step 0 reported "no
+prebuilt" — manual per-patch application against the located `$EXT`
+install.
 
 ## Step 2 — back up the three target files
 
