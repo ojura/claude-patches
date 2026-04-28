@@ -1,0 +1,388 @@
+# Patches: detail
+
+Each patch is described with:
+
+- **Symptom** — what the user sees without the patch
+- **Root cause** — the architectural reason the bug exists
+- **Fix shape** — what the patch changes, structurally (variable names will
+  drift between releases; locate by structure)
+- **Upstream issue** — where the bug is reported
+
+For the literal patch text and step-by-step locator instructions, see
+[`../skill/SKILL.md`](../skill/SKILL.md).
+
+---
+
+## Patch A — `forkSession` writes a `custom-title` rescue
+
+**Symptom**: forking a session that's been auto-compacted produces a fork
+that appears blank in the session list, or that listSessions skips
+entirely. The fork's JSONL exists on disk but its title can't be resolved
+because the head 64KB starts with `isCompactSummary: true` followed by
+long tool results — the metadata parser's `firstPrompt` extractor returns
+`null` and the fork is filtered out.
+
+**Root cause**: `forkSession` doesn't emit any metadata entries for the
+new fork's JSONL. The session-list metadata parser only resolves a title
+if either (a) an explicit `custom-title` / `ai-title` entry exists, or
+(b) the head 64KB contains a parseable first user prompt. Compacted
+sessions fail (b) and have no (a), so the fork is invisible.
+
+**Fix shape**: at the tail of `forkSession`, after the JSONL body has been
+written and the messages have been registered in `this.sessionMessages`
+and `this.summaries`, conditionally append a `custom-title` entry to the
+fork's JSONL:
+
+1. Read the source's JSONL, scan for the latest `custom-title` and
+   `ai-title` entries; remember whichever is more recent.
+2. Walk the fork's messages forward, find the first valid user prompt
+   (skipping `isCompactSummary` / `isMeta` / tool-result-only content),
+   track the byte offset.
+3. Decide:
+   - **Source has explicit title** → write that as the fork's
+     `customTitle` (always — keeps the fork visually grouped with its
+     source, including post-`/rename`).
+   - **Else head 64KB parser would resolve a valid prompt** → no write
+     (the firstPrompt extractor handles it).
+   - **Else** → write a rescue `customTitle` derived from the first user
+     message anywhere in the chain, or `"Forked conversation"` as
+     last-resort.
+
+**Upstream issue**: [#48937](https://github.com/anthropics/claude-code/issues/48937)
+
+---
+
+## Patch B — sticky message header → linear scroll
+
+**Symptom**: a tall user message at the top of a turn is rendered with
+`position: sticky`, so when the assistant reply scrolls past, the user
+message remains pinned to the top and visually occludes the reply.
+
+**Root cause**: pure CSS layout choice in
+`webview/index.css`. The `.message_<S>.stickyHeader_<S>` rule sets
+`position: sticky; z-index: 2; background-image: linear-gradient(...);
+top: 0`.
+
+**Fix shape**: replace the sticky positioning with linear flow:
+`position: relative; z-index: auto`, drop the gradient and `top: 0`. Also
+update the `[aria-expanded=true]` variant rule's `z-index: 3` → `z-index:
+auto`.
+
+**Upstream issue**: [#49114](https://github.com/anthropics/claude-code/issues/49114)
+
+---
+
+## Patch C — disable broken `isSlashCommand` detection
+
+**Symptom**: any user message that begins with `/` (e.g. a pasted Unix
+path, a compiler error message, a literal slash-command someone wrote out)
+loses its `userMessageContainer` wrapper in the rendered chat, which
+removes the fork/rewind action button.
+
+**Root cause**: in-band signalling from message text. The webview infers
+"this user message is a slash command" via
+`text.startsWith("/")`. The actual slash-command dispatch happens
+elsewhere (it's wired up before the message is committed to the
+transcript), so this `startsWith` check is purely cosmetic — and wrong
+in principle. It false-positives on any path-like or `/`-prefixed
+content.
+
+**Fix shape**: replace the `startsWith` check with literal `false`. The
+slash-command render path stops being used; user messages render with
+their normal wrapper and action buttons.
+
+**Upstream issue**: [#49155](https://github.com/anthropics/claude-code/issues/49155)
+
+---
+
+## Patch D — chain walker bridges compaction boundaries via `logicalParentUuid`
+
+**Symptom**: `claude --resume <session-id>` and the in-VSCode rewind UI
+display messages from days ago instead of the most recent conversation —
+hours of recent work appear lost, even though the JSONL on disk contains
+them.
+
+**Root cause**: the compact stitch (`type:"system",
+subtype:"compact_boundary"`) is written with `parentUuid: null` and the
+actual pre-compact predecessor stored in `logicalParentUuid`. The
+chain-walking code in `extension.js` follows `parentUuid` only — so any
+read path that reconstructs the conversation by walking backwards from
+the last message stops at the boundary, even though the pre-compact
+transcript is intact on disk.
+
+The architecture justifies a read-side workaround: the API context is
+bounded independently of `parentUuid` topology by
+`getMessagesAfterCompactBoundary`, which scans for the boundary marker.
+So adding a `logicalParentUuid` fallback to the chain walker is safe —
+it doesn't blow up the API context, only restores UI/fork visibility.
+
+**Fix shape**: there are **two near-identical inline parentUuid walkers**
+in `extension.js`. Both need the same bridge:
+
+```diff
+- <x> = <x>.parentUuid ? <map>.get(<x>.parentUuid) : void 0
++ <x> = <x>.parentUuid ? <map>.get(<x>.parentUuid)
++                       : (<x>.logicalParentUuid ? <map>.get(<x>.logicalParentUuid) : void 0)
+```
+
+Do **not** patch `getTranscript` (a method on the session class) — it
+already has the `K=!1` opt-in fallback used by `forkSession`.
+
+**Upstream issue**: [#46603](https://github.com/anthropics/claude-code/issues/46603)
+
+---
+
+## Patch E — title resolver puts `firstPrompt` ahead of `lastPrompt`
+
+**Symptom**: a session's displayed title drifts over time to "whatever
+the user most recently typed" instead of "what the conversation is
+about." Long-running sessions accumulate titles like
+`"thanks"` or `"can you check this"` even though the conversation was
+originally about a totally different topic.
+
+**Root cause**: the session-list metadata parser resolves a title via
+the chain:
+
+    customTitle || aiTitle || lastPrompt || summary || firstPrompt(head)
+
+`lastPrompt` outranking `firstPrompt(head)` causes title drift. The
+correct order has `firstPrompt(head)` ahead — `lastPrompt` should be a
+last-resort.
+
+**Fix shape**: there are **two near-identical resolver chains** in
+`extension.js`. Swap the order at each so `firstPrompt` appears before
+`lastPrompt`:
+
+```diff
+- <H> || <X>(src,"lastPrompt") || <X>(src,"summary") || <FP>
++ <H> || <FP> || <X>(src,"summary") || <X>(src,"lastPrompt")
+```
+
+(One site has `firstPrompt` as a precomputed variable; the other has it
+as a direct call. Both flip the same way.)
+
+**Upstream issue**: [#32150](https://github.com/anthropics/claude-code/issues/32150)
+
+---
+
+## Patch F — session rename writes propagate through `sessionStates` Map
+
+**Symptom**: renaming a session via the sidebar pencil icon shows the new
+title briefly, then it flips back to the previous title — typically when
+the user switches sessions, or any other event that triggers a
+session-states broadcast.
+
+**Root cause** (traced via CDP signal-write spies): the extension's
+`sessionStates` Map is the source of truth for `broadcastSessionStates()`
+payloads. Its only writer is `updateSessionState(sessionId, state, title)`
+on the manager class, which the chat panel's per-session reactive
+triggers via the `update_session_state` message. The rename path doesn't
+update the Map: `q8.renameSession` (the message handler) just delegates
+to `m1.renameSession` (storage class) → JSONL write → return. Neither
+layer touches `sessionStates`, calls `broadcastSessionStates()`, or
+notifies any other component.
+
+For panel-triggered renames the per-session reactive happens to fire on
+`summary.value` change and re-aligns the Map as a side effect.
+**Sidebar-driven renames have no such reactive** — and the sidebar's own
+`q8` instance is constructed in `resolveSessionListView` with `void 0`
+for the `onSessionStateChanged` callback slot, so even if the sidebar's
+webview *did* send `update_session_state`, the manager would never
+receive it.
+
+After a sidebar rename, the Map still holds the previous title. Any
+subsequent `broadcastSessionStates()` (focus change via `setActivePanel`,
+busy-state flip on any session, etc.) sends a `session_states_update`
+carrying the stale title. The sidebar's update handler in the webview
+unconditionally writes `N.summary.value = O.title` if `O.title` is
+truthy, overwriting the just-renamed local signal.
+
+**Fix shape** (five splices in `extension.js`):
+
+1. **Site 1+3 (`updateSessionState` preserves missing fields + writes
+   `panel.title` directly)**: the manager method becomes:
+
+   ```diff
+     updateSessionState(sessionId, state, title) {
+   +   const prev = this.sessionStates.get(sessionId);
+       this.sessionStates.set(sessionId, {
+         sessionId,
+   -     state, title
+   +     state: state != null ? state : (prev?.state ?? "idle"),
+   +     title: title != null ? title : prev?.title,
+       });
+       this.broadcastSessionStates();
+   +   if (title != null) {
+   +     const pnl = this.sessionPanels.get(sessionId);
+   +     if (pnl) pnl.title = title;        // bypass webview-reactive plumbing
+   +   }
+     }
+   ```
+
+2. **Site 2 (`q8.renameSession` invokes `onSessionStateChanged`)**: after
+   the storage-layer write succeeds, push the new title into the
+   manager's Map and trigger a broadcast:
+
+   ```diff
+     async renameSession(sessionId, title, isAi) {
+   -   return {
+   -     type: "rename_session_response",
+   -     skipped: await (await m1.load(this.cwd, this.logger))
+   -       .renameSession(sessionId, title, isAi),
+   -   };
+   +   const skipped = await (await m1.load(this.cwd, this.logger))
+   +     .renameSession(sessionId, title, isAi);
+   +   if (!skipped) this.onSessionStateChanged?.(sessionId, undefined, title);
+   +   return { type: "rename_session_response", skipped };
+     }
+   ```
+
+3. **Sidebar `q8` ctor wires `onSessionStateChanged`**: the sidebar
+   instance is constructed without the callback. Wire a minimal
+   forwarder:
+
+   ```diff
+     new q8(/* … */, /*panel*/ undefined, () => this.broadcastUsageUpdate(),
+   -        // sidebar omits isFullEditor + onSessionStateChanged
+   +        /*isFullEditor*/ false,
+   +        (id, state, title) => this.updateSessionState(id, state, title));
+   ```
+
+4. **F.2 — drop title at the `update_session_state` boundary**: the
+   webview reactive sends a title field, but the title channel should
+   only be authoritative on the rename path. Drop it at the message
+   handler so panel reactives can no longer clobber the Map with stale
+   panel-local `summary.value`:
+
+   ```diff
+     if (V.request.type === "update_session_state")
+       return this.onSessionStateChanged?.(
+         V.request.sessionId, V.request.state,
+   -     V.request.title
+   +     void 0
+       ), { type: "update_session_state_response" };
+   ```
+
+   After F.2, only `q8.renameSession` (Site 2) ever pushes a title into
+   the Map.
+
+**Why F.2 and the direct `panel.title` write are needed**: panels don't
+have the `sessionStates → summary.value` bridge that the sidebar's `Te1`
+component has. Panel `summary.value` for any session it isn't actively
+displaying stays at the initial-load value. The panel's per-session
+reactive `K4(()=>{Z.updateSessionState(sessionId, state, Y.summary.value)})`
+fires on busy-state flips and sends `update_session_state` carrying that
+**stale** title. F.2 drops the title at the boundary so this doesn't
+clobber. F.3 (the `panel.title` direct write) compensates for the same
+gap on the read side: with no panel-bridge, the `renameTab` reactive
+never fires for sidebar-driven renames, so the manager has to update
+`panel.title` itself.
+
+**Upstream issue**: [#53942](https://github.com/anthropics/claude-code/issues/53942)
+
+---
+
+## Patch G — forked session appears in sidebar without sending a message
+
+**Symptom**: forking a session creates the new JSONL on disk, but the
+new session doesn't appear in the sidebar list until the user sends a
+message in it. Sending a message triggers the new session's busy state,
+which propagates through the `sessionStates` Map to the sidebar, which
+then re-fetches the session list.
+
+**Root cause**: same architectural shape as Patch F — the sidebar's
+`Te1` component re-fetches the session list (`$.listSessions()`) only
+when its `G.length > 0` `useEffect` fires, where `G` is built from
+broadcast Map entries that aren't in `Vn.sessions`. The fork has no Map
+entry until the new session's first state change.
+
+**Fix shape** (two splices in `extension.js`):
+
+1. **G.1 — panel ctor callback supports skip-bookkeeping flag**: the
+   panel callback wired in `setupPanel` does panel-mapping bookkeeping
+   (`sessionPanels.set(forkSid, panel); sessionPanels.delete(sourceSid)`)
+   that's wrong when called at fork-handler time — the panel still owns
+   the source session at that point, the fork hasn't been activated yet.
+   Add a 4th arg to skip bookkeeping:
+
+   ```diff
+   - (sid, state, title) => {
+   + (sid, state, title, skipMapping) => {
+       this.updateSessionState(sid, state, title);
+   +   if (skipMapping) return;
+       for (const [z, L] of this.sessionPanels)
+         if (L === panel && z !== sid) this.sessionPanels.delete(z);
+       if (this.sessionPanels.set(sid, panel), panel.active)
+         this.activeSessionId = sid;
+     }
+   ```
+
+2. **G.2 — `fork_conversation` handler pushes Map entry with source's
+   title**: the wrinkle is that the Map title must agree with what the
+   sidebar will load from JSONL via the title resolver, otherwise the
+   sidebar's `sessionStates → summary.value` bridge overwrites the
+   JSONL-derived title with the placeholder. Patch A's fork-time
+   `custom-title` injection inherits the source's `customTitle` /
+   `aiTitle` to the fork's JSONL — so we read the source's metadata and
+   use that:
+
+   ```diff
+   - case "fork_conversation":
+   -   return {
+   -     type: "fork_conversation_response",
+   -     sessionId: await (await m1.load(this.cwd, this.logger))
+   -       .forkSession(req.forkedFromSession, req.resumeSessionAt),
+   -   };
+   + case "fork_conversation": {
+   +   const storage = await m1.load(this.cwd, this.logger);
+   +   const sourceSid = req.forkedFromSession;
+   +   const newSid = await storage.forkSession(sourceSid, req.resumeSessionAt);
+   +   let title = "";
+   +   try {
+   +     const lines = (await fs.promises.readFile(
+   +       path.join(d5(storage.projectRoot), `${sourceSid}.jsonl`), "utf8"
+   +     )).split("\n");
+   +     let custom = "", ai = "";
+   +     for (const line of lines) {
+   +       if (!line) continue;
+   +       try {
+   +         const m = JSON.parse(line);
+   +         if (m.type === "custom-title" && m.customTitle) custom = m.customTitle;
+   +         if (m.type === "ai-title" && m.aiTitle) ai = m.aiTitle;
+   +       } catch (_) {}
+   +     }
+   +     title = custom || ai;
+   +   } catch (_) {}
+   +   if (!title) title = "Forked conversation";
+   +   this.onSessionStateChanged?.(newSid, "idle", title, true /* skipMapping */);
+   +   return { type: "fork_conversation_response", sessionId: newSid };
+   + }
+   ```
+
+   The `fs`, `path`, and `projectRoot` resolver names drift between
+   releases (e.g. `R1`/`O1`/`d5` on 2.1.120 → `W1`/`O1`/`n5` on 2.1.121).
+   The version-tolerant apply script discovers them from the storage
+   class's own `renameSession` (which has a fixed structural shape
+   exposing all three).
+
+**Upstream issue**: [#53942 (follow-up comment)](https://github.com/anthropics/claude-code/issues/53942#issuecomment-4332593160)
+
+---
+
+## On the architectural commonality of F + G
+
+Patches F.2, F.3, G.1, and G.2 are all symptoms of the same gap: chat
+panel webviews don't have the `sessionStates → summary.value` bridge that
+the sidebar's `Te1` component has. The bridge is a one-`useEffect`
+fragment that iterates incoming `sessionStates` broadcast entries and
+syncs the Vn-instance's per-session `summary.value` signals to match.
+
+Adding the bridge to the panel webview would obsolete most of F and G —
+the panel's `renameTab` reactive would fire correctly on cross-webview
+renames, the panel's per-session `update_session_state` reactive would
+read fresh titles instead of stale local copies, and forks could be
+discovered via the standard placeholder-mechanism without wrestling with
+panel-mapping bookkeeping.
+
+Until that happens upstream, F.2/F.3/G are extension-side bypasses for
+the missing webview bridge.
