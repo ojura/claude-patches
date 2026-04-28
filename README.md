@@ -52,50 +52,64 @@ claude-patches/
 
 ## Usage
 
-### Quickest path: prebuilt exists for your version
+### Install as a Claude Code skill (recommended)
+
+One-time setup (~30 seconds):
 
 ```sh
-# Look up your installed extension version, e.g. 2.1.121
-python3 prebuilt/2.1.121/apply.py
-```
-
-That's it. The script auto-detects the extension dir, applies all 14
-splices (A through G), and validates with `node --check`. Idempotent
-(re-running is a no-op via signature detection). Use `--force` to
-restore from `.bak` files and re-apply unconditionally.
-
-### Your version isn't in `prebuilt/` yet
-
-You have two options:
-
-**Option A — version-tolerant fallback for F+G only**:
-
-```sh
-python3 skill/apply-patch-fg.py
-```
-
-Discovers anchors structurally for Patches F and G. Patches A–E still
-need the manual skill walk-through (see `skill/SKILL.md`).
-
-**Option B — file an issue or wait for a maintainer**:
-
-When a maintainer with push access patches the new version, they synthesize
-a prebuilt via `util/build-prebuilt.py` (see *For maintainers* below) and
-push it to this repo. After that, you get the quickest path above.
-
-### As a Claude Code skill
-
-Symlink the skill into your local skill directory:
-
-```sh
+git clone https://github.com/ojura/claude-patches ~/claude-patches
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skill" ~/.claude/skills/patch-claude
+ln -s ~/claude-patches/skill ~/.claude/skills/patch-claude
 ```
 
-Then in Claude Code: `/patch-claude`. The skill checks the repo
-for a prebuilt matching your installed version; if found it just runs
-that. Otherwise it walks through the structural-locator instructions
-in `SKILL.md`.
+Then in any Claude Code session: `/patch-claude`. One slash-command
+applies the patches, end to end. The skill:
+
+- **Self-updates** on each invocation (fast-forwards your local clone
+  from `origin/main`; aborts cleanly if you have uncommitted local
+  changes or non-FF state, instead of silently merging).
+- **Auto-detects which extension install to patch** — when invoked
+  from inside an IDE-hosted Claude Code session, `CLAUDE_CODE_EXECPATH`
+  points directly at the running install (works regardless of which
+  IDE: VS Code, Antigravity, Cursor, VSCodium, etc.). Falls back to
+  globbing across `~/.<ide>/extensions/` if the env var isn't set.
+- **Fetches and runs the prebuilt** for your installed version from
+  this repo. The prebuilt is idempotent (detects an embedded
+  `pfg-v1` signature and no-ops if patches are already applied) and
+  byte-stable verified at synthesis time.
+- **Falls back to manual per-patch synthesis** if no prebuilt exists
+  yet for your version. After successful manual application, the
+  skill prompts to synthesize a new prebuilt and push it back to the
+  repo so the next user with that version skips synthesis.
+
+After the skill prints `PATCHES_APPLIED`, reload your VS Code window
+and you're done.
+
+The symlink layout means `git pull` in `~/claude-patches` updates the
+skill in-place. Multi-machine: clone the repo on each box and symlink
+identically — the self-update step keeps them all in sync.
+
+### Manual application (no Claude Code installed)
+
+If your installed extension version has a prebuilt in this repo, you
+can run it directly:
+
+```sh
+VER=$(ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 \
+        | sort -V | tail -1 \
+        | sed 's/.*anthropic.claude-code-//; s/-linux-x64$//')
+curl -fsSL "https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py" \
+  | python3
+```
+
+The script auto-detects your extension dir (across IDE variants),
+applies all 14 splices (Patches A–G), and validates with `node --check`.
+Idempotent. Use `--force` to restore from `.bak` files and re-apply
+unconditionally.
+
+If your version isn't in `prebuilt/<VER>/`, file an issue and either
+wait for a maintainer to synthesize one or use the Claude Code skill
+above (which can synthesize per-version on the fly).
 
 ## For maintainers (push access)
 
