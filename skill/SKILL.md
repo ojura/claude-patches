@@ -79,7 +79,20 @@ below; let `VER` refer to the version string (e.g. `2.1.121`).
 A complete prebuilt covering **all patches A through G** lives in
 [ojura/claude-patches](https://github.com/ojura/claude-patches) under
 `prebuilt/<VER>/apply.py`. If one exists for `VER`, that's the entire
-patch operation in one command:
+patch operation in one command.
+
+**Just run it.** Do not pre-probe state first — no checking for `.bak`
+files, no grepping for verification anchors, no inspecting whether
+patches are already applied. The prebuilt is idempotent and
+self-validating: it detects the `pfg-v1` signature and prints
+"Already patched. Nothing to do." if so, or applies cleanly if not.
+Probing first wastes a turn and tells you nothing the prebuilt won't
+say in its output. (And note: the verification `grep` snippets in
+Steps 3–9 are written against the manual splices with placeholder
+param names like `V,K,B`; the prebuilt operates on the actual
+minified names from the live version, so those greps will return `0`
+on prebuilt-applied code even though everything is in fact patched.
+Trust the `pfg-v1` signature, not the manual-path greps.)
 
 ```sh
 URL="https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py"
@@ -92,8 +105,9 @@ else
 fi
 ```
 
-If the prebuilt exists and runs cleanly: **the skill is complete**.
-Reload the VSCode window and you're done.
+If the prebuilt exists and runs cleanly (either applies fresh or
+reports "Already patched"): **the skill is complete**. Reload the
+VSCode window and you're done.
 
 If no prebuilt exists for `VER`, proceed through Steps 2–9 to apply
 each patch manually. Once all seven patches are applied successfully,
