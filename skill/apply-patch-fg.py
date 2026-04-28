@@ -176,7 +176,7 @@ def main():
                 f"from. Refusing to apply on top of an unknown patched state. "
                 f"To upgrade: reinstall the extension OR restore from "
                 f"extension.js.bak (or whatever pre-everything backup you "
-                f"have), re-run /patch-antigravity to apply A–E, then re-run "
+                f"have), re-run /patch-claude to apply A–E, then re-run "
                 f"this script to apply F–G fresh."
             )
         if force:

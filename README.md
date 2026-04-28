@@ -30,7 +30,7 @@ See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 claude-patches/
 ├── skill/
 │   ├── SKILL.md             # Anthropic-style skill instructions for Claude Code,
-│   │                        # used by the patch-antigravity skill at ~/.claude/skills/
+│   │                        # used by the patch-claude skill at ~/.claude/skills/
 │   └── apply-patch-fg.py    # version-tolerant apply script for Patches F and G;
 │                            # discovers bundle-globals (storage class, fs/path/
 │                            # projectRoot resolver) by structural anchors. Used
@@ -88,10 +88,10 @@ Symlink the skill into your local skill directory:
 
 ```sh
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skill" ~/.claude/skills/patch-antigravity
+ln -s "$(pwd)/skill" ~/.claude/skills/patch-claude
 ```
 
-Then in Claude Code: `/patch-antigravity`. The skill checks the repo
+Then in Claude Code: `/patch-claude`. The skill checks the repo
 for a prebuilt matching your installed version; if found it just runs
 that. Otherwise it walks through the structural-locator instructions
 in `SKILL.md`.

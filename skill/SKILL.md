@@ -1,5 +1,5 @@
 ---
-name: patch-antigravity
+name: patch-claude
 description: Reapply Juraj's seven local patches to a newly updated anthropic.claude-code extension in ~/.antigravity/extensions/. Use when the user says "the extension updated, reapply patches" or similar. Finds the latest version, backs up files, reapplies all seven patches, verifies each one.
 ---
 

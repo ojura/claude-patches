@@ -33,7 +33,7 @@ patched live extension dir          maintainer tool             new prebuilt
 
 1. **Apply patches A–G locally first.**
 
-   Either via the Claude Code skill (`/patch-antigravity`) or by hand
+   Either via the Claude Code skill (`/patch-claude`) or by hand
    following [`skill/SKILL.md`](skill/SKILL.md). End state: your
    extension dir has the patched `extension.js`, `webview/index.js`,
    `webview/index.css` plus pristine `*.bak` backups of each.
