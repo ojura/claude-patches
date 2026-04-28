@@ -21,30 +21,48 @@ Pick the newest. Confirm with the user only if there are multiple recent ones
 and it's ambiguous which is active. Let `EXT` refer to its absolute path
 below; let `VER` refer to the version string (e.g. `2.1.121`).
 
-### Step 1b — check for a prebuilt at ojura/claude-patches
+### Step 1b — check for a comprehensive prebuilt at ojura/claude-patches
 
-Patches F and G are large enough that a frozen, version-pinned apply
-script lives in [ojura/claude-patches](https://github.com/ojura/claude-patches)
-under `prebuilt/<VER>/apply.py`. If one exists for `VER`, use it instead
-of synthesizing the patch from scratch:
+A complete prebuilt covering **all patches A through G** lives in
+[ojura/claude-patches](https://github.com/ojura/claude-patches) under
+`prebuilt/<VER>/apply.py`. If one exists for `VER`, that's the entire
+patch operation in one command:
 
 ```sh
 URL="https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py"
-curl -fsSL -o /tmp/apply-fg.py "$URL" && \
-  echo "Prebuilt found for $VER" || \
-  echo "No prebuilt for $VER — will synthesize via Step 8/9 below"
+if curl -fsSL -o /tmp/apply.py "$URL"; then
+  echo "Prebuilt found for $VER — applying"
+  python3 /tmp/apply.py
+  # done — skip the rest of this skill
+else
+  echo "No prebuilt for $VER yet — will synthesize via Steps 2–9 below"
+fi
 ```
 
-If a prebuilt exists, skip Steps 8 and 9 and just run
-`python3 /tmp/apply-fg.py` after the other patches (A–E) are done. Patches
-A–E are already structural-locator patches in this skill — they don't
-need a prebuilt and apply across versions unchanged.
+If the prebuilt exists and runs cleanly: **the skill is complete**.
+Reload the VSCode window and you're done.
 
-If no prebuilt exists for `VER`, synthesize via Steps 8 and 9 below
-(or via `skill/apply-patch-fg.py` from the same repo, which discovers
-anchors structurally). After successful synthesis, commit
-`prebuilt/<VER>/apply.py` to the repo (just copy the synthesized script)
-so the next user with `VER` can skip synthesis.
+If no prebuilt exists for `VER`, proceed through Steps 2–9 to apply
+each patch manually. Once all seven patches are applied successfully,
+**synthesize a prebuilt** via the maintainer tool and push it to the
+repo so the next user with `VER` can skip the synthesis:
+
+```sh
+git clone https://github.com/ojura/claude-patches /tmp/claude-patches
+cd /tmp/claude-patches
+python3 util/build-prebuilt.py "$EXT" prebuilt/$VER
+git add prebuilt/$VER/apply.py
+git commit -m "prebuilt/$VER: synthesized $(date +%Y-%m-%d)"
+git push
+```
+
+`util/build-prebuilt.py` diffs each patched file against its `.bak`,
+extracts the splice pairs, and writes a self-contained apply script that
+validates byte-stable against the live patched files before being saved.
+
+(Patches F and G are also available as a version-tolerant fallback at
+`skill/apply-patch-fg.py` — useful if you want to script just F+G across
+multiple versions without per-version commit overhead.)
 
 ## Step 2 — back up the three target files
 
