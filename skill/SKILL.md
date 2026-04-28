@@ -11,6 +11,52 @@ changes variable names between releases, so do NOT blindly search-and-replace
 literal strings from prior versions — locate the pattern structurally, then
 edit.
 
+## Step 0 — self-update the skill (fast-forward only)
+
+If this skill directory is a symlink to a clone of `ojura/claude-patches`,
+fast-forward the clone before doing anything else. This keeps the skill
+in sync with whatever a maintainer pushed from another machine.
+
+```sh
+SKILL_DIR=$(readlink -f ~/.claude/skills/patch-claude 2>/dev/null) || SKILL_DIR=
+if [ -n "$SKILL_DIR" ] && [ -d "$SKILL_DIR/../.git" ] || [ -d "$SKILL_DIR/.git" ]; then
+  REPO_ROOT="$(git -C "$SKILL_DIR" rev-parse --show-toplevel 2>/dev/null)"
+fi
+if [ -n "$REPO_ROOT" ]; then
+  echo "Self-update: fetching $REPO_ROOT..."
+  git -C "$REPO_ROOT" fetch --quiet origin
+  if git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null \
+     && [ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$(git -C "$REPO_ROOT" rev-parse origin/main)" ]; then
+    if git -C "$REPO_ROOT" diff --quiet HEAD && git -C "$REPO_ROOT" diff --cached --quiet; then
+      git -C "$REPO_ROOT" merge --ff-only --quiet origin/main && \
+        echo "  fast-forwarded to $(git -C "$REPO_ROOT" rev-parse --short HEAD)" && \
+        echo "  RESTART the skill — re-read SKILL.md from disk to pick up changes."
+      exit 0
+    else
+      echo "  ABORT: clone has uncommitted local changes; resolve before retrying."
+      exit 1
+    fi
+  elif ! git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    echo "  ABORT: local clone has commits not in origin/main (would require non-FF merge)."
+    echo "  Resolve manually: cd $REPO_ROOT && git status; rebase or push your work first."
+    exit 1
+  else
+    echo "  already up to date with origin/main"
+  fi
+else
+  echo "Self-update skipped: skill is not a symlinked git clone."
+  echo "  (Optional) install via: rm -rf ~/.claude/skills/patch-claude;"
+  echo "  git clone https://github.com/ojura/claude-patches ~/claude-patches;"
+  echo "  ln -s ~/claude-patches/skill ~/.claude/skills/patch-claude"
+fi
+```
+
+After a successful fast-forward, **stop and re-invoke the skill** so you
+read the updated `SKILL.md` from disk. The script above exits with code 0
+on FF success and code 1 on abort (uncommitted changes or non-FF state).
+On "already up to date" or "not a symlinked clone", the rest of this
+skill executes as normal.
+
 ## Step 1 — find the target version
 
 ```
