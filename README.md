@@ -78,9 +78,7 @@ applies the patches, end to end. The skill:
   `pfg-v1` signature and no-ops if patches are already applied) and
   byte-stable verified at synthesis time.
 - **Falls back to manual per-patch synthesis** if no prebuilt exists
-  yet for your version. After successful manual application, the
-  skill prompts to synthesize a new prebuilt and push it back to the
-  repo so the next user with that version skips synthesis.
+  yet for your version.
 
 After the skill prints `PATCHES_APPLIED`, reload your VS Code window
 and you're done.
