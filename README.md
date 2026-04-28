@@ -109,6 +109,34 @@ If your version isn't in `prebuilt/<VER>/`, file an issue and either
 wait for a maintainer to synthesize one or use the Claude Code skill
 above (which can synthesize per-version on the fly).
 
+## Uninstall
+
+To restore the unpatched extension, copy each `.bak` back over its
+patched counterpart. The apply script writes a backup of every file it
+touches before patching, so this is always reversible:
+
+```sh
+EXT=$(ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 \
+        | sort -V | tail -1)
+cp "$EXT/extension.js.bak"        "$EXT/extension.js"
+cp "$EXT/webview/index.js.bak"    "$EXT/webview/index.js"
+cp "$EXT/webview/index.css.bak"   "$EXT/webview/index.css"
+```
+
+Reload VS Code. The extension is now back to whatever Open VSX shipped.
+
+To also remove the Claude Code skill installation:
+
+```sh
+rm ~/.claude/skills/patch-claude
+rm -rf ~/claude-patches              # optional: delete the local clone too
+```
+
+(VS Code auto-updates the extension occasionally. When it does, your
+`.bak` files stay in the old version's directory, which gets removed
+when the IDE garbage-collects old extensions. The new version's directory
+has no `.bak` until you patch it.)
+
 ## For maintainers (push access)
 
 If you have push access and need to add a prebuilt for a new extension
