@@ -47,7 +47,7 @@ def extract(file_path: str, bak_path: str):
 
 PREBUILT_TEMPLATE = '''#!/usr/bin/env python3
 """
-Prebuilt patch apply for anthropic.claude-code {version} (Antigravity).
+Prebuilt patch apply for the anthropic.claude-code VS Code extension {version}.
 
 Patches A through G applied as literal string replacements verified
 byte-stable against the {version} bundle. Synthesized by
@@ -57,21 +57,50 @@ and its pre-patch backups.
 Usage:
   python3 apply.py [/path/to/extension/dir] [--force]
 
-Default extension dir: ~/.antigravity/extensions/anthropic.claude-code-{version}-linux-x64
+Default: auto-discovers an installed {version} extension under
+~/.<ide>/extensions/ for any IDE that pulls from Open VSX (VS Code,
+Antigravity, Cursor, VSCodium, etc.).
 
 Idempotent: re-running on already-patched files is a no-op (detects the
 pfg-v1 signature in extension.js). With --force, restores from .bak files
 and re-applies.
 """
+import glob
 import os
 import shutil
 import subprocess
 import sys
 
 VERSION = "{version}"
-DEFAULT_EXT_DIR = os.path.expanduser(
-    "~/.antigravity/extensions/anthropic.claude-code-{version}-linux-x64"
-)
+
+
+def find_default_ext_dir():
+    # Strongest signal: CLAUDE_CODE_EXECPATH (set by the IDE-hosted Claude
+    # Code CLI) points at the extension install of the running session.
+    execpath = os.environ.get("CLAUDE_CODE_EXECPATH", "")
+    if execpath:
+        target = f"anthropic.claude-code-{{VERSION}}-linux-x64"
+        parts = execpath.split("/")
+        for i, p in enumerate(parts):
+            if p == target:
+                return "/" + "/".join(parts[1:i+1])
+
+    pattern = os.path.expanduser(
+        f"~/.*/extensions/anthropic.claude-code-{{VERSION}}-linux-x64"
+    )
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        sys.exit(
+            f"Multiple installs of {{VERSION}} detected — pass the path "
+            f"explicitly, or invoke from inside the IDE you want to patch "
+            f"(CLAUDE_CODE_EXECPATH disambiguates):\\n  "
+            + "\\n  ".join(matches)
+        )
+    return matches[0]
+
+
 SIGNATURE = "/*pfg-v1*/"
 
 # Each entry: (file_relpath, [(old, new), (old, new), ...])
@@ -84,9 +113,12 @@ def main():
     if "--force" in args:
         force = True
         args = [a for a in args if a != "--force"]
-    ext_dir = args[0] if args else DEFAULT_EXT_DIR
-    if not os.path.isdir(ext_dir):
-        sys.exit(f"not a directory: {{ext_dir}}")
+    ext_dir = args[0] if args else find_default_ext_dir()
+    if not ext_dir or not os.path.isdir(ext_dir):
+        sys.exit(
+            f"could not locate an installed {{VERSION}} extension; pass the "
+            f"path explicitly or install it first"
+        )
 
     # Decide state by checking the signature in extension.js
     ext_js = os.path.join(ext_dir, "extension.js")

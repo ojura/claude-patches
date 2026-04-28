@@ -1,7 +1,8 @@
 # claude-patches
 
-Out-of-tree patches for the Antigravity build of the Anthropic Claude Code
-extension (`anthropic.claude-code-*-linux-x64`).
+Out-of-tree patches for the Anthropic Claude Code VS Code extension
+(`anthropic.claude-code-*-linux-x64`, distributed via the
+[Open VSX Registry](https://open-vsx.org/extension/Anthropic/claude-code)).
 
 These patches address seven user-visible bugs that, as of the current
 public releases, ship with the bundled extension. Each patch has a
@@ -98,9 +99,9 @@ in `SKILL.md`.
 
 ## For maintainers (push access)
 
-If you have push access and need to add a prebuilt for a new
-Antigravity release, see [MAINTAINER.md](MAINTAINER.md). The short
-version: apply patches A–G locally first, then
+If you have push access and need to add a prebuilt for a new extension
+release, see [MAINTAINER.md](MAINTAINER.md). The short version: apply
+patches A–G locally first, then
 `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>` synthesizes
 and byte-stability-validates a prebuilt apply script from the diff.
 
@@ -116,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/
 - Patches modify Anthropic's distributed bundle. Use at your own risk.
   No warranty.
 - The patches are tied to specific structural shapes; sufficiently
-  extensive Antigravity refactoring will break them. The version-tolerant
+  extensive upstream refactoring will break them. The version-tolerant
   script will refuse to write rather than corrupt the bundle.
-- Reload VSCode after applying. The extension host caches `extension.js`
+- Reload VS Code after applying. The extension host caches `extension.js`
   and won't pick up changes mid-session.

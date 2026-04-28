@@ -1,9 +1,9 @@
 ---
 name: patch-claude
-description: Reapply Juraj's seven local patches to a newly updated anthropic.claude-code extension in ~/.antigravity/extensions/. Use when the user says "the extension updated, reapply patches" or similar. Finds the latest version, backs up files, reapplies all seven patches, verifies each one.
+description: Reapply Juraj's seven local patches to a newly updated anthropic.claude-code VS Code extension. Auto-detects which IDE-hosted install is the running one via CLAUDE_CODE_EXECPATH. Use when the user says "the extension updated, reapply patches" or similar. Backs up files, reapplies all seven patches, verifies each one.
 ---
 
-# Reapply Antigravity extension patches
+# Reapply anthropic.claude-code extension patches
 
 Seven patches live out-of-tree and need to be reapplied every time the bundled
 `anthropic.claude-code-*-linux-x64` extension updates. The minified code
@@ -60,7 +60,14 @@ skill executes as normal.
 ## Step 1 — find the target version
 
 ```
-ls /home/juraj/.antigravity/extensions/ | grep '^anthropic.claude-code-.*-linux-x64$' | sort -V
+# Prefer CLAUDE_CODE_EXECPATH (set by the IDE-hosted Claude Code session)
+# — points directly at the running install. Fall back to a glob across
+# all known IDE extension dirs (~/.<ide>/extensions/) if unset.
+if [ -n "$CLAUDE_CODE_EXECPATH" ]; then
+  EXT="$(dirname "$(dirname "$(dirname "$CLAUDE_CODE_EXECPATH")")")"
+else
+  ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 2>/dev/null | sort -V | tail -1
+fi
 ```
 
 Pick the newest. Confirm with the user only if there are multiple recent ones

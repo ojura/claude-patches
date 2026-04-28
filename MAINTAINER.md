@@ -1,7 +1,7 @@
 # Maintainer guide
 
 For people with push access to this repo who want to add a prebuilt for
-a new Antigravity release.
+a new extension release.
 
 ## When to synthesize a new prebuilt
 
@@ -49,7 +49,7 @@ patched live extension dir          maintainer tool             new prebuilt
    git clone https://github.com/ojura/claude-patches
    cd claude-patches
    python3 util/build-prebuilt.py \
-     ~/.antigravity/extensions/anthropic.claude-code-<VER>-linux-x64 \
+     ~/.<ide>/extensions/anthropic.claude-code-<VER>-linux-x64 \
      prebuilt/<VER>
    ```
 
@@ -83,8 +83,8 @@ patched live extension dir          maintainer tool             new prebuilt
   diff regions).
 - The diff has the expected splice count: 12 in `extension.js`, 1 in
   `webview/index.js`, 1 in `webview/index.css`. Different counts mean
-  either Antigravity restructured something or you applied the
-  patches wrong. Investigate before pushing.
+  either upstream restructured something or you applied the patches
+  wrong. Investigate before pushing.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
   say "Already patched (signature /\*pfg-v1\*/ present). Nothing to
@@ -123,9 +123,8 @@ on someone else's clean install. The byte-stability check catches
 this: if the synthesized script doesn't reproduce the live patched
 file, something captured into the diff that shouldn't have.
 
-In practice this hasn't happened (Antigravity bundles are
-deterministic), but the check is the cheap insurance against it ever
-shipping.
+In practice this hasn't happened (upstream bundles are deterministic),
+but the check is the cheap insurance against it ever shipping.
 
 ## util/ scripts: what they don't do
 
@@ -139,5 +138,5 @@ shipping.
   running.
 - They don't infer the version from the bundle contents — only from
   the directory name (`anthropic.claude-code-<VER>-linux-x64`). If
-  Antigravity ever changes that naming convention, update
+  upstream ever changes that naming convention, update
   `util/build-prebuilt.py` to extract the version differently.

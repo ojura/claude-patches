@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Patches F (+F.2/F.3) and G for anthropic.claude-code (Antigravity).
+Patches F (+F.2/F.3) and G for the anthropic.claude-code VS Code extension.
 
 Version-tolerant: locates anchors via regex on structural shape rather than
 literal strings, so the same script applies to 2.1.120, 2.1.121, and any
@@ -25,7 +25,9 @@ Usage:
 
   --force     restore from .pre-patchFG.bak and re-apply unconditionally
 
-Default: latest installed version under ~/.antigravity/extensions/.
+Default: latest install discovered under ~/.<ide>/extensions/ for any IDE
+that pulls the extension from Open VSX (VS Code, Antigravity, Cursor,
+VSCodium, etc.).
 
 Patchset version: bump PATCHSET_VERSION below whenever the SPLICES change
 materially. Each successful application embeds the version signature
@@ -38,12 +40,52 @@ PATCHSET_VERSION = "1"
 PATCHSET_SIG = f"/*pfg-v{PATCHSET_VERSION}*/"
 
 
+def _version_from_path(p: str) -> str:
+    # ".../anthropic.claude-code-<VER>-linux-x64/extension.js" → "<VER>"
+    parent = os.path.basename(os.path.dirname(p))
+    return parent[len("anthropic.claude-code-"):-len("-linux-x64")]
+
+
+def _version_key(v: str):
+    return tuple(int(x) if x.isdigit() else x for x in v.split("."))
+
+
 def find_default_extension():
+    # Strongest signal: when Claude Code (the CLI) is invoked from inside
+    # an IDE, its extension host sets CLAUDE_CODE_EXECPATH pointing at the
+    # specific install hosting the running session. That's exactly the
+    # install we want to patch — guaranteed unambiguous even with multiple
+    # IDEs installed.
+    execpath = os.environ.get("CLAUDE_CODE_EXECPATH", "")
+    if execpath:
+        parts = execpath.split("/")
+        for i, p in enumerate(parts):
+            if p.startswith("anthropic.claude-code-") and p.endswith("-linux-x64"):
+                return "/" + "/".join(parts[1:i+1]) + "/extension.js"
+
+    # Fallback: glob ~/.<ide>/extensions/ across all known IDE variants
+    # (VS Code, Insiders, VSCodium, Antigravity, Cursor, etc.).
     pattern = os.path.expanduser(
-        "~/.antigravity/extensions/anthropic.claude-code-*-linux-x64/extension.js"
+        "~/.*/extensions/anthropic.claude-code-*-linux-x64/extension.js"
     )
-    matches = sorted(glob.glob(pattern))
-    return matches[-1] if matches else None
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    # Pick the latest version (semver-aware), then error out if that
+    # version is installed in multiple IDE dirs simultaneously
+    by_version = {}
+    for m in matches:
+        by_version.setdefault(_version_from_path(m), []).append(m)
+    latest = max(by_version, key=_version_key)
+    candidates = by_version[latest]
+    if len(candidates) > 1:
+        sys.exit(
+            f"Multiple installs of {latest} detected — pass the path "
+            f"explicitly, or invoke from inside the IDE you want to patch "
+            f"(CLAUDE_CODE_EXECPATH disambiguates):\n  "
+            + "\n  ".join(candidates)
+        )
+    return candidates[0]
 
 
 # Each rule: (label, regex_for_old, replacement_template)
