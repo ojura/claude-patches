@@ -137,10 +137,22 @@ fi
 
 ### Maintainer-only — synthesize and publish a prebuilt
 
-The steps below assume push access to `ojura/claude-patches`. If you
-are running this as a regular end-user, skip this section: you have
-patches applied locally and that is enough. **Only Juraj acts as the
-repo maintainer** unless told otherwise.
+The steps below assume push access to the upstream `claude-patches`
+repo. If you don't have that, skip this section: you have patches
+applied locally and that is enough.
+
+To check capability without guessing at identity, dry-run a push from
+the local clone (this just probes credentials; it doesn't actually
+push):
+
+```sh
+git -C "$(git -C ~/.claude/skills/patch-claude rev-parse --show-toplevel 2>/dev/null)" \
+    push --dry-run origin main 2>&1 | head -1
+```
+
+A successful dry-run (`Everything up-to-date` or a list of refs that
+would advance) means you can publish. An auth error means you can't —
+stop here.
 
 If `apply-patch-fg.py` succeeded as-is (preferred path):
 
