@@ -848,11 +848,13 @@ Report which version was patched and which files were touched, using
 markdown relative links. Remind the user to reload the VSCode window for the
 patches to take effect.
 
-Also summarize any drift observations from Steps 3–9: anchors that didn't
-match as written, structural shifts beyond pure variable renaming, and
-any verify-grep or other doc bugs in this SKILL.md you noticed during
-application. Do this proactively — don't wait to be asked. Then propose
-follow-up:
+Also summarize any drift observations from any earlier step (0 through 9):
+anchors that didn't match as written, structural shifts beyond pure
+variable renaming, prebuilt-fetch / install-locate / backup quirks,
+variable renames the F+G script auto-absorbed that future readers
+would benefit from knowing about, and any verify-grep or other doc
+bugs in this SKILL.md you noticed during application. Do this
+proactively — don't wait to be asked. Then propose follow-up:
 
 - If you have push access to `claude-patches` (the Step 0 dry-run probe
   already established this — `Everything up-to-date` or a list of
