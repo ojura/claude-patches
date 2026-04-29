@@ -31,11 +31,24 @@ This single bash block does three things in one round-trip:
 set -u
 
 # --- Step 0a: self-update via fast-forward, if symlinked-clone setup ---
-SKILL_DIR=$(readlink -f ~/.claude/skills/patch-claude 2>/dev/null || true)
+# Discover by repo origin URL, not by skill directory name — the user is
+# free to install the skill under any name (~/.claude/skills/patch-claude,
+# patch-antigravity, foo, ...). We scan all entries under ~/.claude/skills/
+# and pick whichever one resolves into a clone of ojura/claude-patches.
 REPO_ROOT=
-if [ -n "$SKILL_DIR" ]; then
-  REPO_ROOT="$(git -C "$SKILL_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-fi
+for entry in ~/.claude/skills/*; do
+  [ -e "$entry" ] || continue
+  target=$(readlink -f "$entry" 2>/dev/null) || continue
+  [ -d "$target" ] || continue
+  candidate=$(git -C "$target" rev-parse --show-toplevel 2>/dev/null) || continue
+  remote=$(git -C "$candidate" remote get-url origin 2>/dev/null) || continue
+  case "$remote" in
+    *ojura/claude-patches*|*ojura/claude-patches.git)
+      REPO_ROOT="$candidate"
+      break
+      ;;
+  esac
+done
 if [ -n "$REPO_ROOT" ]; then
   echo "Self-update: fetching $REPO_ROOT..."
   git -C "$REPO_ROOT" fetch --quiet origin
@@ -61,10 +74,9 @@ if [ -n "$REPO_ROOT" ]; then
     echo "  already up to date with origin/main"
   fi
 else
-  echo "Self-update skipped: skill is not a symlinked git clone."
-  echo "  (Optional) install via: rm -rf ~/.claude/skills/patch-claude;"
-  echo "  git clone https://github.com/ojura/claude-patches ~/claude-patches;"
-  echo "  ln -s ~/claude-patches/skill ~/.claude/skills/patch-claude"
+  echo "Self-update skipped: no symlink under ~/.claude/skills/ resolves to a clone of ojura/claude-patches."
+  echo "  (Optional) install via: git clone https://github.com/ojura/claude-patches ~/claude-patches;"
+  echo "  ln -s ~/claude-patches/skill ~/.claude/skills/<any-name>"
 fi
 
 # --- Step 0b: locate the target install ---
@@ -146,8 +158,8 @@ the local clone (this just probes credentials; it doesn't actually
 push):
 
 ```sh
-git -C "$(git -C ~/.claude/skills/patch-claude rev-parse --show-toplevel 2>/dev/null)" \
-    push --dry-run origin main 2>&1 | head -1
+# Uses $REPO_ROOT discovered in Step 0a.
+git -C "$REPO_ROOT" push --dry-run origin main 2>&1 | head -1
 ```
 
 A successful dry-run (`Everything up-to-date` or a list of refs that
@@ -525,7 +537,7 @@ ordering should not appear.
 ## Steps 8 & 9 — Patches F and G: USE THE SCRIPT
 
 ```sh
-python3 ~/.claude/skills/patch-claude/apply-patch-fg.py "$EXT/extension.js"
+python3 "$REPO_ROOT/skill/apply-patch-fg.py" "$EXT/extension.js"
 ```
 
 The script handles both F (+F.2 +F.3) and G (+G.1 +G.2). It locates
