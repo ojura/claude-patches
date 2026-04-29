@@ -120,12 +120,27 @@ fi
   it itself.
 - `ABORT: ...` → stop and surface the message to the user; don't try
   to "fix" the abort condition automatically.
-- `No prebuilt for $VER` → fall through to Steps 2–9 below, applying
-  each patch manually. After successful manual application,
-  **synthesize a prebuilt** via the maintainer tool and push it so the
-  next user with `VER` can skip the synthesis:
+- `No prebuilt for $VER` → apply the patches manually as follows:
+    1. **Patches A–E**: follow Steps 3–7 (per-splice manual application).
+    2. **Patches F and G**: do NOT splice manually. Run
+       `skill/apply-patch-fg.py` — it locates anchors via regex (so it
+       handles variable-name drift across releases automatically) and
+       embeds the `/*pfg-v1*/` signature comment that the prebuilt
+       relies on for idempotency. Steps 8 and 9 below describe the
+       splices structurally for reference only — invoke the script.
+    3. **Synthesize a prebuilt** so the next user with `VER` can skip
+       all of the above. Critical precondition: the live extension
+       must contain `/*pfg-v1*/` before invoking `build-prebuilt.py`,
+       otherwise the synthesized prebuilt will be unsigned and a
+       subsequent run of `apply-patch-fg.py` would have to inject the
+       signature redundantly. Verify with
+       `grep -c '/\*pfg-v1\*/' $EXT/extension.js` — must be `1`.
 
 ```sh
+# Precondition: signature must already be in live (apply-patch-fg.py ran)
+grep -q '/\*pfg-v1\*/' "$EXT/extension.js" || \
+    { echo "ABORT: signature missing — run apply-patch-fg.py first"; exit 1; }
+
 git clone https://github.com/ojura/claude-patches /tmp/claude-patches
 cd /tmp/claude-patches
 python3 util/build-prebuilt.py "$EXT" prebuilt/$VER
@@ -137,11 +152,9 @@ git push
 `util/build-prebuilt.py` diffs each patched file against its `.bak`,
 extracts the splice pairs, and writes a self-contained apply script
 that validates byte-stable against the live patched files before being
-saved.
-
-(Patches F and G are also available as a version-tolerant fallback at
-`skill/apply-patch-fg.py` — useful if you want to script just F+G
-across multiple versions without per-version commit overhead.)
+saved. Because it diffs live-vs-`.bak`, anything in live (including
+the signature) becomes part of the prebuilt — so the signature must
+already be present in live at synthesis time.
 
 ---
 
@@ -476,7 +489,31 @@ grep -cE '\|\|[A-Za-z_$0-9]+\([^)]+\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A
 Both should be `>= 1` (site 1 + site 2). Old `lastPrompt`-then-`summary`
 ordering should not appear.
 
-## Step 8 — Patch F: rename writes propagate through `sessionStates` Map
+## Steps 8 & 9 — Patches F and G: USE THE SCRIPT
+
+```sh
+python3 ~/.claude/skills/patch-claude/apply-patch-fg.py "$EXT/extension.js"
+```
+
+The script handles both F (+F.2 +F.3) and G (+G.1 +G.2). It locates
+anchors via regex with named captures, so renamings like `m1`→`c1`
+(storage class) or `[z,L]`→`[z,A]` (sessionPanels destructure) are
+absorbed automatically. It also embeds the `/*pfg-v1*/` signature
+into `extension.js` after `updateSessionState(V,K,B){`, which
+`build-prebuilt.py` will then capture into the synthesized prebuilt.
+
+If the script reports anchors not matching uniquely, the bundle
+structure has shifted enough to break the regexes. Only then fall
+back to the manual splice descriptions in Step 8 (Patch F) and
+Step 9 (Patch G) below — and update the regexes in
+`apply-patch-fg.py` to cover the new shape before re-running the
+synthesis.
+
+After the script runs successfully, jump to Step 10.
+
+---
+
+## Step 8 — Patch F: rename writes propagate through `sessionStates` Map (manual reference)
 
 ### Why
 
@@ -695,7 +732,7 @@ grep -c ',!1,(H,D,O)=>{this.updateSessionState(H,D,O)})' $EXT/extension.js
 ```
 Each should be `1`.
 
-## Step 9 — Patch G: forked session appears in sidebar without sending a message
+## Step 9 — Patch G: forked session appears in sidebar without sending a message (manual reference)
 
 ### Why
 
