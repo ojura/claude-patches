@@ -310,7 +310,7 @@ The injected logic does three passes and one decision:
 # When applied: at most 1 occurrence (could be 0 if the test fork's head
 # happens to satisfy the parser without the rescue write, but the patch
 # itself is in the source as a single block).
-grep -c 'type:"custom-title",customTitle:_lp,sessionId:' $EXT/extension.js
+grep -c 'type:"custom-title",customTitle:_titleToWrite,sessionId:' $EXT/extension.js
 ```
 Expect `1` (the literal injection is present once in source — the `if`
 guard around it determines whether it runs at fork time).
@@ -486,7 +486,7 @@ of "what the conversation is about." Filed as
 There are two near-identical resolver sites in `extension.js`. Find them with:
 
 ```
-grep -oE 'L=H\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+' $EXT/extension.js
+grep -oE '[A-Za-z_$]{1,3}=H\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+' $EXT/extension.js
 grep -oE '\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+\([^)]+\)' $EXT/extension.js
 ```
 
@@ -515,7 +515,7 @@ Confirm exactly one occurrence of each old string before replacing.
 
 ```
 # Both new orderings present
-grep -c 'L=H||[A-Za-z_$0-9]\+||[A-Za-z_$0-9]\+([^)]\+,"summary")||[A-Za-z_$0-9]\+([^)]\+,"lastPrompt")' $EXT/extension.js
+grep -cE '[A-Za-z_$]{1,3}=H\|\|[A-Za-z_$0-9]+\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)' $EXT/extension.js
 grep -cE '\|\|[A-Za-z_$0-9]+\([^)]+\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)' $EXT/extension.js
 ```
 
@@ -847,6 +847,23 @@ the source had no `custom-title` or `ai-title`).
 Report which version was patched and which files were touched, using
 markdown relative links. Remind the user to reload the VSCode window for the
 patches to take effect.
+
+Also summarize any drift observations from Steps 3–9: anchors that didn't
+match as written, structural shifts beyond pure variable renaming, and
+any verify-grep or other doc bugs in this SKILL.md you noticed during
+application. Do this proactively — don't wait to be asked. Then propose
+follow-up:
+
+- If you have push access to `claude-patches` (the Step 0 dry-run probe
+  already established this — `Everything up-to-date` or a list of
+  advancing refs means yes), propose specific SKILL.md edits in the
+  same response and apply on confirmation.
+- If you don't, propose opening an issue at
+  https://github.com/ojura/claude-patches/issues with the version, the
+  patch ID (A–G), and a minimal repro grep.
+
+If nothing drifted and nothing was wrong, say so explicitly — silence
+is ambiguous.
 
 ## Notes
 
