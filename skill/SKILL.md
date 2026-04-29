@@ -127,14 +127,35 @@ fi
        handles variable-name drift across releases automatically) and
        embeds the `/*pfg-v1*/` signature comment that the prebuilt
        relies on for idempotency. Steps 8 and 9 below describe the
-       splices structurally for reference only — invoke the script.
-    3. **Synthesize a prebuilt** so the next user with `VER` can skip
-       all of the above. Critical precondition: the live extension
-       must contain `/*pfg-v1*/` before invoking `build-prebuilt.py`,
-       otherwise the synthesized prebuilt will be unsigned and a
-       subsequent run of `apply-patch-fg.py` would have to inject the
-       signature redundantly. Verify with
-       `grep -c '/\*pfg-v1\*/' $EXT/extension.js` — must be `1`.
+       splices structurally for reference only.
+    3. If the script reports anchors not matching uniquely, the
+       bundle structure has shifted enough to break its regexes.
+       End-user fallback: apply F+G manually from Step 8 and Step 9,
+       then **stop** — do not attempt the maintainer steps below.
+       Tell the user a maintainer will need to update the script
+       and publish a prebuilt for this version.
+
+### Maintainer-only — synthesize and publish a prebuilt
+
+The steps below assume push access to `ojura/claude-patches`. If you
+are running this as a regular end-user, skip this section: you have
+patches applied locally and that is enough. **Only Juraj acts as the
+repo maintainer** unless told otherwise.
+
+If `apply-patch-fg.py` succeeded as-is (preferred path):
+
+1. Verify the signature is in live:
+   `grep -c '/\*pfg-v1\*/' $EXT/extension.js` — must be `1`.
+2. Run `build-prebuilt.py`, commit, push.
+
+If `apply-patch-fg.py`'s regexes failed on this version:
+
+1. Update the regex anchors in `skill/apply-patch-fg.py` to cover
+   the new shape.
+2. Restore `extension.js` from `.bak` (or `.pre-patchFG.bak` if
+   present) and re-run the script — verify it now applies cleanly
+   AND embeds the signature.
+3. Commit the script change in the same push as the prebuilt.
 
 ```sh
 # Precondition: signature must already be in live (apply-patch-fg.py ran)
@@ -503,11 +524,12 @@ into `extension.js` after `updateSessionState(V,K,B){`, which
 `build-prebuilt.py` will then capture into the synthesized prebuilt.
 
 If the script reports anchors not matching uniquely, the bundle
-structure has shifted enough to break the regexes. Only then fall
-back to the manual splice descriptions in Step 8 (Patch F) and
-Step 9 (Patch G) below — and update the regexes in
-`apply-patch-fg.py` to cover the new shape before re-running the
-synthesis.
+structure has shifted enough to break the regexes. Fall back to
+the manual splice descriptions in Step 8 (Patch F) and Step 9
+(Patch G) below to get the patches applied locally, then stop.
+Updating the script and synthesizing a refreshed prebuilt is a
+maintainer task — see the "Maintainer-only" subsection under
+Step 0.
 
 After the script runs successfully, jump to Step 10.
 
