@@ -51,7 +51,31 @@ for entry in ~/.claude/skills/*; do
 done
 if [ -n "$REPO_ROOT" ]; then
   echo "Self-update: fetching $REPO_ROOT..."
-  git -C "$REPO_ROOT" fetch --quiet origin
+  # Fetch via the configured remote first. If that fails (common in
+  # headless/sandboxed shells where ssh-askpass is unavailable) and the
+  # remote is github/gitlab SSH, fall back to HTTPS — public-repo reads
+  # don't need auth. Stays generic: works for any fork, no hardcoded
+  # owner/repo.
+  if ! git -C "$REPO_ROOT" fetch --quiet origin 2>/dev/null; then
+    remote_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+    https_url=
+    case "$remote_url" in
+      git@github.com:*|git@gitlab.com:*)
+        host="${remote_url#git@}"; host="${host%%:*}"
+        path="${remote_url#git@*:}"; path="${path%.git}"
+        https_url="https://${host}/${path}.git"
+        ;;
+    esac
+    if [ -n "$https_url" ]; then
+      echo "  configured fetch failed; retrying via $https_url"
+      if ! git -C "$REPO_ROOT" fetch --quiet "$https_url" \
+            main:refs/remotes/origin/main 2>&1; then
+        echo "  WARNING: HTTPS fallback also failed — origin/main is stale."
+      fi
+    else
+      echo "  WARNING: fetch failed and remote isn't a recognized github/gitlab SSH URL — origin/main may be stale."
+    fi
+  fi
   HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   ORIGIN_SHA="$(git -C "$REPO_ROOT" rev-parse origin/main)"
   if [ "$HEAD_SHA" != "$ORIGIN_SHA" ]; then
