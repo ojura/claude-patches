@@ -130,9 +130,9 @@ RULES = [
     (
         "G.1 (panel ctor callback supports skip-bookkeeping flag)",
         re.compile(
-            r'\(H,D,O\)=>\{this\.updateSessionState\(H,D,O\);for\(let\[z,(?P<lvar>[A-Za-z_$][A-Za-z_$0-9]*)\]of this\.sessionPanels\)if\((?P=lvar)===V&&z!==H\)this\.sessionPanels\.delete\(z\);if\(this\.sessionPanels\.set\(H,V\),V\.active\)this\.activeSessionId=H\}'
+            r'\(H,D,(?P<p3>[A-Za-z_$][A-Za-z_$0-9]*)\)=>\{this\.updateSessionState\(H,D,(?P=p3)\);for\(let\[(?P<kvar>[A-Za-z_$][A-Za-z_$0-9]*),(?P<lvar>[A-Za-z_$][A-Za-z_$0-9]*)\]of this\.sessionPanels\)if\((?P=lvar)===V&&(?P=kvar)!==H\)this\.sessionPanels\.delete\((?P=kvar)\);if\(this\.sessionPanels\.set\(H,V\),V\.active\)this\.activeSessionId=H\}'
         ),
-        r'(H,D,O,_sk)=>{this.updateSessionState(H,D,O);if(!_sk){for(let[z,\g<lvar>]of this.sessionPanels)if(\g<lvar>===V&&z!==H)this.sessionPanels.delete(z);if(this.sessionPanels.set(H,V),V.active)this.activeSessionId=H}}',
+        r'(H,D,\g<p3>,_sk)=>{this.updateSessionState(H,D,\g<p3>);if(!_sk){for(let[\g<kvar>,\g<lvar>]of this.sessionPanels)if(\g<lvar>===V&&\g<kvar>!==H)this.sessionPanels.delete(\g<kvar>);if(this.sessionPanels.set(H,V),V.active)this.activeSessionId=H}}',
     ),
     # G.2 is built dynamically below — its replacement references three
     # bundle-globals (fs, path, projectRoot resolver) whose names drift
