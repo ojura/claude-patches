@@ -1,6 +1,6 @@
 ---
 name: patch-claude
-description: Reapply Juraj's seven local patches to a newly updated anthropic.claude-code VS Code extension. Auto-detects which IDE-hosted install is the running one via CLAUDE_CODE_EXECPATH. Use when the user says "the extension updated, reapply patches" or similar. Backs up files, reapplies all seven patches, verifies each one.
+description: Reapply Juraj's ten local patches to a newly updated anthropic.claude-code VS Code extension. Auto-detects which IDE-hosted install is the running one via CLAUDE_CODE_EXECPATH. Use when the user says "the extension updated, reapply patches" or similar. Backs up files, reapplies all ten patches, verifies each one.
 ---
 
 # Reapply anthropic.claude-code extension patches
@@ -132,7 +132,7 @@ fi
 VER="$(basename "$EXT" | sed 's/^anthropic.claude-code-//; s/-linux-x64$//')"
 echo "Target: $EXT (version $VER)"
 
-# --- Step 0c: try the prebuilt (covers all patches A–G in one shot) ---
+# --- Step 0c: try the prebuilt (covers all patches A–J in one shot) ---
 URL="https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py"
 if curl -fsSL -o /tmp/apply.py "$URL"; then
   echo "Prebuilt found for $VER — applying"
@@ -164,7 +164,9 @@ fi
        embeds the `/*pfg-v1*/` signature comment that the prebuilt
        relies on for idempotency. Steps 8 and 9 below describe the
        splices structurally for reference only.
-    3. If the script reports anchors not matching uniquely, the
+    3. **Patches H, I, J**: follow Steps 10–12 (per-splice manual
+       application). All three are short, single-anchor splices.
+    4. If the F+G script reports anchors not matching uniquely, the
        bundle structure has shifted enough to break its regexes.
        End-user fallback: apply F+G manually from Step 8 and Step 9,
        then **stop** — do not attempt the maintainer steps below.
@@ -579,7 +581,7 @@ Updating the script and synthesizing a refreshed prebuilt is a
 maintainer task — see the "Maintainer-only" subsection under
 Step 0.
 
-After the script runs successfully, jump to Step 10.
+After the script runs successfully, jump to Step 10 (Patch H).
 
 ---
 
@@ -878,13 +880,212 @@ should appear in the sidebar immediately (no need to send a message
 first), with the source session's title (or "Forked conversation" if
 the source had no `custom-title` or `ai-title`).
 
-## Step 10 — summary to the user
+## Step 10 — Patch H: bypass the 5 MB precompact-skip optimization
+
+### Why
+
+The bundled session loader skips parsing pre-compact-boundary content for any JSONL > 5 MB
+([leaked source `sessionStoragePortable.ts:480`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/utils/sessionStoragePortable.ts#L480) defines the `SKIP_PRECOMPACT_THRESHOLD = 5 * 1024 * 1024` constant; the gate lives in
+[`sessionStorage.ts:3536-3556`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/utils/sessionStorage.ts#L3536-L3556)).
+Pre-boundary content is *never parsed*, so the chain walker, fork picker, rewind UI, and
+chat-panel render all only see post-most-recent-`compact_boundary` messages on big files.
+Patch D's `parentUuid → logicalParentUuid` fallback can't help — the predecessor messages
+aren't in the parsed array.
+
+There's an env-var kill switch (`CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP`) but requiring users
+to set environment variables is fragile; better to disable the optimization at the
+read-site itself.
+
+Filed as [#55700](https://github.com/anthropics/claude-code/issues/55700).
+
+### Locate and patch
+
+In `extension.js`, find the loader function that branches on file size against the
+`SKIP_PRECOMPACT_THRESHOLD` constant. In 2.1.126 it's bundled as `Rz4`:
+
+```js
+function Rz4(V,K){try{if(K>Hz4&&!M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP))return(await jz4(V,K)).postBoundaryBuf;return await ml.readFile(V)}catch{return null}}
+```
+
+`Hz4` is the 5 MB constant. `M2(...)` evaluates the env var. Locate via:
+
+```
+grep -oE 'function\s[A-Za-z_$0-9]+\([^)]*\)\{try\{if\([A-Za-z_$0-9]+>[A-Za-z_$0-9]+&&![A-Za-z_$0-9]+\(process\.env\.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP\)\)return\(await' $EXT/extension.js
+```
+
+Replace the `!M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)` clause with `!(!0||M2(...))`.
+The OR-with-true short-circuits to `true`, the negation makes it `false`, the `&&` makes the
+whole condition `false`, the optimization never fires. Original env-var read kept around the
+`||` for forensic clarity (no functional effect):
+
+Old:
+```
+if(K>Hz4&&!M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP))
+```
+New:
+```
+if(K>Hz4&&!(!0||M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)))
+```
+
+Confirm exactly one occurrence before replacing.
+
+### Verify
+
+```
+grep -c '!(!0||M2(process\.env\.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP))' $EXT/extension.js
+```
+
+Expect `1`. The original `&&!M2(...)` form must no longer appear.
+
+### Test
+
+After reload, open any session whose JSONL is > 5 MB. The chat panel should populate with
+the full in-file chain back to the most recent stitch with cross-file `logicalParentUuid`
+(which is then the genuine ceiling — addressed by Patch J). Cache_read on the next API turn
+should remain bounded — `getMessagesAfterCompactBoundary` does its own boundary slicing
+independent of what the loader returns.
+
+## Step 11 — Patch I: neutralize the webview's 500-message render cap
+
+### Why
+
+The webview hardcodes a cap on how many messages can live in the React state — anything
+beyond ~600 is silently truncated to the most recent 500. There's no UI feedback, no
+"load more" affordance. This negates the work of Patches D + H (and the upstream chain
+walker fixes in #46603 / #48937) once the chain walks back beyond 500 messages.
+
+Filed as [#55701](https://github.com/anthropics/claude-code/issues/55701).
+
+### Locate and patch
+
+In `webview/index.js`, find the cap function. In 2.1.126 it's bundled as `OD`:
+
+```js
+function OD($){if($.length>g20){let Z=$.length-u20;return $.slice(Z)}return $}
+```
+
+Where `g20 = 600` and `u20 = 500`. Discover via:
+
+```
+grep -oE 'function [A-Za-z_$]+\(\$\)\{if\(\$\.length>[a-z0-9]+\)\{let [A-Za-z_$]+=\$\.length-[a-z0-9]+;return \$\.slice\([A-Za-z_$]+\)\}return \$\}' $EXT/webview/index.js
+```
+
+Replace with the identity function:
+
+Old:
+```
+function OD($){if($.length>g20){let Z=$.length-u20;return $.slice(Z)}return $}
+```
+New:
+```
+function OD($){return $}
+```
+
+Substitute the actual function name (e.g. `OD`) in the new form. Confirm exactly one
+occurrence before replacing.
+
+### Verify
+
+```
+grep -c 'function OD(\$){return \$}' $EXT/webview/index.js
+```
+
+Expect `1` (with the function name observed during locate).
+
+### Test
+
+After reload, open a session with > 500 chain-walkable messages. The full chain should
+render. Note: at 10K+ messages, initial render takes a few seconds — the bottleneck is
+React rendering, not the patch. If the UI lags unacceptably, partial mitigation: use
+`if($.length>10000)return $.slice(-10000); return $` instead of the pure identity.
+
+## Step 12 — Patch J: cross-file logicalParentUuid resolution at session load
+
+### Why
+
+Patch D + Patch H restore visibility back to the most recent in-file `compact_boundary`
+stitch. But fork-from-compact creates stitches whose `logicalParentUuid` points to a
+message in a **different** JSONL (the source session). The chain walker's
+`parentUuid → logicalParentUuid` fallback then misses, because the in-memory map only
+contains the current session's messages. The chain stops at the cross-file stitch.
+
+Patch J resolves the cross-file pointers at load time: scan the parsed message array for
+compact-boundary stitches with unresolved `logicalParentUuid`, look up which sibling JSONL
+in the project dir owns that uuid, take the slice of that file from index 0 through (and
+including) the lpu's target message, and prepend to the parsed array. Loop with a
+fixed-point until no dangling lpus remain (capped at 10 iterations as a safety).
+
+Closes the read-side half of [#48937 secondary](https://github.com/anthropics/claude-code/issues/48937)
+and [#46603](https://github.com/anthropics/claude-code/issues/46603) for the cross-file case.
+
+### Locate and patch
+
+In `extension.js`, find the loader (`Wz4` in 2.1.126). The pre-patch shape is:
+
+```js
+async function Wz4(V,K){if(!uz(V))return[];let B=await qz4(V,K?.dir);if(!B)return[];let x=await Rz4(B.filePath,B.fileSize);if(!x)return[];return dl(Yz4(x),K)}
+```
+
+Identify by role (names will drift):
+
+- `<LOADER>` — the function name (e.g. `Wz4`)
+- `<EXIST>` — the existence check (e.g. `uz`)
+- `<FIND_FILE>` — finds path/size given session id (e.g. `qz4`)
+- `<READ_BUF>` — Patch H's read function (e.g. `Rz4`)
+- `<PARSE>` — JSONL → message array (e.g. `Yz4`)
+- `<DL>` — the chain-walk + filter pipeline (e.g. `dl`)
+- `<PATH>` — node `path` module under bundler-assigned name (e.g. `jK`)
+- `<FS_PROMISES>` — `fs.promises` under bundler-assigned name (e.g. `Y8`)
+- `<FS_RAW>` — `fs` module with `.readFile` used by `<READ_BUF>` (e.g. `ml`)
+
+Replace the function body. The new shape (using the 2.1.126 names; substitute as needed):
+
+```js
+async function Wz4(V,K){if(!uz(V))return[];let B=await qz4(V,K?.dir);if(!B)return[];let x=await Rz4(B.filePath,B.fileSize);if(!x)return[];let _parsed=Yz4(x);let _seen=new Set(_parsed.map(_m=>_m.uuid));let _dir=jK.dirname(B.filePath);let _entries=await Y8.readdir(_dir);let _filesParsed=new Map();for(let _pass=0;_pass<10;_pass++){let _dangling=[];for(let _m of _parsed)if(_m.type==="system"&&_m.subtype==="compact_boundary"&&!_m.parentUuid&&_m.logicalParentUuid&&!_seen.has(_m.logicalParentUuid))_dangling.push(_m.logicalParentUuid);if(_dangling.length===0)break;let _maxByFile=new Map();for(let _lpu of _dangling){for(let _name of _entries){if(!_name.endsWith(".jsonl"))continue;let _path=jK.join(_dir,_name);if(_path===B.filePath)continue;let _siblingMsgs=_filesParsed.get(_path);if(!_siblingMsgs){let _buf=await ml.readFile(_path);let _str=_buf.toString("utf-8");if(!_str.includes(`"uuid":"${_lpu}"`))continue;_siblingMsgs=Yz4(_buf);_filesParsed.set(_path,_siblingMsgs)}let _found=-1;for(let _i=0;_i<_siblingMsgs.length;_i++)if(_siblingMsgs[_i].uuid===_lpu){_found=_i;break}if(_found===-1)continue;let _prev=_maxByFile.get(_path);if(_prev===void 0||_found>_prev)_maxByFile.set(_path,_found);break}}if(_maxByFile.size===0)break;let _newPrepend=[];for(let[_path,_maxIdx]of _maxByFile){let _siblingMsgs=_filesParsed.get(_path);for(let _i=0;_i<=_maxIdx;_i++){let _m=_siblingMsgs[_i];if(_m&&!_seen.has(_m.uuid)){_newPrepend.push(_m);_seen.add(_m.uuid)}}}if(_newPrepend.length===0)break;_parsed=[..._newPrepend,..._parsed]}return dl(_parsed,K)}
+```
+
+Key behaviors:
+
+- **Per-file max-index slicing**: when multiple dangling lpus point into the same sibling
+  file, take the slice through the *furthest* lpu's target index (covers all of them).
+- **Fixed-point**: if the prepended sibling's own messages introduce *new* dangling lpus
+  pointing to yet another file, the loop runs another pass.
+- **No try/catch**: errors propagate up. A malformed sibling or unreadable file fails the
+  whole load loudly, instead of silently giving back the un-extended chain.
+
+`jK` (path), `Y8` (fs.promises), `ml` (fs) are already in scope from `qz4`, `xU`, `Rz4`
+respectively. Substitute the actual bundler-assigned names if they differ in your version.
+
+### Verify
+
+```
+grep -c '_dangling.push(_m.logicalParentUuid)' $EXT/extension.js
+```
+
+Expect `1`. Also verify the function still parses:
+
+```
+node --check $EXT/extension.js && echo "syntax OK"
+```
+
+### Test
+
+After reload, open a session that was forked from a compacted parent (parent stitches with
+cross-file lpus). Scrollback should reach back through the parent session's pre-fork
+content. First-load latency increases by the parse time of the matched sibling files
+(typically 1–2 s for a 56 MB sibling).
+
+For diagnostic logging, the maintainer's `cdp_instrument.mjs`-style approach (described in
+the project's NOTES) attaches via the `--inspect-extensions` port and logs each pass's
+`{dangling, files, prepend}` to a side-channel file.
+
+## Step 13 — summary to the user
 
 Report which version was patched and which files were touched, using
 markdown relative links. Remind the user to reload the VSCode window for the
 patches to take effect.
 
-Also summarize any drift observations from any earlier step (0 through 9):
+Also summarize any drift observations from any earlier step (0 through 12):
 anchors that didn't match as written, structural shifts beyond pure
 variable renaming, prebuilt-fetch / install-locate / backup quirks,
 variable renames the F+G script auto-absorbed that future readers
@@ -898,7 +1099,7 @@ proactively — don't wait to be asked. Then propose follow-up:
   same response and apply on confirmation.
 - If you don't, propose opening an issue at
   https://github.com/ojura/claude-patches/issues with the version, the
-  patch ID (A–G), and a minimal repro grep.
+  patch ID (A–J), and a minimal repro grep.
 
 If nothing drifted and nothing was wrong, say so explicitly — silence
 is ambiguous.

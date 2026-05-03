@@ -386,3 +386,195 @@ panel-mapping bookkeeping.
 
 Until that happens upstream, F.2/F.3/G are extension-side bypasses for
 the missing webview bridge.
+
+---
+
+## Patch H — bypass the 5 MB precompact-skip optimization
+
+The bundled session loader applies a "precompact skip" optimization for
+files > 5 MB: instead of reading the full JSONL, it scans for the most
+recent `compact_boundary` system message and returns only the
+post-boundary buffer. Pre-boundary content is never parsed into the
+messages array that downstream consumers (chain walker, fork picker,
+rewind UI, chat panel render) operate on.
+
+The leaked source documents this as an optimization, justified by the
+observation that the API context is bounded by `compact_boundary`
+anyway. But the loader is *also* what feeds the chat-panel render and
+the chain walker's input — so the optimization breaks every read path
+that wants pre-boundary visibility.
+
+**Threshold**: `SKIP_PRECOMPACT_THRESHOLD = 5 * 1024 * 1024` ([leaked source `sessionStoragePortable.ts:480`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/utils/sessionStoragePortable.ts#L480)).
+
+**Gate**: [`sessionStorage.ts:3536-3556`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/utils/sessionStorage.ts#L3536-L3556) — the
+`if (size > SKIP_PRECOMPACT_THRESHOLD) buf = scan.postBoundaryBuf` branch.
+
+**Env-var kill switch**: `CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP` already
+exists upstream. Patch H makes it permanent at the read-site instead of
+relying on the user setting an env var.
+
+### Patch shape
+
+In `extension.js`, find the bundled equivalent of:
+
+```js
+function Rz4(V, K) {
+  try {
+    if (K > Hz4 && !M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP))
+      return (await jz4(V, K)).postBoundaryBuf;
+    return await ml.readFile(V);
+  } catch { return null; }
+}
+```
+
+`Hz4` is the 5 MB constant; `M2(env)` is the env-var truthy check. Replace:
+
+```diff
+- if (K > Hz4 && !M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP))
++ if (K > Hz4 && !(!0 || M2(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)))
+```
+
+The `!0 || ...` short-circuits to `true`; the negation makes it `false`;
+the `&&` makes the whole condition `false`; the optimization never
+fires. The original env-var read is kept around the `||` for forensic
+clarity (no functional effect — confirms the splice point lines up with
+the pre-existing kill switch).
+
+**Empirical**: on a 49 MB session, `getSession` returned 27 messages
+pre-patch (post-boundary slice) and 1857 post-patch (full in-file chain
+back to the next dangling lpu). Cache_read on the next API turn stayed
+bounded at ~30 K tokens — `getMessagesAfterCompactBoundary` does its
+own boundary slicing on the way to the API, independent of what the
+loader returns.
+
+**Upstream issue**: [#55700](https://github.com/anthropics/claude-code/issues/55700)
+
+---
+
+## Patch I — neutralize the webview's 500-message render cap
+
+The webview hardcodes a cap on the messages array assigned to React
+state: anything > 600 is silently truncated to the last 500. There's no
+"load more" affordance, no UI indication.
+
+Once Patch D restores chain-walker visibility past the most recent
+`compact_boundary`, sessions with > 500 historical messages still cap
+out at 500 in the chat panel. The whole point of D + H is undone by
+this single function unless I is also applied.
+
+### Patch shape
+
+In `webview/index.js`, find:
+
+```js
+function OD($) {
+  if ($.length > g20) {        // g20 = 600
+    let Z = $.length - u20;    // u20 = 500
+    return $.slice(Z);
+  }
+  return $;
+}
+```
+
+Replace with the identity function:
+
+```js
+function OD($) { return $; }
+```
+
+The bundled function name (`OD`) and the constants (`g20`, `u20`) drift
+between releases, so locate by structure (the `slice($.length - u20)`
+shape is distinctive).
+
+**Caveat**: rendering 10K+ messages takes a few seconds at first paint.
+The bottleneck is React reconciliation, not the patch. If first-paint
+latency becomes painful, partial mitigation: keep a generous cap (e.g.
+`if ($.length > 10000) return $.slice(-10000)` — much higher than 500
+but still bounded).
+
+**Upstream issue**: [#55701](https://github.com/anthropics/claude-code/issues/55701)
+
+---
+
+## Patch J — cross-file logicalParentUuid resolution at session load
+
+Patches D + H restore visibility back to the most recent in-file
+`compact_boundary` stitch. But fork-from-compact creates stitches whose
+`logicalParentUuid` points to a uuid in a **different** JSONL — the
+parent session that was compacted. The chain walker's
+`parentUuid → logicalParentUuid` fallback (Patch D) misses, because the
+in-memory map only has the current session's messages.
+
+Patch J resolves cross-file lpu pointers at load time by scanning
+sibling JSONLs in the project dir.
+
+### Algorithm
+
+1. Parse current JSONL via `Yz4` → `_parsed`. Build `_seen` set of all
+   uuids in `_parsed`.
+2. Iterate (fixed-point, capped at 10 passes):
+   a. Scan `_parsed` for compact_boundary stitches with
+      `parentUuid: null` and `logicalParentUuid` not in `_seen`. These
+      are the dangling lpus.
+   b. For each dangling lpu, scan `*.jsonl` files in the project dir
+      (other than the current one). Substring-prefilter via
+      `"uuid":"<lpu>"`. Parse matching files via `Yz4`, cache.
+   c. Track per-file the **maximum** index across all dangling lpus
+      found in that file. (Multiple dangling lpus into the same parent
+      session is the common case — they all need the slice up to the
+      furthest one.)
+   d. For each matched file, take slice `[0..maxIdx]` (inclusive). For
+      each message in the slice not already in `_seen`, push to
+      `_newPrepend` and add uuid to `_seen`.
+   e. If `_newPrepend` is empty, break. Otherwise prepend to `_parsed`
+      and loop — the just-added messages may themselves contain
+      compact_boundary stitches whose lpus point further back.
+3. Pass extended `_parsed` to `dl()` as before.
+
+### Patch shape
+
+In `extension.js`, find the bundled `Wz4` (or equivalent — the loader
+that calls `Yz4(buf)` then `dl(parsed, K)`):
+
+```js
+async function Wz4(V, K) {
+  if (!uz(V)) return [];
+  let B = await qz4(V, K?.dir);
+  if (!B) return [];
+  let x = await Rz4(B.filePath, B.fileSize);
+  if (!x) return [];
+  return dl(Yz4(x), K);
+}
+```
+
+Replace with the iterative resolver. See [`SKILL.md`](../skill/SKILL.md)
+Step 12 for the full minified body and per-version variable mapping
+(loader role names: `<LOADER>`, `<EXIST>`, `<FIND_FILE>`, `<READ_BUF>`,
+`<PARSE>`, `<DL>`, `<PATH>`, `<FS_PROMISES>`, `<FS_RAW>`).
+
+### Design notes
+
+- **Per-file max-index slicing**, not per-lpu separate slices. Multiple
+  dangling lpus into the same parent file is the common case (a session
+  compacted N times before being forked produces N stitches all pointing
+  at uuids in the parent file at increasing indices). Loading per-lpu
+  would re-parse the same file N times. Per-file with max-index reads
+  the file once and takes the longest slice that covers all of them.
+- **Fixed-point iteration**, not single-pass. The prepended sibling can
+  itself contain compact_boundary stitches with their own dangling lpus
+  pointing to grandparent sessions. Loop until either no more dangling
+  remain or no new prepends were produced (fixpoint converged).
+- **No try/catch around the resolver**. If a sibling read fails or its
+  parse throws, fail loudly — the user sees an error in the chat panel
+  rather than silently getting a less-extended chain.
+
+### Performance
+
+First open of an affected session: load latency increases by the parse
+time of matched siblings. For a 56 MB sibling parsed once, that's about
+1–2 seconds. Subsequent re-opens of the same session are fast (V8 has
+the parsed result cached in module-scope `_filesParsed` for the lifetime
+of the extension host process — no, that's per-call inside `Wz4`; the
+benefit is from OS filesystem cache only).
+
+**Upstream issue**: addresses the cross-file half of [#48937 secondary](https://github.com/anthropics/claude-code/issues/48937) and [#46603](https://github.com/anthropics/claude-code/issues/46603).

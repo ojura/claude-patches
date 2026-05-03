@@ -4,7 +4,7 @@ Out-of-tree patches for the Anthropic Claude Code VS Code extension
 (`anthropic.claude-code-*-linux-x64`, distributed via the
 [Open VSX Registry](https://open-vsx.org/extension/Anthropic/claude-code)).
 
-These patches address seven user-visible bugs that, as of the current
+These patches address ten user-visible bugs that, as of the current
 public releases, ship with the bundled extension. Each patch has a
 corresponding upstream issue on
 [anthropics/claude-code](https://github.com/anthropics/claude-code/issues?q=is%3Aissue+author%3Aojura);
@@ -21,6 +21,9 @@ this repo is where the *workaround* lives until upstream fixes ship.
 | **E** | Title resolver puts `firstPrompt` ahead of `lastPrompt` | Session title drifts to "whatever the user most recently typed" | [#32150](https://github.com/anthropics/claude-code/issues/32150) |
 | **F** | Session rename propagation through `sessionStates` Map | Pencil rename flips back to old title on session switch | [#53942](https://github.com/anthropics/claude-code/issues/53942) |
 | **G** | Forked session enters sidebar list immediately after fork | New fork doesn't appear in sidebar until first message is sent | [#53942 (follow-up)](https://github.com/anthropics/claude-code/issues/53942) |
+| **H** | Bypass the 5 MB precompact-skip optimization in the loader | Sessions > 5 MB only show post-most-recent-compactSummary content; pre-boundary scrollback / fork picker / rewind invisible | [#55700](https://github.com/anthropics/claude-code/issues/55700) |
+| **I** | Neutralize the webview's 500-message render cap | Sessions with > 600 messages silently truncate to last 500 in the chat panel; no UI feedback | [#55701](https://github.com/anthropics/claude-code/issues/55701) |
+| **J** | Resolve cross-file `logicalParentUuid` at session load (load sibling JSONLs to bridge fork boundaries) | Forks of compacted sessions can't scroll back into the source session's history; chain walker stops at the cross-file stitch | [#48937 (cross-file)](https://github.com/anthropics/claude-code/issues/48937) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
 
 See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 (why, locate, patch, verify, test).
@@ -38,9 +41,9 @@ claude-patches/
 │                            # as a fallback when no prebuilt exists for the
 │                            # current extension version.
 ├── prebuilt/
-│   └── 2.1.121/
+│   └── 2.1.126/
 │       └── apply.py         # version-pinned, self-contained apply script
-│                            # covering ALL patches A through G. Built by
+│                            # covering ALL patches A through J. Built by
 │                            # diffing the live patched bundle against its
 │                            # pristine .bak files, byte-stable verified.
 ├── docs/
@@ -101,7 +104,7 @@ curl -fsSL "https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt
 ```
 
 The script auto-detects your extension dir (across IDE variants),
-applies all 14 splices (Patches A–G), and validates with `node --check`.
+applies all 17 splices (Patches A–J), and validates with `node --check`.
 Idempotent. Use `--force` to restore from `.bak` files and re-apply
 unconditionally.
 
@@ -141,7 +144,7 @@ has no `.bak` until you patch it.)
 
 If you have push access and need to add a prebuilt for a new extension
 release, see [MAINTAINER.md](MAINTAINER.md). The short version: apply
-patches A–G locally first, then
+patches A–J locally first, then
 `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>` synthesizes
 and byte-stability-validates a prebuilt apply script from the diff.
 
