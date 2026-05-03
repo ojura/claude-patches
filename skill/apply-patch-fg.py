@@ -36,7 +36,7 @@ prior application and re-apply cleanly.
 """
 import os, re, shutil, subprocess, sys, glob
 
-PATCHSET_VERSION = "1"
+PATCHSET_VERSION = "1.1"
 PATCHSET_SIG = f"/*pfg-v{PATCHSET_VERSION}*/"
 
 
@@ -182,7 +182,9 @@ def main():
     #   (b) legacy markers, in case an unsigned (pre-versioning) build
     #       was applied
     has_current_sig = PATCHSET_SIG in s
-    sig_match = re.search(r'/\*pfg-v(\d+)\*/', s)
+    # Match v1, v1.1, v2, v2.5, etc. — number with optional .number suffix.
+    # Letter suffixes (v1a) intentionally not supported.
+    sig_match = re.search(r'/\*pfg-v(\d+(?:\.\d+)?)\*/', s)
     other_sig = sig_match.group(1) if sig_match and not has_current_sig else None
     legacy_markers = [
         'if(!_r)this.onSessionStateChanged?.(V,void 0,K)',
@@ -200,23 +202,6 @@ def main():
     if has_current_sig and not force:
         print(f"Patchset v{PATCHSET_VERSION} already applied. Nothing to do.")
         return
-
-    # Legacy (unsigned) patches present, no other signature, and current
-    # version is v1: the functional code is identical, just missing the
-    # signature comment. Inject it in-place rather than restore + re-apply.
-    if has_legacy_patches and not other_sig and not force and PATCHSET_VERSION == "1":
-        legacy_anchor = 'updateSessionState(V,K,B){let _p=this.sessionStates.get(V)'
-        new_anchor = 'updateSessionState(V,K,B){' + PATCHSET_SIG + 'let _p=this.sessionStates.get(V)'
-        if legacy_anchor in s and new_anchor not in s:
-            s = s.replace(legacy_anchor, new_anchor, 1)
-            with open(path, "w") as f:
-                f.write(s)
-            print(
-                f"Legacy unsigned patches detected (functionally equivalent "
-                f"to v{PATCHSET_VERSION}). Signature injected; file now "
-                f"marked as v{PATCHSET_VERSION}."
-            )
-            return
 
     if other_sig or has_legacy_patches or force:
         # Stale prior application OR forced re-apply — restore from backup

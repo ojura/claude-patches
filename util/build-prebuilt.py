@@ -3,7 +3,7 @@
 Maintainer tool — synthesize a prebuilt apply.py for a freshly-patched
 extension version.
 
-Given a patched extension directory (post-A-G) and its three pre-patch
+Given a patched extension directory (post-A-J) and its three pre-patch
 backups, this:
   1. Diffs each file against its .bak via util/extract-splices.py
   2. Aggregates the splices into a single self-contained Python script
@@ -49,7 +49,7 @@ PREBUILT_TEMPLATE = '''#!/usr/bin/env python3
 """
 Prebuilt patch apply for the anthropic.claude-code VS Code extension {version}.
 
-Patches A through G applied as literal string replacements verified
+Patches A through J applied as literal string replacements verified
 byte-stable against the {version} bundle. Synthesized by
 util/build-prebuilt.py from the diff between the patched live extension
 and its pre-patch backups.
@@ -62,11 +62,12 @@ Default: auto-discovers an installed {version} extension under
 Antigravity, Cursor, VSCodium, etc.).
 
 Idempotent: re-running on already-patched files is a no-op (detects the
-pfg-v1 signature in extension.js). With --force, restores from .bak files
+pfg-v1.1 signature in extension.js). With --force, restores from .bak files
 and re-applies.
 """
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -107,7 +108,8 @@ def find_default_ext_dir():
     return matches[0]
 
 
-SIGNATURE = "/*pfg-v1*/"
+SIGNATURE = "/*pfg-v1.1*/"
+PATCHSET_VERSION = re.match(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', SIGNATURE).group(1)
 
 # Each entry: (file_relpath, [(old, new), (old, new), ...])
 SPLICES = {splices_repr}
@@ -126,25 +128,36 @@ def main():
             f"path explicitly or install it first"
         )
 
-    # Decide state by checking the signature in extension.js
+    # Decide state by checking the signature in extension.js. Recognize ANY
+    # pfg-vX or pfg-vX.Y signature so a stale prior version (e.g. v1) is
+    # detected as needing restore+reapply rather than silently no-op'd or
+    # erroring on splice 0.
     ext_js = os.path.join(ext_dir, "extension.js")
     if not os.path.exists(ext_js):
         sys.exit(f"missing: {{ext_js}}")
     with open(ext_js, "r") as f:
         head = f.read()
-    is_patched = SIGNATURE in head
-    if is_patched and not force:
+    has_current_sig = SIGNATURE in head
+    sig_match = re.search(r'/\*pfg-v(\d+(?:\.\d+)?)\*/', head)
+    other_sig = sig_match.group(1) if sig_match and not has_current_sig else None
+
+    if has_current_sig and not force:
         print(f"Already patched (signature {{SIGNATURE}} present). Nothing to do.")
         return
+
+    needs_restore = (force and has_current_sig) or other_sig is not None
 
     # Apply each file's splices
     for relpath, file_splices in SPLICES:
         target = os.path.join(ext_dir, relpath)
         bak = target + ".bak"
-        if force and is_patched:
+        if needs_restore:
             if not os.path.exists(bak):
-                sys.exit(f"--force but no backup at {{bak}}")
-            print(f"--force: restoring {{target}} from {{bak}}")
+                sys.exit(f"need to restore but no backup at {{bak}}")
+            if other_sig:
+                print(f"Stale patchset (file has v{{other_sig}}, current is v{{PATCHSET_VERSION}}); restoring {{target}} from {{bak}}")
+            else:
+                print(f"--force: restoring {{target}} from {{bak}}")
             shutil.copy2(bak, target)
         elif not os.path.exists(bak):
             shutil.copy2(target, bak)
@@ -190,7 +203,7 @@ def main():
     except FileNotFoundError:
         print("node not found on PATH — skipping syntax check.")
 
-    print(f"Patches A-G applied (prebuilt {{VERSION}}). Reload VSCode to activate.")
+    print(f"Patches A-J applied (prebuilt {{VERSION}}). Reload VSCode to activate.")
 
 
 if __name__ == "__main__":
