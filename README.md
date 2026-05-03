@@ -10,7 +10,7 @@ corresponding upstream issue on
 [anthropics/claude-code](https://github.com/anthropics/claude-code/issues?q=is%3Aissue+author%3Aojura);
 this repo is where the *workaround* lives until upstream fixes ship.
 
-The patchset signature `/*pfg-vN*/` stands for **Persistent Fsck
+The patchset signature `/*pfg-vN*/` stands for **Persistent Forking
 Glitches** — backronymed from the original `patch-fg` script (Patches
 F + G); the rest just kept getting added.
 
