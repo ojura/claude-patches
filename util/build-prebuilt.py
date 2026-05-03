@@ -3,7 +3,7 @@
 Maintainer tool — synthesize a prebuilt apply.py for a freshly-patched
 extension version.
 
-Given a patched extension directory (post-A-J) and its three pre-patch
+Given a patched extension directory (post-A-K) and its three pre-patch
 backups, this:
   1. Diffs each file against its .bak via util/extract-splices.py
   2. Aggregates the splices into a single self-contained Python script
@@ -49,7 +49,7 @@ PREBUILT_TEMPLATE = '''#!/usr/bin/env python3
 """
 Prebuilt patch apply for the anthropic.claude-code VS Code extension {version}.
 
-Patches A through J applied as literal string replacements verified
+Patches A through K applied as literal string replacements verified
 byte-stable against the {version} bundle. Synthesized by
 util/build-prebuilt.py from the diff between the patched live extension
 and its pre-patch backups.
@@ -62,7 +62,7 @@ Default: auto-discovers an installed {version} extension under
 Antigravity, Cursor, VSCodium, etc.).
 
 Idempotent: re-running on already-patched files is a no-op (detects the
-pfg-v1.1 signature in extension.js). With --force, restores from .bak files
+pfg-v1.2 signature in extension.js). With --force, restores from .bak files
 and re-applies.
 """
 import glob
@@ -108,7 +108,7 @@ def find_default_ext_dir():
     return matches[0]
 
 
-SIGNATURE = "/*pfg-v1.1*/"
+SIGNATURE = "/*pfg-v1.2*/"
 PATCHSET_VERSION = re.match(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', SIGNATURE).group(1)
 
 # Each entry: (file_relpath, [(old, new), (old, new), ...])
@@ -203,7 +203,7 @@ def main():
     except FileNotFoundError:
         print("node not found on PATH — skipping syntax check.")
 
-    print(f"Patches A-J applied (prebuilt {{VERSION}}). Reload VSCode to activate.")
+    print(f"Patches A-K applied (prebuilt {{VERSION}}). Reload VSCode to activate.")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ This single bash block does three things in one round-trip:
    or a fallback glob across `~/.<ide>/extensions/` for any IDE that
    pulls from Open VSX (VS Code, Antigravity, Cursor, VSCodium, etc.).
 3. **Fetch the prebuilt for that version** and run it. Prebuilts are
-   self-validating (detect `pfg-v1.1` signature, idempotent, byte-stable
+   self-validating (detect `pfg-v1.2` signature, idempotent, byte-stable
    verified at synthesis time) — so this step either applies the
    patches cleanly OR no-ops because they're already applied.
 
@@ -151,7 +151,7 @@ fi
 - `PATCHES_APPLIED` → skill is complete. Tell the user to reload VSCode.
   Do NOT run any verification greps — they target manual-path splices
   with placeholder param names and will give false negatives on
-  prebuilt-applied code. The `pfg-v1.1` signature embedded in
+  prebuilt-applied code. The `pfg-v1.2` signature embedded in
   `extension.js` is the authoritative check, and the prebuilt verifies
   it itself.
 - `ABORT: ...` → stop and surface the message to the user; don't try
@@ -161,12 +161,17 @@ fi
     2. **Patches F and G**: do NOT splice manually. Run
        `skill/apply-patch-fg.py` — it locates anchors via regex (so it
        handles variable-name drift across releases automatically) and
-       embeds the `/*pfg-v1.1*/` signature comment that the prebuilt
+       embeds the `/*pfg-v1.2*/` signature comment that the prebuilt
        relies on for idempotency. Steps 8 and 9 below describe the
        splices structurally for reference only.
     3. **Patches H, I, J**: follow Steps 10–12 (per-splice manual
        application). All three are short, single-anchor splices.
-    4. If the F+G script reports anchors not matching uniquely, the
+    4. **Patch K**: follow Step 13 (extension.js loader splice + a
+       webview/index.js render wrap). This is `lost+found`-style
+       recovery for sessions whose `compact_boundary.logicalParentUuid`
+       points at a never-persisted uuid (write-side bug at upstream
+       `compact.ts:598`).
+    5. If the F+G script reports anchors not matching uniquely, the
        bundle structure has shifted enough to break its regexes.
        End-user fallback: apply F+G manually from Step 8 and Step 9,
        then **stop** — do not attempt the maintainer steps below.
@@ -195,7 +200,7 @@ stop here.
 If `apply-patch-fg.py` succeeded as-is (preferred path):
 
 1. Verify the signature is in live:
-   `grep -c '/\*pfg-v1.1\*/' $EXT/extension.js` — must be `1`.
+   `grep -c '/\*pfg-v1.2\*/' $EXT/extension.js` — must be `1`.
 2. Run `build-prebuilt.py`, commit, push.
 
 If `apply-patch-fg.py`'s regexes failed on this version:
@@ -209,7 +214,7 @@ If `apply-patch-fg.py`'s regexes failed on this version:
 
 ```sh
 # Precondition: signature must already be in live (apply-patch-fg.py ran)
-grep -q '/\*pfg-v1.1\*/' "$EXT/extension.js" || \
+grep -q '/\*pfg-v1.2\*/' "$EXT/extension.js" || \
     { echo "ABORT: signature missing — run apply-patch-fg.py first"; exit 1; }
 
 git clone https://github.com/ojura/claude-patches /tmp/claude-patches
@@ -569,7 +574,7 @@ python3 "$REPO_ROOT/skill/apply-patch-fg.py" "$EXT/extension.js"
 The script handles both F (+F.2 +F.3) and G (+G.1 +G.2). It locates
 anchors via regex with named captures, so renamings like `m1`→`c1`
 (storage class) or `[z,L]`→`[z,A]` (sessionPanels destructure) are
-absorbed automatically. It also embeds the `/*pfg-v1.1*/` signature
+absorbed automatically. It also embeds the `/*pfg-v1.2*/` signature
 into `extension.js` after `updateSessionState(V,K,B){`, which
 `build-prebuilt.py` will then capture into the synthesized prebuilt.
 
@@ -1079,13 +1084,155 @@ For diagnostic logging, the maintainer's `cdp_instrument.mjs`-style approach (de
 the project's NOTES) attaches via the `--inspect-extensions` port and logs each pass's
 `{dangling, files, prepend}` to a side-channel file.
 
-## Step 13 — summary to the user
+## Step 13 — Patch K: lost+found-style recovery for dangling logicalParentUuid
+
+### Why
+
+Auto-compaction can write a `compact_boundary` whose `logicalParentUuid` references a uuid
+that never gets persisted to disk — the upstream write-side bug at `compact.ts:598`
+(see `findLast(m => m.type !== 'progress')` filter missing on the auto-compact path; same
+filter is present on the partial-compact path at L1014). After Patches D + J fail to resolve
+such a pointer (no parent in any sibling JSONL), the chain walker stops at the boundary and
+the entire pre-compaction transcript becomes invisible despite being intact on disk.
+
+Patch K is the read-side mitigation: at session-load time, detect dangling boundaries and
+splice a synthetic seam ghost (claiming the missing lpu) parented to the in-file
+predecessor, plus a bookend ghost at chain root. Both render as visibly-marked colored
+bubbles so the user knows the recovered span may not all belong to this conversation.
+
+Filed upstream as [#55818](https://github.com/anthropics/claude-code/issues/55818).
+
+### Locate (extension.js loader)
+
+The Patch J site (Step 12) ends with `if(_newPrepend.length===0)break;_parsed=[..._newPrepend,..._parsed];}return dl(_parsed,K)` — the closing brace ends J's fixed-point loop, then `dl()` is called. K's block goes between those two: after the loop, before the `dl()` call.
+
+### Patch (extension.js)
+
+Insert immediately after Patch J's loop tail. The block scans for boundaries with
+unresolved `logicalParentUuid`, synthesizes a seam ghost claiming a `pfgk-seam-…`
+prefixed uuid (rewriting the boundary's lpu to it), then if K fired anywhere, prepends
+a `pfgk-bookend-…` ghost at chain root by reparenting the original first chain-participant
+to it.
+
+```js
+let _kFired=!1;
+for(let _i=0;_i<_parsed.length;_i++){
+  let _m=_parsed[_i];
+  if(_m.type==="system"&&_m.subtype==="compact_boundary"&&!_m.parentUuid&&_m.logicalParentUuid&&!_seen.has(_m.logicalParentUuid)){
+    let _predUuid=null;
+    for(let _j=_i-1;_j>=0;_j--){if(_parsed[_j].uuid){_predUuid=_parsed[_j].uuid;break}}
+    if(!_predUuid)continue;
+    let _seamUuid="pfgk-seam-"+_m.uuid.slice(0,8);
+    let _origLpu=_m.logicalParentUuid;
+    let _ghost={type:"user",uuid:_seamUuid,parentUuid:_predUuid,sessionId:_m.sessionId,timestamp:_m.timestamp,
+      message:{role:"user",content:"\u{1F53A} Orphaned compaction pointer (seam)\n\nThe compactor referenced a chain predecessor uuid ("+_origLpu.slice(0,8)+"…) that was never persisted to disk — a Claude Code bug. Pre-compaction history above this notice has been reattached via the in-file predecessor by Patch K. Click to jump to the start of the recovered chain."}};
+    _parsed.splice(_i,0,_ghost);
+    _m.logicalParentUuid=_seamUuid;
+    _seen.add(_ghost.uuid);
+    _kFired=!0;
+    _i++
+  }
+}
+if(_kFired){
+  for(let _i=0;_i<_parsed.length;_i++){
+    let _r=_parsed[_i];
+    if(_r.uuid&&_r.parentUuid==null&&!_r.logicalParentUuid&&_r.type!=="system"){
+      let _bid="pfgk-bookend-"+_r.uuid;
+      let _be={type:"user",uuid:_bid,parentUuid:null,sessionId:_r.sessionId,timestamp:_r.timestamp,
+        message:{role:"user",content:"\u{1F53B} Recovered orphan chain (start)\n\nThe content below this notice was orphaned by a Claude Code compaction bug. The compact boundary further down referenced a chain predecessor that was never persisted to disk; the in-file pre-compaction history was reattached as a best-effort fallback by Patch K. Click to jump to the seam at the end of the recovered section."}};
+      _parsed.splice(_i,0,_be);
+      _r.parentUuid=_bid;
+      _seen.add(_bid);
+      break
+    }
+  }
+}
+```
+
+(Use `🔺` / `🔻` surrogate-pair form for the emoji in JS source if
+the literal `\u{...}` form isn't accepted.)
+
+### Patch (webview/index.js)
+
+The chain walker output flows to the user-message renderer. Bare ghost messages render as
+plain user bubbles (no markdown — the renderer treats content as plain text inside a
+`<span>`). To make the seam/bookend visually distinct, wrap them with a colored container
++ click-to-scroll handler — detected out-of-band by the `pfgk-` uuid prefix.
+
+Anchor (the user-message render path):
+
+```
+if(Z.type==="user"){if(Z.parentToolUseId)return null;if(Z.isSynthetic)return null;return n1.default.createElement(XR0,{session:$,message:Z,index:J,context:Y,key:J,isHighlighted:X,areThinkingBlocksExpanded:Q,setAreThinkingBlocksExpanded:G,setInputError:q,onCreateNewSession:z})}
+```
+
+Variable names will drift; identify by structure: this is the only `Z.type==="user"`
+branch that creates `XR0` after the two early-return guards. Replace the `return`
+expression with a wrap-on-prefix block:
+
+```js
+let _ws=n1.default.createElement(XR0,{...same args...});
+if(typeof Z.uuid==="string"){
+  let _r=Z.uuid.startsWith("pfgk-bookend")?"bookend":Z.uuid.startsWith("pfgk-seam-")?"seam":null;
+  if(_r){
+    let _o=_r==="seam"?"bookend":"seam";
+    let _bg=_r==="seam"?"rgba(255,159,28,0.20)":"rgba(220,53,69,0.18)";
+    let _bd=_r==="seam"?"#ff9f1c":"#dc3545";
+    let _emoji="⚠️";  // ⚠️
+    _ws=n1.default.createElement("div",{
+      className:"pfgkAlert pfgk-"+_r,
+      "data-pfgk-role":_r,
+      style:{background:_bg,borderLeft:"4px solid "+_bd,borderRadius:"6px",padding:"6px 12px 12px",margin:"6px 0",cursor:"pointer"},
+      title:"Click to jump to "+_o,
+      onClick:function(){var _t=document.querySelector("[data-pfgk-role=\""+_o+"\"]");if(_t)_t.scrollIntoView({behavior:"smooth",block:"center"})}
+    },
+      n1.default.createElement("style",{key:"_pfgks"},".pfgkAlert .content_xGDvVg.collapsed_xGDvVg{max-height:none!important}.pfgkAlert .truncationGradient_xGDvVg{display:none}.pfgkAlert .buttonContainer_xGDvVg{display:none}.pfgkAlert .actionButton_v2CdxQ{display:none}"),
+      n1.default.createElement("div",{key:"_pfgkemoji",style:{fontSize:"42px",textAlign:"center",lineHeight:1.1,padding:"6px 0 4px",userSelect:"none"}},_emoji),
+      _ws
+    )
+  }
+}
+return _ws;
+```
+
+The injected `<style>` rule suppresses the `Show more`/`Show less` collapse button, the
+truncation gradient, and the edit/fork action button — none of which make sense on a
+synthetic message. The rule-class names (`content_xGDvVg`, `collapsed_xGDvVg`, etc.) come
+from the bundle's CSS modules and may drift between releases — locate by inspecting the
+DOM around a real user-message bubble if any rule stops applying.
+
+### Critical: don't set `isMeta:true` on the ghosts
+
+The chain walker's render filter (`Sz4` in 2.1.126) drops messages with `isMeta` truthy.
+We rejected setting it on the synthetic ghosts because that hides them. Compact summary
+messages render despite being functionally synthetic because they don't set `isMeta`
+(only `isCompactSummary`, which Sz4 doesn't check).
+
+### Verify
+
+```
+grep -c '_kFired=!0' $EXT/extension.js
+grep -c 'pfgk-bookend' $EXT/extension.js
+grep -c 'pfgkAlert pfgk-' $EXT/webview/index.js
+node --check $EXT/extension.js && node --check $EXT/webview/index.js
+```
+
+Each grep should be ≥ 1.
+
+### Test
+
+Open a session known to have a dangling lpu (search for a `compact_boundary` whose
+`logicalParentUuid` resolves to no `"uuid":"…"` line anywhere on disk). Reload VSCode.
+The chat panel should render the bookend at the top of the recovered span and the seam
+at the boundary, both as colored bubbles with a ⚠️ banner. Clicking either should
+smooth-scroll to the other.
+
+## Step 14 — summary to the user
 
 Report which version was patched and which files were touched, using
 markdown relative links. Remind the user to reload the VSCode window for the
 patches to take effect.
 
-Also summarize any drift observations from any earlier step (0 through 12):
+Also summarize any drift observations from any earlier step (0 through 13):
 anchors that didn't match as written, structural shifts beyond pure
 variable renaming, prebuilt-fetch / install-locate / backup quirks,
 variable renames the F+G script auto-absorbed that future readers
@@ -1099,7 +1246,7 @@ proactively — don't wait to be asked. Then propose follow-up:
   same response and apply on confirmation.
 - If you don't, propose opening an issue at
   https://github.com/ojura/claude-patches/issues with the version, the
-  patch ID (A–J), and a minimal repro grep.
+  patch ID (A–K), and a minimal repro grep.
 
 If nothing drifted and nothing was wrong, say so explicitly — silence
 is ambiguous.

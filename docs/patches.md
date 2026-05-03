@@ -578,3 +578,94 @@ of the extension host process — no, that's per-call inside `Wz4`; the
 benefit is from OS filesystem cache only).
 
 **Upstream issue**: addresses the cross-file half of [#48937 secondary](https://github.com/anthropics/claude-code/issues/48937) and [#46603](https://github.com/anthropics/claude-code/issues/46603).
+
+## Patch K — lost+found-style recovery for dangling logicalParentUuid
+
+### Why
+
+Patches D and J resolve compact-boundary `logicalParentUuid` pointers
+when the target message is somewhere on disk (in-file via D, in a
+sibling JSONL via J). They can't help when the target uuid is a
+*phantom* — never persisted anywhere — which happens when the
+upstream compactor at `compact.ts:598` captures `messages.at(-1)?.uuid`
+without filtering out non-loggable types (e.g. `progress` messages,
+or in-flight assistant turns whose uuid was allocated before the auto-
+compact interrupted them).
+
+Symptom: chain walker hits the boundary and stops. The user sees a
+silently truncated transcript despite the pre-compact JSONL content
+being intact on disk. No error, no UI feedback.
+
+Patch K runs at session-load time, after D + J have done their work.
+For each compact_boundary whose lpu is still unresolved:
+
+1. Find the in-file message immediately preceding the boundary.
+2. Synthesize a "seam" ghost message claiming a `pfgk-seam-…` prefixed
+   uuid, parented to that in-file predecessor.
+3. Rewrite the boundary's `logicalParentUuid` to point at the new
+   seam ghost. The chain walker now bridges through it.
+4. If any seam was synthesized, prepend a "bookend" ghost
+   (`pfgk-bookend-…`) at the chain root by reparenting the original
+   first chain-participant to it.
+
+The recovered span isn't *guaranteed* to be the original chain — in
+pathological cases the in-file predecessor could belong to a
+different conversation that landed in the same JSONL. The visible
+seam + bookend bracket exists to make that ambiguity legible to the
+user instead of silently fudging the topology.
+
+### Locate
+
+In `extension.js`, find the `Wz4` (or its drift-renamed equivalent)
+loader function — it's where Patch J's fixed-point loop terminates.
+The K block goes between J's loop tail (`if(_newPrepend.length===0)
+break;_parsed=[..._newPrepend,..._parsed];}`) and the trailing
+`return dl(_parsed,K)` call.
+
+In `webview/index.js`, find the user-message render path — the only
+`Z.type==="user"` branch that creates `XR0` after the
+`parentToolUseId`/`isSynthetic` early-return guards. Wrap the
+returned element with a colored container when `Z.uuid` starts with
+`pfgk-`.
+
+### Patch (extension.js)
+
+See SKILL.md Step 13 for the full splice. Summary: synthesizes seam
+ghosts (claiming the missing lpu uuid via `pfgk-seam-…` prefix) and a
+bookend ghost (`pfgk-bookend-…` prefix) at the chain root.
+
+### Patch (webview/index.js)
+
+Wrap the user-message bubble with a colored `<div>` (orange for seam,
+red for bookend) plus a click handler that scrolls to the matching
+counterpart via `[data-pfgk-role="…"]` queries. Inject a `<style>`
+inside the wrapper that suppresses the truncation gradient, the
+"Show more / Show less" collapse buttons, and the edit/fork action
+button — none of which make sense on a synthetic message.
+
+### Critical implementation notes
+
+- **`isMeta` must NOT be set on ghosts.** The render filter (`Sz4`)
+  drops `isMeta:true` messages. Compact summaries get away with being
+  synthetic-ish because they only set `isCompactSummary` (which `Sz4`
+  doesn't check). Setting `isMeta:true` on our ghosts hides them
+  entirely.
+- **Out-of-band signaling.** The colored wrapper detects ghost-ness
+  via the `pfgk-` uuid prefix, not via the message content. In-band
+  detection (parsing message text for marker strings) is fragile —
+  any real user message could spoof it. The uuid prefix is structural
+  metadata that the renderer can dispatch on without reading content.
+- **The renderer treats user-message content as plain text** (no
+  markdown, no inline HTML). The visual punch comes from the wrapper
+  + emoji + colored bg, not from anything inside the message body.
+
+### Test
+
+Open a session known to have a phantom-lpu boundary (search for a
+`compact_boundary` whose `logicalParentUuid` resolves to no
+`"uuid":"…"` line anywhere on disk). The chat panel should render the
+bookend at chain root and the seam at the boundary, both as colored
+bubbles with a ⚠️ banner. Clicking either smooth-scrolls to the
+other.
+
+**Upstream issue**: [#55818](https://github.com/anthropics/claude-code/issues/55818) (read-side mitigation) + [#46603](https://github.com/anthropics/claude-code/issues/46603) (write-side root cause at `compact.ts:598`).

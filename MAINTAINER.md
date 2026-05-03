@@ -22,7 +22,7 @@ patched live extension dir          maintainer tool             new prebuilt
   webview/index.css                  │  validates byte-stability
   webview/index.css.bak              ↓
                                   apply.py
-                                  ⤷ contains all 14 splices as
+                                  ⤷ contains all 19 splices as
                                     literal Python find-and-replace
                                   ⤷ self-contained, stdlib only
                                   ⤷ idempotent, signature-detected
@@ -31,7 +31,7 @@ patched live extension dir          maintainer tool             new prebuilt
 
 ## Steps
 
-1. **Apply patches A–G locally first.**
+1. **Apply patches A–K locally first.**
 
    Either via the Claude Code skill (`/patch-claude`) or by hand
    following [`skill/SKILL.md`](skill/SKILL.md). End state: your
@@ -39,9 +39,11 @@ patched live extension dir          maintainer tool             new prebuilt
    `webview/index.css` plus pristine `*.bak` backups of each.
 
    Verify the patches actually work — reload VSCode, do a sidebar
-   pencil rename, switch sessions, fork a session. The prebuilt will
-   be byte-identical to whatever you applied here, so anything wrong
-   now ships to every downstream user.
+   pencil rename, switch sessions, fork a session, open a session
+   with a known dangling-lpu boundary (Patch K should render the seam
+   + bookend ghosts). The prebuilt will be byte-identical to whatever
+   you applied here, so anything wrong now ships to every downstream
+   user.
 
 2. **Synthesize the prebuilt.**
 
@@ -77,41 +79,44 @@ patched live extension dir          maintainer tool             new prebuilt
 
 ## Sanity checks before push
 
-- `prebuilt/<VER>/apply.py` is < ~15KB. If it's huge (>50KB) something
+- `prebuilt/<VER>/apply.py` is ~17KB. If it's huge (>50KB) something
   drifted (probably a non-deterministic field like a timestamp or
   random UUID got captured into a splice — those should never be in
   diff regions).
-- The diff has the expected splice count: 12 in `extension.js`, 1 in
-  `webview/index.js`, 1 in `webview/index.css`. Different counts mean
-  either upstream restructured something or you applied the patches
-  wrong. Investigate before pushing.
+- The diff has the expected splice count: 14 in `extension.js`, 4 in
+  `webview/index.js`, 1 in `webview/index.css` (19 total at v1.2).
+  Different counts mean either upstream restructured something or you
+  applied the patches wrong. Investigate before pushing.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
-  say "Already patched (signature /\*pfg-v1.1\*/ present). Nothing to
+  say "Already patched (signature /\*pfg-v1.2\*/ present). Nothing to
   do." If it tries to apply, your live install isn't patched
   correctly — back out before pushing.
 
-## Bumping the patchset version (v1 → v2)
+## Bumping the patchset version
 
 If a future patch is added or an existing patch's behavior is
-materially changed, bump the patchset version:
+materially changed, bump the patchset version (semver-style minor for
+add-ons like H/I/J or K, major for breaking redesigns):
 
-1. Edit `skill/apply-patch-fg.py`: change `PATCHSET_VERSION = "1"` to
-   `"2"`. The signature comment becomes `/*pfg-v2*/`.
-2. Re-synthesize all `prebuilt/<VER>/apply.py` for currently-supported
+1. Edit `skill/apply-patch-fg.py`: bump `PATCHSET_VERSION` (e.g. `"1.2"`
+   → `"1.3"`). The signature comment becomes `/*pfg-v1.3*/`.
+2. Edit `util/build-prebuilt.py`'s `PREBUILT_TEMPLATE`: bump the
+   `SIGNATURE = "/*pfg-vN*/"` constant to match. (Without this, the
+   generated prebuilt's idempotency check looks for the wrong sig.)
+3. Re-synthesize all `prebuilt/<VER>/apply.py` for currently-supported
    versions: each one re-runs `util/build-prebuilt.py` against the
-   freshly re-patched extension. The new prebuilts embed the v2
+   freshly re-patched extension. The new prebuilts embed the bumped
    signature.
-3. End-users running the new prebuilt against a v1-patched extension
-   will get: *"Stale patchset detected (file has v1, current script
-   is v2). Restoring from .pre-patchFG.bak and re-applying."* The
-   `.pre-patchFG.bak` from their v1 run is the post-A-E-pre-F-G
-   baseline — reusable as the restore point indefinitely (until the
-   extension itself updates).
+4. End-users running the new prebuilt against an older-version-patched
+   extension will get: *"Stale patchset (file has vX, current is vY);
+   restoring … from .bak"*. The `.bak` from their original run is the
+   pre-patch baseline — reusable as the restore point indefinitely
+   (until the extension itself updates).
 
-This is why the comprehensive prebuilt covers A–G in one script: a
+This is why the comprehensive prebuilt covers A–K in one script: a
 patchset bump can include changes anywhere, and a self-contained
-prebuilt guarantees the user ends up at exactly the v2 state without
+prebuilt guarantees the user ends up at exactly the new state without
 needing the per-patch skill walkthrough.
 
 ## Why the byte-stability check matters

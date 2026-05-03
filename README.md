@@ -4,11 +4,15 @@ Out-of-tree patches for the Anthropic Claude Code VS Code extension
 (`anthropic.claude-code-*-linux-x64`, distributed via the
 [Open VSX Registry](https://open-vsx.org/extension/Anthropic/claude-code)).
 
-These patches address ten user-visible bugs that, as of the current
+These patches address eleven user-visible bugs that, as of the current
 public releases, ship with the bundled extension. Each patch has a
 corresponding upstream issue on
 [anthropics/claude-code](https://github.com/anthropics/claude-code/issues?q=is%3Aissue+author%3Aojura);
 this repo is where the *workaround* lives until upstream fixes ship.
+
+The patchset signature `/*pfg-vN*/` stands for **Persistent Fsck
+Glitches** — backronymed from the original `patch-fg` script (Patches
+F + G); the rest just kept getting added.
 
 ## What's patched
 
@@ -24,6 +28,7 @@ this repo is where the *workaround* lives until upstream fixes ship.
 | **H** | Bypass the 5 MB precompact-skip optimization in the loader | Sessions > 5 MB only show post-most-recent-compactSummary content; pre-boundary scrollback / fork picker / rewind invisible | [#55700](https://github.com/anthropics/claude-code/issues/55700) |
 | **I** | Neutralize the webview's 500-message render cap | Sessions with > 600 messages silently truncate to last 500 in the chat panel; no UI feedback | [#55701](https://github.com/anthropics/claude-code/issues/55701) |
 | **J** | Resolve cross-file `logicalParentUuid` at session load (load sibling JSONLs to bridge fork boundaries) | Forks of compacted sessions can't scroll back into the source session's history; chain walker stops at the cross-file stitch | [#48937 (cross-file)](https://github.com/anthropics/claude-code/issues/48937) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
+| **K** | `lost+found`-style read-side recovery for sessions with dangling `logicalParentUuid` — synthesize visible seam + bookend ghosts that reattach the orphaned in-file predecessor | Sessions where the compactor's lpu was never persisted (write-side bug at `compact.ts:598`) silently truncate the chain at the boundary; user thinks pre-compact work was lost | [#55818](https://github.com/anthropics/claude-code/issues/55818) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
 
 See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 (why, locate, patch, verify, test).
@@ -43,7 +48,7 @@ claude-patches/
 ├── prebuilt/
 │   └── 2.1.126/
 │       └── apply.py         # version-pinned, self-contained apply script
-│                            # covering ALL patches A through J. Built by
+│                            # covering ALL patches A through K. Built by
 │                            # diffing the live patched bundle against its
 │                            # pristine .bak files, byte-stable verified.
 ├── docs/
@@ -78,7 +83,7 @@ applies the patches, end to end. The skill:
   globbing across `~/.<ide>/extensions/` if the env var isn't set.
 - **Fetches and runs the prebuilt** for your installed version from
   this repo. The prebuilt is idempotent (detects an embedded
-  `pfg-v1.1` signature and no-ops if patches are already applied) and
+  `pfg-v1.2` signature and no-ops if patches are already applied) and
   byte-stable verified at synthesis time.
 - **Falls back to manual per-patch synthesis** if no prebuilt exists
   yet for your version.
@@ -104,7 +109,7 @@ curl -fsSL "https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt
 ```
 
 The script auto-detects your extension dir (across IDE variants),
-applies all 17 splices (Patches A–J), and validates with `node --check`.
+applies all 19 splices (Patches A–K), and validates with `node --check`.
 Idempotent. Use `--force` to restore from `.bak` files and re-apply
 unconditionally.
 
@@ -144,7 +149,7 @@ has no `.bak` until you patch it.)
 
 If you have push access and need to add a prebuilt for a new extension
 release, see [MAINTAINER.md](MAINTAINER.md). The short version: apply
-patches A–J locally first, then
+patches A–K locally first, then
 `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>` synthesizes
 and byte-stability-validates a prebuilt apply script from the diff.
 
