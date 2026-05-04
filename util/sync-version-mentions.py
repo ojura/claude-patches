@@ -35,21 +35,25 @@ sys.path.insert(0, REPO_ROOT)
 from version import PATCHSET_VERSION  # SSOT extracted from skill/SKILL.md
 
 
-# Files where every `pfg-vX` mention is a *current-state* claim (signature
-# the user should grep for, example output of the current prebuilt, etc.)
-# and therefore must stay in lockstep with PATCHSET_VERSION.
+# README.md is the only file where a literal `pfg-vX` mention earns its
+# keep: it's the public face of the repo, users grep README to confirm
+# what signature they're getting, and you want the literal version visible
+# on first glance without chasing a Python script.
 #
-# Excluded on purpose:
-#   - skill/SKILL.md         the file that HOLDS the SSOT line. Bash blocks
-#                            inside it call `python3 version.py` for the live
-#                            signature; prose abstracts the version away
-#                            ("the patchset signature"). So SKILL.md never
-#                            needs sync — it's authoritative top-to-bottom.
-#   - CHANGELOG.md           per-version historical entries; rewriting them
-#                            would corrupt history.
+# Every other file resolves the version dynamically:
+#   - skill/SKILL.md         bash blocks call `python3 version.py`; prose
+#                            uses "the patchset signature" abstractly.
+#   - MAINTAINER.md          same approach — internal doc, same audience as
+#                            SKILL.md, no need to hardcode.
+#   - skill/apply-patch-fg.py, util/build-prebuilt.py, util/sync-...
+#                            import PATCHSET_VERSION/SIGNATURE from version.py.
+#
+# And these are excluded for historical reasons (rewriting would corrupt
+# the record):
+#   - CHANGELOG.md           per-version entries.
 #   - docs/debugging.md      case studies frozen at the time of writing.
 #   - prebuilt/archive/*     frozen old prebuilts.
-SYNC_TARGETS = ["README.md", "MAINTAINER.md"]
+SYNC_TARGETS = ["README.md"]
 
 
 def main() -> int:

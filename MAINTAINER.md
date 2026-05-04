@@ -89,9 +89,9 @@ patched live extension dir          maintainer tool             new prebuilt
   applied the patches wrong. Investigate before pushing.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
-  say "Already patched (signature /\*pfg-v1.4\*/ present). Nothing to
-  do." If it tries to apply, your live install isn't patched
-  correctly — back out before pushing.
+  say `Already patched (signature <SIG> present). Nothing to do.`
+  where `<SIG>` matches `python3 version.py`. If it tries to apply,
+  your live install isn't patched correctly — back out before pushing.
 
 ## Bumping the patchset version
 
@@ -128,16 +128,15 @@ that working state while migrating the on-disk signature.
 5. **Stage everything**: `git add -A`. Doing this *before* sync makes
    the sync's effect visible as the only unstaged delta in Step 7.
 
-6. **Sync current-state mentions**:
+6. **Sync README.md**:
    `python3 util/sync-version-mentions.py`. Rewrites `pfg-vX[.Y]`
-   mentions in README.md and MAINTAINER.md (the allowlist of static
-   external docs where every signature mention is a current-state
-   claim). Other files are excluded:
-   - `skill/SKILL.md` is the SSOT-holder; its bash blocks call
-     `python3 version.py` and prose uses "the patchset signature"
-     abstractly, so it never needs sync.
-   - `CHANGELOG.md`, `docs/debugging.md`, `prebuilt/archive/*` —
-     their mentions are historical and must stay frozen.
+   mentions in `README.md` (the only file in `SYNC_TARGETS`).
+   Everything else either resolves the version dynamically
+   (SKILL.md, MAINTAINER.md, the Python consumers — all reach into
+   `version.py`) or is deliberately frozen (`CHANGELOG.md`,
+   `docs/debugging.md`, `prebuilt/archive/*`). The script exists for
+   the one file where a literal version genuinely belongs in the
+   text (the public-facing README).
 
 7. **Review the unstaged diff**: `git diff`. The only changes here
    should be the sync rewrites. If anything outside the allowlist
@@ -180,14 +179,15 @@ Consumers:
   signatures in the template).
 - `util/sync-version-mentions.py` imports `PATCHSET_VERSION` and
   rewrites the `SYNC_TARGETS` allowlist on demand. Run as Step 6 above.
-- `skill/SKILL.md` bash blocks invoke `python3 "$REPO_ROOT/version.py"`
-  inline whenever they need the literal signature — see the verification
-  greps in the maintainer-only subsection. SKILL.md is the *holder* of
-  the SSOT line, and its bash blocks reach back into `version.py`
-  rather than duplicating the version. Prose in SKILL.md uses abstract
-  language ("the patchset signature") for the same reason. Net effect:
-  SKILL.md is authoritative top-to-bottom and never needs sync — it's
-  *deliberately not* in `SYNC_TARGETS`.
+- `skill/SKILL.md` and `MAINTAINER.md` resolve the signature
+  dynamically: bash blocks invoke `python3 "$REPO_ROOT/version.py"`
+  inline; prose uses abstract language ("the patchset signature").
+  SKILL.md is the *holder* of the SSOT line, and MAINTAINER.md has
+  the same audience-and-currency profile (internal, always read at
+  HEAD), so neither benefits from a hardcoded version. Net effect:
+  both are authoritative top-to-bottom and *deliberately not* in
+  `SYNC_TARGETS` — only `README.md` is, because that's the public-
+  facing file where a literal version earns its keep.
 
 Drift mode that motivated this design: bumping required editing three
 places (apply-patch-fg.py constant, build-prebuilt.py template SIGNATURE,
