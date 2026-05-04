@@ -90,8 +90,9 @@ patched live extension dir          maintainer tool             new prebuilt
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
   say `Already patched (signature <SIG> present). Nothing to do.`
-  where `<SIG>` matches `python3 version.py`. If it tries to apply,
-  your live install isn't patched correctly — back out before pushing.
+  where `<SIG>` matches the output of `python3 version.py`. If it
+  tries to apply, your live install isn't patched correctly — back
+  out before pushing.
 
 ## Bumping the patchset version
 
