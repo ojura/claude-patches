@@ -31,7 +31,11 @@ F + G); the rest just kept getting added.
 | **K** | `lost+found`-style read-side recovery for sessions with dangling `logicalParentUuid` — synthesize visible seam + bookend ghosts that reattach the orphaned in-file predecessor | Sessions where the compactor's lpu was never persisted (write-side bug at `compact.ts:598`) silently truncate the chain at the boundary; user thinks pre-compact work was lost | [#55818](https://github.com/anthropics/claude-code/issues/55818) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
 
 See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
-(why, locate, patch, verify, test).
+(why, locate, patch, verify, test). For *how* to introspect the running
+extension via CDP — set conditional breakpoints, walk the React fiber
+tree, dispatch RPCs from outside, etc. — see
+[`docs/debugging.md`](docs/debugging.md). The Patch K case study at the
+end of that doc walks through using all the recipes end-to-end.
 
 ## Layout
 
@@ -52,7 +56,10 @@ claude-patches/
 │                            # diffing the live patched bundle against its
 │                            # pristine .bak files, byte-stable verified.
 ├── docs/
-│   └── patches.md           # detailed per-patch documentation
+│   ├── patches.md           # detailed per-patch documentation
+│   └── debugging.md         # CDP introspection reference for the bundled
+│                            # extension — port roles, BP-with-condition,
+│                            # fiber walk, RPC dispatch, gotchas, case study
 ├── util/                    # maintainer tools — see MAINTAINER.md
 ├── MAINTAINER.md            # how to synthesize and push a new prebuilt
 └── README.md                # this file

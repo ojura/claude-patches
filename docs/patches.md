@@ -668,4 +668,47 @@ bookend at chain root and the seam at the boundary, both as colored
 bubbles with a ⚠️ banner. Clicking either smooth-scrolls to the
 other.
 
+### Known limitation: seam unreachable when the live chain stitches cross-file
+
+Patch K plants its seam ghost on the orphan chain (rewriting the
+phantom-lpu boundary's lpu to point at the synthesized ghost). Whether
+the seam survives the renderer depends on a structural property of the
+source `.jsonl` that isn't always favourable.
+
+`Ez4` (the chain walker that builds the rendered transcript) is
+**single-chain**. It builds a uuid→msg map, finds all roots (uuids
+that aren't anyone's parent — i.e. leaves), walks up from each to the
+first user/assistant tip, then picks `Z = the tip with the largest index in V`,
+and walks UP from Z one more time to assemble the rendered chain.
+Anything not in that single backward walk from Z is dropped.
+
+When a session has had multiple compactions and the second compactor's
+captured-lpu lands **in the same file** (e.g. a `system local_command`
+"Error: Compaction canceled." message), the live chain stays in-file:
+walker traverses boundary2 → in-file lpu → continues up Chain A →
+boundary1 → seam → ✓ rendered.
+
+When that captured uuid is **cross-file** (e.g. a tool-result uuid
+that lives in a sibling session because of fork/branch interaction),
+Patch J prepends the sibling. The live chain's walker now jumps
+boundary2 → cross-file uuid → sibling chain. **Chain A in this file
+becomes a topologically disconnected orphan branch** — Ez4 picks it
+up as a tip in the first loop, but loses it when Z is selected by
+max-by-index. Seam ghost gets planted on Chain A and goes
+unrendered.
+
+Verified empirically (BP-with-side-effect-condition at Ez4 return,
+captured U/Z/H — see [`debugging.md`](debugging.md) case study):
+
+- Session whose 2nd boundary's lpu resolves same-file → seam IS in H, rendered.
+- Session whose 2nd boundary's lpu resolves cross-file → seam IS in U
+  (one of the four leaf-walk tips) but Z = chain-B leaf at higher
+  index; H walked back from Z never crosses the seam.
+
+A proper fix has to either splice the notice into the LIVE chain
+(between the two boundaries, or at the cross-file stitch point), or
+change Ez4's selection to collect content from ALL tips, not just
+max-by-index Z. The in-orphan-chain seam is by design unreachable
+when the live chain takes a cross-file branch.
+
 **Upstream issue**: [#55818](https://github.com/anthropics/claude-code/issues/55818) (read-side mitigation) + [#46603](https://github.com/anthropics/claude-code/issues/46603) (write-side root cause at `compact.ts:598`).
