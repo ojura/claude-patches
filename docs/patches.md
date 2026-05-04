@@ -606,12 +606,26 @@ For each compact_boundary whose lpu is still unresolved:
    seam ghost. The chain walker now bridges through it.
 4. If any seam was synthesized, prepend a "bookend" ghost
    (`pfgk-bookend-…`) at the chain root by reparenting the original
-   first chain-participant to it.
+   first chain-participant to it. (This may not fire if the chain root
+   is a system-type boundary or all chain participants are parented —
+   common when Patch J has prepended sibling-file content. See step 5.)
+5. **If a seam was synthesized but no bookend fired**, K detects the
+   "unreachable seam" scenario (typically caused by Patch J prepending
+   sibling content for one boundary's lpu while another boundary's lpu
+   was phantom — the live chain bypasses the seam K just planted).
+   K then synthesizes a **`pfgk-orphannotice-…`** ghost on the LIVE
+   chain itself: insert it between the resolved-lpu boundary and that
+   boundary's first child, so the walker traverses through it. The
+   notice text tells the user that an orphan compaction chain exists
+   in this file but isn't currently displayed because the visible
+   history was reattached cross-file. The render wrapper colours this
+   ghost amber (vs orange seam, red bookend).
 
 The recovered span isn't *guaranteed* to be the original chain — in
 pathological cases the in-file predecessor could belong to a
 different conversation that landed in the same JSONL. The visible
-seam + bookend bracket exists to make that ambiguity legible to the
+seam + bookend bracket (or the orphannotice on the live chain when
+seam is unreachable) exists to make that ambiguity legible to the
 user instead of silently fudging the topology.
 
 ### Locate
@@ -631,17 +645,23 @@ returned element with a colored container when `Z.uuid` starts with
 ### Patch (extension.js)
 
 See SKILL.md Step 13 for the full splice. Summary: synthesizes seam
-ghosts (claiming the missing lpu uuid via `pfgk-seam-…` prefix) and a
-bookend ghost (`pfgk-bookend-…` prefix) at the chain root.
+ghosts (`pfgk-seam-…` prefix) and a bookend ghost (`pfgk-bookend-…`
+prefix) at the chain root, plus a fallback orphannotice ghost
+(`pfgk-orphannotice-…` prefix) on the LIVE chain when the bookend
+fails to fire (which signals that the seam ended up on an orphan
+branch unreachable from the live chain — see step 5 in Why above).
 
 ### Patch (webview/index.js)
 
 Wrap the user-message bubble with a colored `<div>` (orange for seam,
-red for bookend) plus a click handler that scrolls to the matching
-counterpart via `[data-pfgk-role="…"]` queries. Inject a `<style>`
-inside the wrapper that suppresses the truncation gradient, the
-"Show more / Show less" collapse buttons, and the edit/fork action
-button — none of which make sense on a synthetic message.
+red for bookend, amber for orphannotice) plus a click handler that
+scrolls to the matching counterpart via `[data-pfgk-role="…"]`
+queries. The orphannotice has no counterpart (it's standalone in the
+live chain) so its click handler and cursor pointer are suppressed.
+Inject a `<style>` inside the wrapper that suppresses the truncation
+gradient, the "Show more / Show less" collapse buttons, and the
+edit/fork action button — none of which make sense on a synthetic
+message.
 
 ### Critical implementation notes
 
@@ -668,12 +688,16 @@ bookend at chain root and the seam at the boundary, both as colored
 bubbles with a ⚠️ banner. Clicking either smooth-scrolls to the
 other.
 
-### Known limitation: seam unreachable when the live chain stitches cross-file
+For the unreachable-seam variant (sessions with two boundaries where
+the second's lpu resolves cross-file via Patch J), the orphannotice
+ghost should appear on the live chain between the resolved boundary
+and its first child, as an amber bubble with a ⚠️ banner and warning
+text about the orphan chain that exists in the file but is unreachable
+from the visible view.
 
-Patch K plants its seam ghost on the orphan chain (rewriting the
-phantom-lpu boundary's lpu to point at the synthesized ghost). Whether
-the seam survives the renderer depends on a structural property of the
-source `.jsonl` that isn't always favourable.
+### Background: the unreachable-seam scenario (now mitigated by orphannotice)
+
+The reason an orphannotice is needed instead of just-the-seam-and-bookend:
 
 `Ez4` (the chain walker that builds the rendered transcript) is
 **single-chain**. It builds a uuid→msg map, finds all roots (uuids
@@ -686,7 +710,7 @@ When a session has had multiple compactions and the second compactor's
 captured-lpu lands **in the same file** (e.g. a `system local_command`
 "Error: Compaction canceled." message), the live chain stays in-file:
 walker traverses boundary2 → in-file lpu → continues up Chain A →
-boundary1 → seam → ✓ rendered.
+boundary1 → seam → ✓ rendered. K's seam alone suffices.
 
 When that captured uuid is **cross-file** (e.g. a tool-result uuid
 that lives in a sibling session because of fork/branch interaction),
@@ -694,7 +718,7 @@ Patch J prepends the sibling. The live chain's walker now jumps
 boundary2 → cross-file uuid → sibling chain. **Chain A in this file
 becomes a topologically disconnected orphan branch** — Ez4 picks it
 up as a tip in the first loop, but loses it when Z is selected by
-max-by-index. Seam ghost gets planted on Chain A and goes
+max-by-index. Seam ghost gets planted on Chain A and would go
 unrendered.
 
 Verified empirically (BP-with-side-effect-condition at Ez4 return,
@@ -705,10 +729,15 @@ captured U/Z/H — see [`debugging.md`](debugging.md) case study):
   (one of the four leaf-walk tips) but Z = chain-B leaf at higher
   index; H walked back from Z never crosses the seam.
 
-A proper fix has to either splice the notice into the LIVE chain
-(between the two boundaries, or at the cross-file stitch point), or
-change Ez4's selection to collect content from ALL tips, not just
-max-by-index Z. The in-orphan-chain seam is by design unreachable
-when the live chain takes a cross-file branch.
+The orphannotice mitigation handles this by inserting an amber-coloured
+ghost INTO the live chain (between the resolved boundary and its first
+child, so the walker traverses through it on the way back from Z). The
+seam is still planted on the orphan chain (semantically correct for
+that branch); the orphannotice provides the user-facing signal in the
+live chain that an orphan exists.
+
+A proper Ez4-side fix would change the walker to collect from ALL
+tips (multi-chain rendering), not just max-by-index Z. That's a much
+bigger change and not currently attempted.
 
 **Upstream issue**: [#55818](https://github.com/anthropics/claude-code/issues/55818) (read-side mitigation) + [#46603](https://github.com/anthropics/claude-code/issues/46603) (write-side root cause at `compact.ts:598`).

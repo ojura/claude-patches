@@ -335,7 +335,7 @@ WS=$(curl -s http://127.0.0.1:<TARGET>/json | python3 -c 'import sys,json; print
 node /tmp/cdp-eval.mjs "$WS" '(function(){
   var s = require("fs").readFileSync(
     "/home/juraj/.antigravity/extensions/anthropic.claude-code-2.1.126-linux-x64/extension.js","utf-8");
-  return JSON.stringify({size: s.length, sig: ["/*pfg-v1*/","/*pfg-v1.1*/","/*pfg-v1.2*/"].filter(t=>s.includes(t))});
+  return JSON.stringify({size: s.length, sig: ["/*pfg-v1*/","/*pfg-v1.1*/","/*pfg-v1.3*/"].filter(t=>s.includes(t))});
 })()'
 ```
 
@@ -643,7 +643,7 @@ Mutators include `updateSessionState`, `setActivePanel`,
 - `this.sessionStates: Map<sessionId, {sessionId, state, title}>` —
   the title cache. **Patch F's target.** `updateSessionState(V, K, B)`
   is the mutator (`V`=sessionId, `K`=state, `B`=title); the
-  `/*pfg-v1.2*/` signature is just upstream of it. Pencil rename in
+  `/*pfg-v1.3*/` signature is just upstream of it. Pencil rename in
   sidebar updates this; without Patch F, the rename was applied to
   `sessionPanels[sid].title` but the `sessionStates` entry's title
   wasn't refreshed, so on session-switch the broadcast resent the stale
@@ -1015,7 +1015,7 @@ User opens two chat panels in the same Antigravity window:
 - Session **B** (`61974011-...`) — Patch K's seam ghost is absent
   from the panel.
 
-Both sessions have the same patches loaded (signature `/*pfg-v1.2*/`
+Both sessions have the same patches loaded (signature `/*pfg-v1.3*/`
 present in `extension.js`). Both panels are in the same exthost (same
 window). What's different?
 
@@ -1025,10 +1025,10 @@ window). What's different?
 node /tmp/cdp-eval.mjs "$WS_TARGET" '(function(){
   var s = require("fs").readFileSync(
     "/home/juraj/.antigravity/extensions/anthropic.claude-code-2.1.126-linux-x64/extension.js","utf-8");
-  return JSON.stringify({sig: ["/*pfg-v1.2*/"].filter(t=>s.includes(t)),
+  return JSON.stringify({sig: ["/*pfg-v1.3*/"].filter(t=>s.includes(t)),
                          hasK: s.includes("Orphaned compaction pointer")});
 })()'
-// {"sig":["/*pfg-v1.2*/"], "hasK":true} — patches are live
+// {"sig":["/*pfg-v1.3*/"], "hasK":true} — patches are live
 ```
 
 ### Step 2: simulate Ez4 on the broken session's JSONL outside the running extension
@@ -1128,6 +1128,27 @@ uuid captured by `compact.ts:598`), keeping the live chain stitched
 through the orphan; Session B's second-compaction `lpu` resolves
 CROSS-FILE (a `tool_result` uuid in a sibling JSONL), bypassing the
 orphan entirely.
+
+### Mitigation (added in pfg-v1.3)
+
+Once the empirical diagnosis was nailed, the fix was straightforward:
+detect the unreachable scenario at K-time (signal: a seam was planted
+but no bookend was — bookend fails to fire when the chain root is the
+sibling-file content Patch J prepended), and synthesize a **third
+ghost type**, `pfgk-orphannotice-…`, on the LIVE chain. Insert it
+between the cross-file-resolved boundary and that boundary's first
+child, so the walker traverses through it on the way back from Z.
+The seam stays planted on the orphan chain (semantically correct for
+that branch); the orphannotice provides the user-facing signal in the
+live chain. Render wrapper colours it amber.
+
+End-to-end verification of the fix used the same recipes in this doc:
+disk-edit `extension.js` + `webview/index.js` (mechanism 5 from the
+refresh playbook), `Input.dispatchKeyEvent` for "Reload Window"
+(mechanism 3), then BP-free verification via fiber-walk to the manager
+`__mgr.activeSession.value.messages.peek()`, filtering for
+`pfgk-orphannotice-` prefix uuids and DOM probing for the
+`.pfgk-orphannotice` wrapper class.
 
 ### What this case study demonstrates
 

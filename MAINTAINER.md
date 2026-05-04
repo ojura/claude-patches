@@ -89,7 +89,7 @@ patched live extension dir          maintainer tool             new prebuilt
   applied the patches wrong. Investigate before pushing.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
-  say "Already patched (signature /\*pfg-v1.2\*/ present). Nothing to
+  say "Already patched (signature /\*pfg-v1.3\*/ present). Nothing to
   do." If it tries to apply, your live install isn't patched
   correctly — back out before pushing.
 

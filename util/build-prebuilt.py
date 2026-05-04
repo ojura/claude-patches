@@ -108,7 +108,7 @@ def find_default_ext_dir():
     return matches[0]
 
 
-SIGNATURE = "/*pfg-v1.2*/"
+SIGNATURE = "/*pfg-v1.3*/"
 PATCHSET_VERSION = re.match(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', SIGNATURE).group(1)
 
 # Each entry: (file_relpath, [(old, new), (old, new), ...])

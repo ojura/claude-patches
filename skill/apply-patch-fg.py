@@ -36,7 +36,7 @@ prior application and re-apply cleanly.
 """
 import os, re, shutil, subprocess, sys, glob
 
-PATCHSET_VERSION = "1.2"
+PATCHSET_VERSION = "1.3"
 PATCHSET_SIG = f"/*pfg-v{PATCHSET_VERSION}*/"
 
 
