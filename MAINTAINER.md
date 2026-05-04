@@ -97,19 +97,61 @@ patched live extension dir          maintainer tool             new prebuilt
 
 If a future patch is added or an existing patch's behavior is
 materially changed, bump the patchset version (semver-style minor for
-add-ons like H/I/J or K, major for breaking redesigns):
+add-ons like H/I/J or K, major for breaking redesigns).
 
-1. **Edit ONE line in `skill/SKILL.md`**: change `**Patchset version**:
-   `1.4`` to the new version. This is the single source of truth.
-2. Re-synthesize each `prebuilt/<VER>/apply.py`:
-   `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>`. The new
-   prebuilts embed the bumped signature; `README.md`'s `pfg-vN` mention
-   is auto-synced as a side-effect of every synthesis.
-3. End-users running the new prebuilt against an older-version-patched
-   extension will get: *"Stale patchset (file has vX, current is vY);
-   restoring … from .bak"*. The `.bak` from their original run is the
-   pre-patch baseline — reusable as the restore point indefinitely
-   (until the extension itself updates).
+Precondition: your live extension already carries the new patch
+behavior (you developed it locally). The bump procedure below preserves
+that working state while migrating the on-disk signature.
+
+1. **Edit ONE line in `skill/SKILL.md`**: change
+   `**Patchset version**: \`1.4\`` to the new version. That line is
+   the single source of truth (see "version.py" below).
+
+2. **Re-apply patches locally as a stability check.** Run
+   `apply-patch-fg.py` against your live extension; the *only* diff vs
+   the pre-bump live extension should be the signature tag itself
+   (`/*pfg-vOLD*/` → `/*pfg-vNEW*/`). If anything else moves, the
+   script's regex anchors drifted relative to the bundle and need
+   investigation before you ship a prebuilt.
+
+3. **Synthesize the new prebuilt(s).** For every supported extension
+   version: `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>`.
+   This captures the new signature into `prebuilt/<VER>/apply.py` and
+   byte-validates against the live patched files.
+
+4. **Add a CHANGELOG entry.** `CHANGELOG.md` is a per-version
+   historical log. Newest first; describe what changed and why.
+   Critically, `CHANGELOG.md` is *deliberately excluded* from the
+   sync allowlist (Step 6) — its `pfg-vN` mentions must stay frozen
+   to the version they describe.
+
+5. **Stage everything**: `git add -A`. Doing this *before* sync makes
+   the sync's effect visible as the only unstaged delta in Step 7.
+
+6. **Sync current-state mentions**:
+   `python3 util/sync-version-mentions.py`. Rewrites `pfg-vX[.Y]`
+   mentions in README.md, MAINTAINER.md, and skill/SKILL.md (the
+   allowlist of files where every signature mention is a current-
+   state claim). Other files — `CHANGELOG.md`, `docs/debugging.md`,
+   `prebuilt/archive/*` — are excluded because their mentions are
+   historical.
+
+7. **Review the unstaged diff**: `git diff`. The only changes here
+   should be the sync rewrites. If anything outside the allowlist
+   was touched, the script is operating on a stale list (a doc file
+   gained a current-state claim that needs to be added to
+   `SYNC_TARGETS`, or vice versa). If the diff inside the allowlist
+   touched a line you didn't expect (e.g., a historical reference
+   that ended up there), promote that line out of the allowlisted
+   file or rewrite it to not match the regex.
+
+8. **Stage and commit**: `git add -A && git commit ...`.
+
+End-users running the new prebuilt against an older-version-patched
+extension will get: *"Stale patchset (file has vX, current is vY);
+restoring … from .bak"*. The `.bak` from their original run is the
+pre-patch baseline — reusable as the restore point indefinitely
+(until the extension itself updates).
 
 This is why the comprehensive prebuilt covers A–K in one script: a
 patchset bump can include changes anywhere, and a self-contained
@@ -128,10 +170,11 @@ Consumers:
   from `version.py` (resolves the patch-claude symlink via
   `os.path.realpath` so the import works whether the skill is run from
   the repo or from `~/.claude/skills/patch-claude/`).
-- `util/build-prebuilt.py` imports the same constants, substitutes
+- `util/build-prebuilt.py` imports the same constants and substitutes
   them into the prebuilt template at synthesis time (no more hardcoded
-  signatures in the template), and rewrites README's `pfg-vN` mention
-  to match.
+  signatures in the template).
+- `util/sync-version-mentions.py` imports `PATCHSET_VERSION` and
+  rewrites the `SYNC_TARGETS` allowlist on demand. Run as Step 6 above.
 
 Drift mode that motivated this design: bumping required editing three
 places (apply-patch-fg.py constant, build-prebuilt.py template SIGNATURE,
@@ -139,6 +182,19 @@ build-prebuilt.py template docstring), plus chasing scattered `pfg-vN`
 mentions in README/docs. Forgetting one of those left the prebuilt's
 idempotency check looking for an old signature while the splices applied
 new content — silent confusion. Now there's one line to edit.
+
+### Why sync runs separately from build-prebuilt
+
+`util/sync-version-mentions.py` is a standalone script, not a
+side-effect of `build-prebuilt.py`. It can technically run any time
+after Step 1 (the sync only depends on `version.py` → `SKILL.md`, not
+on the prebuilt), but the recommended order puts it as Step 6 so
+its diff is reviewable in isolation in Step 7. If sync ran inside
+build-prebuilt, an accidental rewrite outside the intended
+SYNC_TARGETS (e.g., due to a bug in the script, or an unrelated file
+that gained a `pfg-v` mention) would get buried in the same commit as
+the prebuilt regeneration. Separating them surfaces sync's blast
+radius as its own visible delta.
 
 ## Why the byte-stability check matters
 

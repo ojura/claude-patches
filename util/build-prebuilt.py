@@ -28,7 +28,6 @@ prebuilt/<VER>/apply.py. End-users never run util/build-prebuilt.py.
 """
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -299,27 +298,11 @@ def main():
     print(f"Wrote {out_path}")
     print(f"  size: {os.path.getsize(out_path)} bytes")
     print(f"  total splices: {sum(len(s[1]) for s in splices_by_file)}")
-
-    sync_readme()
-
-
-def sync_readme():
-    """Replace any pfg-vX or pfg-vX.Y mention in README.md with the current
-    PATCHSET_VERSION extracted from skill/SKILL.md. Drift-prevention: the
-    README's signature mention is rewritten on every prebuilt synthesis,
-    so it can't lag behind SKILL.md."""
-    readme = os.path.join(REPO_ROOT, "README.md")
-    if not os.path.exists(readme):
-        return
-    with open(readme, "r") as f:
-        s = f.read()
-    new_s = re.sub(r"pfg-v\d+(?:\.\d+)?", f"pfg-v{PATCHSET_VERSION}", s)
-    if new_s != s:
-        with open(readme, "w") as f:
-            f.write(new_s)
-        print(f"Synced README.md → pfg-v{PATCHSET_VERSION}")
-    else:
-        print(f"README.md already at pfg-v{PATCHSET_VERSION}")
+    print()
+    print(f"Next: add CHANGELOG.md entry for v{PATCHSET_VERSION}, then")
+    print(f"      git add -A && python3 util/sync-version-mentions.py")
+    print(f"      review the resulting diff for any unwanted rewrites,")
+    print(f"      then git add -A && commit.")
 
 
 if __name__ == "__main__":
