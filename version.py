@@ -34,3 +34,10 @@ def _read_version() -> str:
 
 PATCHSET_VERSION: str = _read_version()
 SIGNATURE: str = f"/*pfg-v{PATCHSET_VERSION}*/"
+
+
+if __name__ == "__main__":
+    # Allow shell scripts and SKILL.md bash blocks to fetch the live signature
+    # via `python3 version.py` instead of hardcoding `/*pfg-vN*/` literals
+    # (which would have to be sync-rewritten on every version bump).
+    print(SIGNATURE)

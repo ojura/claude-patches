@@ -37,12 +37,19 @@ from version import PATCHSET_VERSION  # SSOT extracted from skill/SKILL.md
 
 # Files where every `pfg-vX` mention is a *current-state* claim (signature
 # the user should grep for, example output of the current prebuilt, etc.)
-# and therefore must stay in lockstep with PATCHSET_VERSION. Files NOT on
-# this list are excluded on purpose because their `pfg-vX` mentions are
-# historical snapshots: CHANGELOG.md (per-version entries), docs/debugging.md
-# (case studies frozen at the time of writing), prebuilt/archive/* (frozen
-# old builds). Auto-rewriting those would silently corrupt history.
-SYNC_TARGETS = ["README.md", "MAINTAINER.md", "skill/SKILL.md"]
+# and therefore must stay in lockstep with PATCHSET_VERSION.
+#
+# Excluded on purpose:
+#   - skill/SKILL.md         the file that HOLDS the SSOT line. Bash blocks
+#                            inside it call `python3 version.py` for the live
+#                            signature; prose abstracts the version away
+#                            ("the patchset signature"). So SKILL.md never
+#                            needs sync — it's authoritative top-to-bottom.
+#   - CHANGELOG.md           per-version historical entries; rewriting them
+#                            would corrupt history.
+#   - docs/debugging.md      case studies frozen at the time of writing.
+#   - prebuilt/archive/*     frozen old prebuilts.
+SYNC_TARGETS = ["README.md", "MAINTAINER.md"]
 
 
 def main() -> int:

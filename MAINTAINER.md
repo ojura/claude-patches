@@ -130,11 +130,14 @@ that working state while migrating the on-disk signature.
 
 6. **Sync current-state mentions**:
    `python3 util/sync-version-mentions.py`. Rewrites `pfg-vX[.Y]`
-   mentions in README.md, MAINTAINER.md, and skill/SKILL.md (the
-   allowlist of files where every signature mention is a current-
-   state claim). Other files — `CHANGELOG.md`, `docs/debugging.md`,
-   `prebuilt/archive/*` — are excluded because their mentions are
-   historical.
+   mentions in README.md and MAINTAINER.md (the allowlist of static
+   external docs where every signature mention is a current-state
+   claim). Other files are excluded:
+   - `skill/SKILL.md` is the SSOT-holder; its bash blocks call
+     `python3 version.py` and prose uses "the patchset signature"
+     abstractly, so it never needs sync.
+   - `CHANGELOG.md`, `docs/debugging.md`, `prebuilt/archive/*` —
+     their mentions are historical and must stay frozen.
 
 7. **Review the unstaged diff**: `git diff`. The only changes here
    should be the sync rewrites. If anything outside the allowlist
@@ -163,7 +166,9 @@ needing the per-patch skill walkthrough.
 The version lives in exactly one human-readable place: a marked line
 near the top of `skill/SKILL.md`. `version.py` (repo root) extracts it
 via regex (`**Patchset version**: \`(\d+(?:\.\d+)?)\``) and exports
-`PATCHSET_VERSION` and `SIGNATURE` constants.
+`PATCHSET_VERSION` and `SIGNATURE` constants. When invoked as a
+script (`python3 version.py`) it prints the live signature on stdout,
+so shell code can fetch it without hardcoding.
 
 Consumers:
 - `skill/apply-patch-fg.py` imports `PATCHSET_VERSION` and `SIGNATURE`
@@ -175,6 +180,14 @@ Consumers:
   signatures in the template).
 - `util/sync-version-mentions.py` imports `PATCHSET_VERSION` and
   rewrites the `SYNC_TARGETS` allowlist on demand. Run as Step 6 above.
+- `skill/SKILL.md` bash blocks invoke `python3 "$REPO_ROOT/version.py"`
+  inline whenever they need the literal signature — see the verification
+  greps in the maintainer-only subsection. SKILL.md is the *holder* of
+  the SSOT line, and its bash blocks reach back into `version.py`
+  rather than duplicating the version. Prose in SKILL.md uses abstract
+  language ("the patchset signature") for the same reason. Net effect:
+  SKILL.md is authoritative top-to-bottom and never needs sync — it's
+  *deliberately not* in `SYNC_TARGETS`.
 
 Drift mode that motivated this design: bumping required editing three
 places (apply-patch-fg.py constant, build-prebuilt.py template SIGNATURE,

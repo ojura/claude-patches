@@ -25,9 +25,10 @@ This single bash block does three things in one round-trip:
    or a fallback glob across `~/.<ide>/extensions/` for any IDE that
    pulls from Open VSX (VS Code, Antigravity, Cursor, VSCodium, etc.).
 3. **Fetch the prebuilt for that version** and run it. Prebuilts are
-   self-validating (detect `pfg-v1.4` signature, idempotent, byte-stable
-   verified at synthesis time) — so this step either applies the
-   patches cleanly OR no-ops because they're already applied.
+   self-validating (detect the patchset signature, idempotent,
+   byte-stable verified at synthesis time) — so this step either
+   applies the patches cleanly OR no-ops because they're already
+   applied.
 
 ```sh
 set -u
@@ -153,7 +154,7 @@ fi
 - `PATCHES_APPLIED` → skill is complete. Tell the user to reload VSCode.
   Do NOT run any verification greps — they target manual-path splices
   with placeholder param names and will give false negatives on
-  prebuilt-applied code. The `pfg-v1.4` signature embedded in
+  prebuilt-applied code. The patchset signature embedded in
   `extension.js` is the authoritative check, and the prebuilt verifies
   it itself.
 - `ABORT: ...` → stop and surface the message to the user; don't try
@@ -163,9 +164,10 @@ fi
     2. **Patches F and G**: do NOT splice manually. Run
        `skill/apply-patch-fg.py` — it locates anchors via regex (so it
        handles variable-name drift across releases automatically) and
-       embeds the `/*pfg-v1.4*/` signature comment that the prebuilt
-       relies on for idempotency. Steps 8 and 9 below describe the
-       splices structurally for reference only.
+       embeds the patchset signature comment (current value:
+       `python3 "$REPO_ROOT/version.py"`) that the prebuilt relies on
+       for idempotency. Steps 8 and 9 below describe the splices
+       structurally for reference only.
     3. **Patches H, I, J**: follow Steps 10–12 (per-splice manual
        application). All three are short, single-anchor splices.
     4. **Patch K**: follow Step 13 (extension.js loader splice + a
@@ -202,7 +204,8 @@ stop here.
 If `apply-patch-fg.py` succeeded as-is (preferred path):
 
 1. Verify the signature is in live:
-   `grep -c '/\*pfg-v1.4\*/' $EXT/extension.js` — must be `1`.
+   `grep -cF "$(python3 "$REPO_ROOT/version.py")" "$EXT/extension.js"`
+   — must be `1`.
 2. Run `build-prebuilt.py`, commit, push.
 
 If `apply-patch-fg.py`'s regexes failed on this version:
@@ -216,8 +219,9 @@ If `apply-patch-fg.py`'s regexes failed on this version:
 
 ```sh
 # Precondition: signature must already be in live (apply-patch-fg.py ran)
-grep -q '/\*pfg-v1.4\*/' "$EXT/extension.js" || \
-    { echo "ABORT: signature missing — run apply-patch-fg.py first"; exit 1; }
+SIG="$(python3 "$REPO_ROOT/version.py")"
+grep -qF "$SIG" "$EXT/extension.js" || \
+    { echo "ABORT: signature $SIG missing — run apply-patch-fg.py first"; exit 1; }
 
 git clone https://github.com/ojura/claude-patches /tmp/claude-patches
 cd /tmp/claude-patches
@@ -576,9 +580,11 @@ python3 "$REPO_ROOT/skill/apply-patch-fg.py" "$EXT/extension.js"
 The script handles both F (+F.2 +F.3) and G (+G.1 +G.2). It locates
 anchors via regex with named captures, so renamings like `m1`→`c1`
 (storage class) or `[z,L]`→`[z,A]` (sessionPanels destructure) are
-absorbed automatically. It also embeds the `/*pfg-v1.4*/` signature
+absorbed automatically. It also embeds the patchset signature
 into `extension.js` after `updateSessionState(V,K,B){`, which
 `build-prebuilt.py` will then capture into the synthesized prebuilt.
+The literal signature value comes from `version.py`, which extracts
+it from this file's `**Patchset version**` line above.
 
 If the script reports anchors not matching uniquely, the bundle
 structure has shifted enough to break the regexes. Fall back to
