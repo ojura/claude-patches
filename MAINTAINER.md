@@ -89,7 +89,7 @@ patched live extension dir          maintainer tool             new prebuilt
   applied the patches wrong. Investigate before pushing.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
-  say "Already patched (signature /\*pfg-v1.3\*/ present). Nothing to
+  say "Already patched (signature /\*pfg-v1.4\*/ present). Nothing to
   do." If it tries to apply, your live install isn't patched
   correctly — back out before pushing.
 
@@ -100,7 +100,7 @@ materially changed, bump the patchset version (semver-style minor for
 add-ons like H/I/J or K, major for breaking redesigns):
 
 1. Edit `skill/apply-patch-fg.py`: bump `PATCHSET_VERSION` (e.g. `"1.2"`
-   → `"1.3"`). The signature comment becomes `/*pfg-v1.3*/`.
+   → `"1.3"`). The signature comment becomes `/*pfg-v1.4*/`.
 2. Edit `util/build-prebuilt.py`'s `PREBUILT_TEMPLATE`: bump the
    `SIGNATURE = "/*pfg-vN*/"` constant to match. (Without this, the
    generated prebuilt's idempotency check looks for the wrong sig.)

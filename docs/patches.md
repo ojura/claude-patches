@@ -597,36 +597,52 @@ silently truncated transcript despite the pre-compact JSONL content
 being intact on disk. No error, no UI feedback.
 
 Patch K runs at session-load time, after D + J have done their work.
-For each compact_boundary whose lpu is still unresolved:
+The K block has four synthesis steps, each addressing a different
+shape of the underlying compaction-corruption topology:
 
-1. Find the in-file message immediately preceding the boundary.
-2. Synthesize a "seam" ghost message claiming a `pfgk-seam-…` prefixed
-   uuid, parented to that in-file predecessor.
-3. Rewrite the boundary's `logicalParentUuid` to point at the new
-   seam ghost. The chain walker now bridges through it.
-4. If any seam was synthesized, prepend a "bookend" ghost
-   (`pfgk-bookend-…`) at the chain root by reparenting the original
-   first chain-participant to it. (This may not fire if the chain root
-   is a system-type boundary or all chain participants are parented —
-   common when Patch J has prepended sibling-file content. See step 5.)
-5. **If a seam was synthesized but no bookend fired**, K detects the
-   "unreachable seam" scenario (typically caused by Patch J prepending
-   sibling content for one boundary's lpu while another boundary's lpu
-   was phantom — the live chain bypasses the seam K just planted).
-   K then synthesizes a **`pfgk-orphannotice-…`** ghost on the LIVE
-   chain itself: insert it between the resolved-lpu boundary and that
-   boundary's first child, so the walker traverses through it. The
-   notice text tells the user that an orphan compaction chain exists
-   in this file but isn't currently displayed because the visible
-   history was reattached cross-file. The render wrapper colours this
-   ghost amber (vs orange seam, red bookend).
+1. **Phantom-lpu sibling backfill** (cross-conversation recovery):
+   For each compact_boundary whose `logicalParentUuid` is phantom
+   (no sibling has it as a uuid AS WELL), check if any sibling has
+   the same uuid AS A logicalParentUuid (= they share the same
+   compaction's missing predecessor). If so, the conversation tree
+   continues across that sibling. Find the sibling's pre-boundary
+   content (lines from chain root to its first phantom-lpu boundary)
+   and prepend that into `_parsed`. This recovers the conversation's
+   true origin from a forked sibling whose chain root is a real user
+   message.
+2. **Seam ghosts** (in-file orphan recovery):
+   For each compact_boundary whose lpu is still phantom after step 1,
+   synthesize a `pfgk-seam-…` ghost parented to the in-file predecessor
+   (the message immediately before the boundary in `_parsed`), and
+   rewrite the boundary's lpu to point at the seam. The chain walker
+   bridges through the seam.
+3. **Bridge ghosts** (cross-file → in-file redirection):
+   For each compact_boundary whose lpu was resolved cross-file by
+   Patch J (the live chain takes the cross-file shortcut), synthesize
+   a `pfgk-bridge-…` ghost between the in-file orphan chain's leaf
+   and the boundary's first child (live chain head). The chain walker
+   now traverses the in-file orphan instead of the cross-file shortcut.
+   The cross-file content is still in `_parsed` (J prepended it) and
+   reachable via the seam path → its content stays rendered.
+4. **Bookend ghost** (chain-root marker):
+   Prepend a `pfgk-bookend-…` ghost at the chain root. Two predicates,
+   tried in order: (a) original — first non-system message with
+   `parent==null && !lpu`; (b) relaxed — first user/assistant whose
+   parent chain dead-ends in a phantom-lpu compact_boundary (covers
+   the case where the chain root is parented to a system boundary, as
+   happens after step 1's backfill).
 
-The recovered span isn't *guaranteed* to be the original chain — in
-pathological cases the in-file predecessor could belong to a
-different conversation that landed in the same JSONL. The visible
-seam + bookend bracket (or the orphannotice on the live chain when
-seam is unreachable) exists to make that ambiguity legible to the
-user instead of silently fudging the topology.
+After all four steps, the renderer's chain walker traverses the full
+conversation tree in chronological order: bookend → backfilled origin
+→ seam at first compaction → in-file pre-content → bridge at second
+compaction → live chain → leaf. **Zero persisted message is dropped
+from the rendered transcript.**
+
+The recovered topology isn't *guaranteed* to be canonical — in
+pathological cases (e.g., two separate conversations that happened
+to land in the same JSONL), the seam/bridge brackets could fudge
+unrelated content. The visible markers exist to make the
+recovery-vs-fabrication boundary legible to the user.
 
 ### Locate
 
@@ -644,24 +660,27 @@ returned element with a colored container when `Z.uuid` starts with
 
 ### Patch (extension.js)
 
-See SKILL.md Step 13 for the full splice. Summary: synthesizes seam
-ghosts (`pfgk-seam-…` prefix) and a bookend ghost (`pfgk-bookend-…`
-prefix) at the chain root, plus a fallback orphannotice ghost
-(`pfgk-orphannotice-…` prefix) on the LIVE chain when the bookend
-fails to fire (which signals that the seam ended up on an orphan
-branch unreachable from the live chain — see step 5 in Why above).
+See SKILL.md Step 13 for the full splice. The K block has four
+synthesis steps — see "Why" above. Three ghost types are emitted
+into `_parsed`: `pfgk-bookend-…` (red, chain root), `pfgk-seam-…`
+(orange, in-file orphan reattachment at phantom-lpu boundary),
+`pfgk-bridge-…` (orange-red, redirection from cross-file shortcut
+back into the in-file orphan).
 
 ### Patch (webview/index.js)
 
-Wrap the user-message bubble with a colored `<div>` (orange for seam,
-red for bookend, amber for orphannotice) plus a click handler that
-scrolls to the matching counterpart via `[data-pfgk-role="…"]`
-queries. The orphannotice has no counterpart (it's standalone in the
-live chain) so its click handler and cursor pointer are suppressed.
-Inject a `<style>` inside the wrapper that suppresses the truncation
-gradient, the "Show more / Show less" collapse buttons, and the
-edit/fork action button — none of which make sense on a synthetic
-message.
+Wrap the user-message bubble with a colored `<div>` (red bookend,
+orange seam, orange-red bridge) and inject a header bar showing
+`MARKER N OF M · CLICK FOR NEXT ↓` (or `· CYCLE TO TOP ↺` for the
+last marker) computed from the session's `messages.peek()`. Click
+handler cycles to the next marker in document order via
+`document.querySelectorAll("[data-pfgk-role]")`. Inject a `<style>`
+inside the wrapper that suppresses the truncation gradient, the
+"Show more / Show less" collapse buttons, and the edit/fork action
+button — none of which make sense on a synthetic message. The visual
+intensity (loud color stripe, large ⚠️, dashed border under header,
+all-caps position counter in role color) is intentional: data-
+corruption events deserve attention-grabbing markers, not muted ones.
 
 ### Critical implementation notes
 
@@ -681,63 +700,70 @@ message.
 
 ### Test
 
-Open a session known to have a phantom-lpu boundary (search for a
-`compact_boundary` whose `logicalParentUuid` resolves to no
-`"uuid":"…"` line anywhere on disk). The chat panel should render the
-bookend at chain root and the seam at the boundary, both as colored
-bubbles with a ⚠️ banner. Clicking either smooth-scrolls to the
-other.
+Open a session in a conversation family with at least one phantom-lpu
+boundary. The chat panel should:
 
-For the unreachable-seam variant (sessions with two boundaries where
-the second's lpu resolves cross-file via Patch J), the orphannotice
-ghost should appear on the live chain between the resolved boundary
-and its first child, as an amber bubble with a ⚠️ banner and warning
-text about the orphan chain that exists in the file but is unreachable
-from the visible view.
+1. Show a red **bookend** at the very top with header `MARKER 1 OF N · CLICK FOR NEXT ↓`,
+   followed immediately by the conversation's true first user message
+   (the canonical origin recovered via cross-conversation backfill).
+2. Show an orange **seam** at each compaction event whose lpu was
+   phantom (in-file orphan reattachment).
+3. Show an orange-red **bridge** at each compaction event whose lpu
+   was resolved cross-file by Patch J (the in-file orphan was kept,
+   not bypassed).
+4. The last marker's header reads `· CYCLE TO TOP ↺`.
+5. Clicking any marker cycles to the next in document order, wrapping
+   from the last back to the bookend.
 
-### Background: the unreachable-seam scenario (now mitigated by orphannotice)
+For the canonical test, open the most-compaction-impacted session in
+the family (e.g. one whose JSONL starts with a `compact_boundary` at
+line 1) and verify that the original user prompt at the top matches
+what appears at the top of any other session in the same family — the
+backfill should produce identical recovered origins across the tree.
 
-The reason an orphannotice is needed instead of just-the-seam-and-bookend:
+### Background: walker constraints + recovery topology
 
-`Ez4` (the chain walker that builds the rendered transcript) is
-**single-chain**. It builds a uuid→msg map, finds all roots (uuids
-that aren't anyone's parent — i.e. leaves), walks up from each to the
-first user/assistant tip, then picks `Z = the tip with the largest index in V`,
-and walks UP from Z one more time to assemble the rendered chain.
-Anything not in that single backward walk from Z is dropped.
+The renderer's chain walker (`Ez4` in 2.1.126) is **single-chain**:
+it builds a uuid→msg map, finds all roots (uuids that aren't anyone's
+parent), walks up from each to the first user/assistant tip, then
+picks `Z = the tip with the largest index in V` and walks UP from Z
+one more time to assemble the rendered chain. Anything not in that
+single backward walk from Z is dropped.
 
-When a session has had multiple compactions and the second compactor's
-captured-lpu lands **in the same file** (e.g. a `system local_command`
-"Error: Compaction canceled." message), the live chain stays in-file:
-walker traverses boundary2 → in-file lpu → continues up Chain A →
-boundary1 → seam → ✓ rendered. K's seam alone suffices.
+This constraint forces K's recovery to be topology-driven. The four
+synthesis steps (backfill / seam / bridge / bookend) work together
+to ensure the walker, starting from the live leaf, traverses the
+entire conversation tree:
 
-When that captured uuid is **cross-file** (e.g. a tool-result uuid
-that lives in a sibling session because of fork/branch interaction),
-Patch J prepends the sibling. The live chain's walker now jumps
-boundary2 → cross-file uuid → sibling chain. **Chain A in this file
-becomes a topologically disconnected orphan branch** — Ez4 picks it
-up as a tip in the first loop, but loses it when Z is selected by
-max-by-index. Seam ghost gets planted on Chain A and would go
-unrendered.
+- Backfill prepends a forked sibling's pre-compaction content into
+  `_parsed` so the walker has somewhere to walk back to (when the
+  in-file chain root is a system boundary).
+- Seam ghosts give the walker a uuid to follow when boundaries have
+  phantom lpus.
+- Bridge ghosts redirect the walker from Patch J's cross-file
+  shortcut back into the in-file orphan chain.
+- Bookend at the chain root marks where the recovered chain begins.
 
-Verified empirically (BP-with-side-effect-condition at Ez4 return,
-captured U/Z/H — see [`debugging.md`](debugging.md) case study):
+A simpler Ez4-side fix would collect content from ALL tips (multi-
+chain rendering) instead of just max-by-index Z, eliminating the need
+for bridges. That's a much bigger change and not currently attempted.
 
-- Session whose 2nd boundary's lpu resolves same-file → seam IS in H, rendered.
-- Session whose 2nd boundary's lpu resolves cross-file → seam IS in U
-  (one of the four leaf-walk tips) but Z = chain-B leaf at higher
-  index; H walked back from Z never crosses the seam.
+### How the cross-conversation backfill works
 
-The orphannotice mitigation handles this by inserting an amber-coloured
-ghost INTO the live chain (between the resolved boundary and its first
-child, so the walker traverses through it on the way back from Z). The
-seam is still planted on the orphan chain (semantically correct for
-that branch); the orphannotice provides the user-facing signal in the
-live chain that an orphan exists.
+The phantom-lpu (`logicalParentUuid` that no sibling has as a `uuid`)
+is the smoking gun left by `compact.ts:598`. Critically: when a
+conversation forks, ALL forks of that conversation inherit the same
+phantom lpu in their first compact_boundary (the missing predecessor
+is missing from EVERY fork). So a sibling sharing the phantom lpu IS
+a fork of the same conversation tree.
 
-A proper Ez4-side fix would change the walker to collect from ALL
-tips (multi-chain rendering), not just max-by-index Z. That's a much
-bigger change and not currently attempted.
+K's backfill exploits this: for each phantom lpu, scan siblings and
+find one that ALSO has it as an lpu AND has pre-content before its
+first phantom-lpu boundary (a real user message at chain root, not
+itself a boundary). Prepend that sibling's pre-content into `_parsed`.
+
+The result: even sessions whose own first line is a compact_boundary
+(no recoverable in-file origin) can now display the conversation's
+true canonical origin, sourced from a sibling fork that retained it.
 
 **Upstream issue**: [#55818](https://github.com/anthropics/claude-code/issues/55818) (read-side mitigation) + [#46603](https://github.com/anthropics/claude-code/issues/46603) (write-side root cause at `compact.ts:598`).
