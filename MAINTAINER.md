@@ -99,16 +99,13 @@ If a future patch is added or an existing patch's behavior is
 materially changed, bump the patchset version (semver-style minor for
 add-ons like H/I/J or K, major for breaking redesigns):
 
-1. Edit `skill/apply-patch-fg.py`: bump `PATCHSET_VERSION` (e.g. `"1.2"`
-   → `"1.3"`). The signature comment becomes `/*pfg-v1.4*/`.
-2. Edit `util/build-prebuilt.py`'s `PREBUILT_TEMPLATE`: bump the
-   `SIGNATURE = "/*pfg-vN*/"` constant to match. (Without this, the
-   generated prebuilt's idempotency check looks for the wrong sig.)
-3. Re-synthesize all `prebuilt/<VER>/apply.py` for currently-supported
-   versions: each one re-runs `util/build-prebuilt.py` against the
-   freshly re-patched extension. The new prebuilts embed the bumped
-   signature.
-4. End-users running the new prebuilt against an older-version-patched
+1. **Edit ONE line in `skill/SKILL.md`**: change `**Patchset version**:
+   `1.4`` to the new version. This is the single source of truth.
+2. Re-synthesize each `prebuilt/<VER>/apply.py`:
+   `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>`. The new
+   prebuilts embed the bumped signature; `README.md`'s `pfg-vN` mention
+   is auto-synced as a side-effect of every synthesis.
+3. End-users running the new prebuilt against an older-version-patched
    extension will get: *"Stale patchset (file has vX, current is vY);
    restoring … from .bak"*. The `.bak` from their original run is the
    pre-patch baseline — reusable as the restore point indefinitely
@@ -118,6 +115,30 @@ This is why the comprehensive prebuilt covers A–K in one script: a
 patchset bump can include changes anywhere, and a self-contained
 prebuilt guarantees the user ends up at exactly the new state without
 needing the per-patch skill walkthrough.
+
+### Single source of truth: `version.py`
+
+The version lives in exactly one human-readable place: a marked line
+near the top of `skill/SKILL.md`. `version.py` (repo root) extracts it
+via regex (`**Patchset version**: \`(\d+(?:\.\d+)?)\``) and exports
+`PATCHSET_VERSION` and `SIGNATURE` constants.
+
+Consumers:
+- `skill/apply-patch-fg.py` imports `PATCHSET_VERSION` and `SIGNATURE`
+  from `version.py` (resolves the patch-claude symlink via
+  `os.path.realpath` so the import works whether the skill is run from
+  the repo or from `~/.claude/skills/patch-claude/`).
+- `util/build-prebuilt.py` imports the same constants, substitutes
+  them into the prebuilt template at synthesis time (no more hardcoded
+  signatures in the template), and rewrites README's `pfg-vN` mention
+  to match.
+
+Drift mode that motivated this design: bumping required editing three
+places (apply-patch-fg.py constant, build-prebuilt.py template SIGNATURE,
+build-prebuilt.py template docstring), plus chasing scattered `pfg-vN`
+mentions in README/docs. Forgetting one of those left the prebuilt's
+idempotency check looking for an old signature while the splices applied
+new content — silent confusion. Now there's one line to edit.
 
 ## Why the byte-stability check matters
 

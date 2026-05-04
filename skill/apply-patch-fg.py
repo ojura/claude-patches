@@ -36,8 +36,12 @@ prior application and re-apply cleanly.
 """
 import os, re, shutil, subprocess, sys, glob
 
-PATCHSET_VERSION = "1.4"
-PATCHSET_SIG = f"/*pfg-v{PATCHSET_VERSION}*/"
+# Single source of truth: skill/SKILL.md → version.py at repo root.
+# realpath resolves the patch-claude symlink (~/.claude/skills/patch-claude/)
+# back to the actual repo so the import resolves regardless of how the script
+# was invoked.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from version import PATCHSET_VERSION, SIGNATURE as PATCHSET_SIG
 
 
 def _version_from_path(p: str) -> str:

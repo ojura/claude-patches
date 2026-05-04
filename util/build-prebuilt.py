@@ -28,6 +28,7 @@ prebuilt/<VER>/apply.py. End-users never run util/build-prebuilt.py.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,9 @@ import tempfile
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+sys.path.insert(0, REPO_ROOT)
+from version import PATCHSET_VERSION, SIGNATURE  # SSOT extracted from skill/SKILL.md
 
 
 def extract(file_path: str, bak_path: str):
@@ -62,7 +66,7 @@ Default: auto-discovers an installed {version} extension under
 Antigravity, Cursor, VSCodium, etc.).
 
 Idempotent: re-running on already-patched files is a no-op (detects the
-pfg-v1.2 signature in extension.js). With --force, restores from .bak files
+{signature} signature in extension.js). With --force, restores from .bak files
 and re-applies.
 """
 import glob
@@ -108,7 +112,7 @@ def find_default_ext_dir():
     return matches[0]
 
 
-SIGNATURE = "/*pfg-v1.4*/"
+SIGNATURE = "{signature}"
 PATCHSET_VERSION = re.match(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', SIGNATURE).group(1)
 
 # Each entry: (file_relpath, [(old, new), (old, new), ...])
@@ -250,6 +254,7 @@ def main():
     splices_repr = repr(splices_by_file)
     script = PREBUILT_TEMPLATE.format(
         version=version,
+        signature=SIGNATURE,
         splices_repr=splices_repr,
     )
 
@@ -294,6 +299,27 @@ def main():
     print(f"Wrote {out_path}")
     print(f"  size: {os.path.getsize(out_path)} bytes")
     print(f"  total splices: {sum(len(s[1]) for s in splices_by_file)}")
+
+    sync_readme()
+
+
+def sync_readme():
+    """Replace any pfg-vX or pfg-vX.Y mention in README.md with the current
+    PATCHSET_VERSION extracted from skill/SKILL.md. Drift-prevention: the
+    README's signature mention is rewritten on every prebuilt synthesis,
+    so it can't lag behind SKILL.md."""
+    readme = os.path.join(REPO_ROOT, "README.md")
+    if not os.path.exists(readme):
+        return
+    with open(readme, "r") as f:
+        s = f.read()
+    new_s = re.sub(r"pfg-v\d+(?:\.\d+)?", f"pfg-v{PATCHSET_VERSION}", s)
+    if new_s != s:
+        with open(readme, "w") as f:
+            f.write(new_s)
+        print(f"Synced README.md → pfg-v{PATCHSET_VERSION}")
+    else:
+        print(f"README.md already at pfg-v{PATCHSET_VERSION}")
 
 
 if __name__ == "__main__":

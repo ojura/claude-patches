@@ -15,7 +15,7 @@ Default: auto-discovers an installed 2.1.126 extension under
 Antigravity, Cursor, VSCodium, etc.).
 
 Idempotent: re-running on already-patched files is a no-op (detects the
-pfg-v1.2 signature in extension.js). With --force, restores from .bak files
+/*pfg-v1.4*/ signature in extension.js). With --force, restores from .bak files
 and re-applies.
 """
 import glob
@@ -61,7 +61,7 @@ def find_default_ext_dir():
     return matches[0]
 
 
-SIGNATURE = "/*pfg-v1.3*/"
+SIGNATURE = "/*pfg-v1.4*/"
 PATCHSET_VERSION = re.match(r'/\*pfg-v(\d+(?:\.\d+)?)\*/', SIGNATURE).group(1)
 
 # Each entry: (file_relpath, [(old, new), (old, new), ...])

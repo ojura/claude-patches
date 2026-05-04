@@ -5,7 +5,9 @@ description: Reapply Juraj's ten local patches to a newly updated anthropic.clau
 
 # Reapply anthropic.claude-code extension patches
 
-Seven patches live out-of-tree and need to be reapplied every time the bundled
+**Patchset version**: `1.4`
+
+Eleven patches live out-of-tree and need to be reapplied every time the bundled
 `anthropic.claude-code-*-linux-x64` extension updates. The minified code
 changes variable names between releases, so do NOT blindly search-and-replace
 literal strings from prior versions — locate the pattern structurally, then
