@@ -615,7 +615,7 @@ one session:
 - `todos`, `permissionRequests`, `proactiveSuggestions`,
   `settingsErrors` — signals (arrays)
 
-### Preact signals everywhere
+### Preact signals everywhere — even fields that look like primitives
 
 All reactive state is `{value: T, peek(), subscribe(...)}`. To read:
 
@@ -627,6 +627,29 @@ mgr.sessions.peek()          // never subscribes
 Forgetting to deref gives you the signal object itself, which serializes
 to nonsense like `{$$typeof, type, props, ref}` — looks like a React
 element, isn't.
+
+**The equality trap.** Even fields that LOOK like primitives — `sessionId`,
+`gitBranch`, `cwd`, etc. — are signal-wrapped on each session entry. Strict
+equality against a string ALWAYS fails:
+
+```js
+const s = mgr.sessions.value[0];
+typeof s.sessionId                              // "object", NOT "string"
+s.sessionId.constructor.name                    // "$3" (Preact signal)
+s.sessionId === "61974011-6e11-..."             // false — signal !== string
+String(s.sessionId) === "61974011-6e11-..."     // true — toString derefs
+s.sessionId.peek() === "61974011-6e11-..."      // true — explicit deref
+```
+
+So `mgr.sessions.value.find(s => s.sessionId === sid)` always returns
+`undefined` even when sid IS in the list. Use `.find(s => s.sessionId.peek() === sid)`
+or `.find(s => String(s.sessionId) === sid)`. Index access (`arr[0]`)
+works because no comparison is involved — but if you find yourself
+"working around" `.find` returning undefined, the actual fix is to
+deref the signal in the predicate.
+
+Same hazard for ANY equality test against a fiber-walked field. Always
+deref before comparing.
 
 ---
 
@@ -878,23 +901,34 @@ The single biggest trap. `Debugger.setScriptSource` returns
 `{status: "Ok"}`, and `Debugger.getScriptSource` shows the patched
 source. But the EXECUTING code is unchanged.
 
-Verified empirically: patched `il4` (= `extension.exports.openTabs`) to
-set `globalThis.__patched_il4 = Date.now()`. Same-connection
-`getScriptSource` showed the marker present. Then called
-`extension.exports.openTabs()` via Runtime.evaluate — `tabsCount`
-returned correctly (function ran), but `globalThis.__patched_il4` was
-`undefined` (the OLD body executed). Same pattern for class methods
-(`fromClient`) and top-level functions called through closures (`Ez4`).
+Verified empirically across multiple modes:
 
-Why: V8 inspector's setScriptSource live-edit only recompiles individual
-function bodies *while preserving the original function objects' identity
-in the closure scope graph*. It does NOT re-execute module-level code
-that captured those function references at load time. So:
+- **CJS export**: patched `il4` (= `extension.exports.openTabs`) to set
+  `globalThis.__patched_il4 = Date.now()`. Same-connection
+  `getScriptSource` showed the marker present. Called
+  `extension.exports.openTabs()` via Runtime.evaluate — `tabsCount`
+  returned correctly (function ran), but the marker stayed `undefined`.
+- **Module-internal name resolution**: patched `Ez4` (called by name
+  from `dl` inside the same IIFE) to set `globalThis.__ez4_marker++`.
+  Triggered Wz4 via webview RPC (we know this calls Ez4 — separately
+  verified by BP). Marker stayed at 0.
+- **`allowTopFrameEditing: true` doesn't help.** Re-tested both modes
+  with the flag set; same result. The flag governs editing the
+  CURRENTLY-paused top frame, not module-internal callers.
+- **Class methods**: patching `fromClient` on a class created at
+  startup also failed (instances keep the old prototype binding).
 
-- `module.exports.openTabs = il4` was bound at startup; replacing
-  `il4`'s source doesn't update `exports.openTabs`.
-- `Ez4` referenced by `dl` via lexical lookup in the IIFE scope: even
-  this doesn't re-bind to the new `Ez4` object.
+Why: V8 inspector's setScriptSource live-edit updates the source text
+view and may even create new function objects internally, but
+*pre-existing references to the old function objects continue pointing
+at the old code*. In CommonJS modules with IIFE wrappers and JIT-cached
+call sites, virtually every reference is "pre-existing". So:
+
+- `module.exports.openTabs = il4` was bound at module load; the
+  replacement function with the patched body is a different object.
+- `dl()` calling `Ez4(V)` inside the IIFE has its name lookup either
+  cached by V8's JIT or resolved via a closure-scope binding that
+  isn't refreshed by source-text updates.
 - Class method `fromClient` on a class created at startup: instances
   keep using the old prototype.
 
