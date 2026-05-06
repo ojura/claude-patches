@@ -79,14 +79,19 @@ patched live extension dir          maintainer tool             new prebuilt
 
 ## Sanity checks before push
 
-- `prebuilt/<VER>/apply.py` is ~17KB. If it's huge (>50KB) something
+- `prebuilt/<VER>/apply.py` is ~22KB. If it's huge (>50KB) something
   drifted (probably a non-deterministic field like a timestamp or
   random UUID got captured into a splice — those should never be in
   diff regions).
-- The diff has the expected splice count: 14 in `extension.js`, 4 in
-  `webview/index.js`, 1 in `webview/index.css` (19 total at v1.2).
-  Different counts mean either upstream restructured something or you
-  applied the patches wrong. Investigate before pushing.
+- The splice count is roughly 14 in `extension.js`, 3–4 in
+  `webview/index.js`, 1 in `webview/index.css` (~18–19 total at v1.4).
+  Counts can drift slightly across bundles because adjacent diff hunks
+  sometimes merge or split depending on the surrounding context window
+  in the new minified output (observed: 19 in 2.1.126, 18 in 2.1.132,
+  no functional difference). A *large* count change (e.g. 14 → 7 in
+  `extension.js`) means the bundle restructured or the patches applied
+  wrong — investigate before pushing. The byte-stability check is the
+  authoritative correctness signal.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
   say `Already patched (signature <SIG> present). Nothing to do.`

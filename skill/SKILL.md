@@ -135,7 +135,7 @@ fi
 VER="$(basename "$EXT" | sed 's/^anthropic.claude-code-//; s/-linux-x64$//')"
 echo "Target: $EXT (version $VER)"
 
-# --- Step 0c: try the prebuilt (covers all patches A–J in one shot) ---
+# --- Step 0c: try the prebuilt (covers all patches A–K in one shot) ---
 URL="https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py"
 if curl -fsSL -o /tmp/apply.py "$URL"; then
   echo "Prebuilt found for $VER — applying"
@@ -168,13 +168,15 @@ fi
        `python3 "$REPO_ROOT/version.py"`) that the prebuilt relies on
        for idempotency. Steps 8 and 9 below describe the splices
        structurally for reference only.
-    3. **Patches H, I, J**: follow Steps 10–12 (per-splice manual
-       application). All three are short, single-anchor splices.
-    4. **Patch K**: follow Step 13 (extension.js loader splice + a
-       webview/index.js render wrap). This is `lost+found`-style
-       recovery for sessions whose `compact_boundary.logicalParentUuid`
-       points at a never-persisted uuid (write-side bug at upstream
-       `compact.ts:598`).
+    3. **Patches H, I**: follow Steps 10–11 (per-splice manual
+       application). Both are short, single-anchor splices.
+    4. **Patches J + K (combined)**: follow Step 13. The v1.4 K splice
+       replaces the loader's body wholesale and incorporates J's
+       cross-file fixed-point loop, so apply them together — do NOT
+       run Step 12 separately. Step 12 is preserved as the structural
+       reference for J in isolation. Step 13 also covers the
+       webview/index.js render wrap that makes K's seam/bookend/bridge
+       ghosts visually distinct.
     5. If the F+G script reports anchors not matching uniquely, the
        bundle structure has shifted enough to break its regexes.
        End-user fallback: apply F+G manually from Step 8 and Step 9,
@@ -1014,6 +1016,13 @@ React rendering, not the patch. If the UI lags unacceptably, partial mitigation:
 
 ## Step 12 — Patch J: cross-file logicalParentUuid resolution at session load
 
+> **For v1.4 K**, skip this step and apply the combined J+K splice
+> from Step 13 instead. The v1.4 prebuilt collapses J's fixed-point
+> loop and K's four-stage synthesis into a single replacement of the
+> loader's body. This Step 12 description is preserved as the
+> structural reference for J in isolation, useful when debugging or
+> if K is intentionally disabled.
+
 ### Why
 
 Patch D + Patch H restore visibility back to the most recent in-file `compact_boundary`
@@ -1092,147 +1101,142 @@ For diagnostic logging, the maintainer's `cdp_instrument.mjs`-style approach (de
 the project's NOTES) attaches via the `--inspect-extensions` port and logs each pass's
 `{dangling, files, prepend}` to a side-channel file.
 
-## Step 13 — Patch K: lost+found-style recovery for dangling logicalParentUuid
+## Step 13 — Patch K: full conversation-tree recovery for dangling logicalParentUuid
 
 ### Why
 
-Auto-compaction can write a `compact_boundary` whose `logicalParentUuid` references a uuid
-that never gets persisted to disk — the upstream write-side bug at `compact.ts:598`
-(see `findLast(m => m.type !== 'progress')` filter missing on the auto-compact path; same
-filter is present on the partial-compact path at L1014). After Patches D + J fail to resolve
-such a pointer (no parent in any sibling JSONL), the chain walker stops at the boundary and
-the entire pre-compaction transcript becomes invisible despite being intact on disk.
+Auto-compaction can write a `compact_boundary` whose `logicalParentUuid`
+references a uuid that was never persisted to disk — the upstream
+write-side bug at `compact.ts:598` (the `findLast(m => m.type !==
+'progress')` filter is missing on the auto-compact path; same filter
+is present on the partial-compact path at L1014). After Patches D + J
+fail to resolve such a pointer (no parent in any sibling JSONL), the
+chain walker stops at the boundary and the entire pre-compaction
+transcript becomes invisible despite being intact on disk. In a fork
+family where the same phantom-lpu is shared across siblings (forks of
+a common compacted parent), this can hide the conversation's true
+origin from every panel that loads it.
 
-Patch K is the read-side mitigation: at session-load time, detect dangling boundaries and
-splice a synthetic seam ghost (claiming the missing lpu) parented to the in-file
-predecessor, plus a bookend ghost at chain root. Both render as visibly-marked colored
-bubbles so the user knows the recovered span may not all belong to this conversation.
+Patch K is the read-side mitigation. v1.4 has **four** synthesis
+stages run after Patch J's cross-file fixed-point loop, before the
+chain walker (`zi`/`dl`):
+
+1. **Phantom-lpu sibling backfill.** For each phantom lpu still
+   unresolved after J, scan siblings for one that ALSO has it as an
+   lpu (= shares the same compaction's missing predecessor = is a
+   fork of the same conversation tree) AND has pre-content before
+   its first phantom-lpu boundary. Prepend that sibling's pre-content.
+   Recovers the canonical origin (typically a real user message at
+   chain root in the eldest sibling fork) for sessions whose own
+   first line is a `compact_boundary`.
+2. **Seam ghosts.** For phantom-lpu boundaries, plant `pfgk-seam-…`
+   parented to the in-file predecessor; rewrite the boundary's lpu
+   to point at the seam.
+3. **Bookend ghost (chain root marker).** If K fired, plant a
+   `pfgk-bookend-…` ghost as the chain root and reparent the original
+   first chain-participant onto it. Two predicates: (a) the original
+   "first non-system msg with `parent==null && !lpu`"; (b) a relaxed
+   "first user/assistant whose parent chain dead-ends in a phantom-lpu
+   boundary" for cases where the chain root is parented to a system
+   boundary.
+4. **Bridge ghosts.** For boundaries whose lpu was resolved cross-file
+   by Patch J (live chain takes the cross-file shortcut), plant
+   `pfgk-bridge-…` between the in-file orphan chain's leaf and the
+   boundary's first child. Walker now traverses the in-file orphan
+   instead of the cross-file shortcut. Cross-file content stays
+   reachable via the seam path so it's still rendered.
+
+Result: the panel for any session in a conversation family renders
+the same canonical origin at top, then the full tree in chronological
+order with seam/bridge/bookend ghosts marking the structural
+discontinuities. Every persisted message is reachable.
 
 Filed upstream as [#55818](https://github.com/anthropics/claude-code/issues/55818).
 
-### Locate (extension.js loader)
+### Use the latest prebuilt as the canonical splice source
 
-The Patch J site (Step 12) ends with `if(_newPrepend.length===0)break;_parsed=[..._newPrepend,..._parsed];}return dl(_parsed,K)` — the closing brace ends J's fixed-point loop, then `dl()` is called. K's block goes between those two: after the loop, before the `dl()` call.
+The two splices below (extension.js loader + webview/index.js render
+wrap) are intricate enough that maintaining them as ASCII in this
+doc has bitrotted in the past — v1.2 → v1.3 → v1.4 introduced
+backfill + bridges + relaxed bookend, and the doc lagged. The
+canonical, byte-stable shape lives in the latest published prebuilt:
 
-### Patch (extension.js)
-
-Insert immediately after Patch J's loop tail. The block scans for boundaries with
-unresolved `logicalParentUuid`, synthesizes a seam ghost claiming a `pfgk-seam-…`
-prefixed uuid (rewriting the boundary's lpu to it), then if K fired anywhere, prepends
-a `pfgk-bookend-…` ghost at chain root by reparenting the original first chain-participant
-to it.
-
-```js
-let _kFired=!1;
-for(let _i=0;_i<_parsed.length;_i++){
-  let _m=_parsed[_i];
-  if(_m.type==="system"&&_m.subtype==="compact_boundary"&&!_m.parentUuid&&_m.logicalParentUuid&&!_seen.has(_m.logicalParentUuid)){
-    let _predUuid=null;
-    for(let _j=_i-1;_j>=0;_j--){if(_parsed[_j].uuid){_predUuid=_parsed[_j].uuid;break}}
-    if(!_predUuid)continue;
-    let _seamUuid="pfgk-seam-"+_m.uuid.slice(0,8);
-    let _origLpu=_m.logicalParentUuid;
-    let _ghost={type:"user",uuid:_seamUuid,parentUuid:_predUuid,sessionId:_m.sessionId,timestamp:_m.timestamp,
-      message:{role:"user",content:"\u{1F53A} Orphaned compaction pointer (seam)\n\nThe compactor referenced a chain predecessor uuid ("+_origLpu.slice(0,8)+"…) that was never persisted to disk — a Claude Code bug. Pre-compaction history above this notice has been reattached via the in-file predecessor by Patch K. Click to jump to the start of the recovered chain."}};
-    _parsed.splice(_i,0,_ghost);
-    _m.logicalParentUuid=_seamUuid;
-    _seen.add(_ghost.uuid);
-    _kFired=!0;
-    _i++
-  }
-}
-if(_kFired){
-  for(let _i=0;_i<_parsed.length;_i++){
-    let _r=_parsed[_i];
-    if(_r.uuid&&_r.parentUuid==null&&!_r.logicalParentUuid&&_r.type!=="system"){
-      let _bid="pfgk-bookend-"+_r.uuid;
-      let _be={type:"user",uuid:_bid,parentUuid:null,sessionId:_r.sessionId,timestamp:_r.timestamp,
-        message:{role:"user",content:"\u{1F53B} Recovered orphan chain (start)\n\nThe content below this notice was orphaned by a Claude Code compaction bug. The compact boundary further down referenced a chain predecessor that was never persisted to disk; the in-file pre-compaction history was reattached as a best-effort fallback by Patch K. Click to jump to the seam at the end of the recovered section."}};
-      _parsed.splice(_i,0,_be);
-      _r.parentUuid=_bid;
-      _seen.add(_bid);
-      break
-    }
-  }
-}
+```sh
+LATEST_PREBUILT_VER="$(ls "$REPO_ROOT/prebuilt" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+LATEST_PREBUILT="$REPO_ROOT/prebuilt/$LATEST_PREBUILT_VER/apply.py"
+echo "Reference: $LATEST_PREBUILT"
 ```
 
-(Use `🔺` / `🔻` surrogate-pair form for the emoji in JS source if
-the literal `\u{...}` form isn't accepted.)
+Read its `SPLICES` literal and look for the entries containing
+`_kFired`, `pfgk-seam`, `_filesParsed` (extension.js loader splice —
+combined with Patch J in v1.4) and `pfgkAlert` (webview render wrap).
+Both are single replace pairs `(old, new)`.
 
-### Patch (webview/index.js)
+### Apply
 
-The chain walker output flows to the user-message renderer. Bare ghost messages render as
-plain user bubbles (no markdown — the renderer treats content as plain text inside a
-`<span>`). To make the seam/bookend visually distinct, wrap them with a colored container
-+ click-to-scroll handler — detected out-of-band by the `pfgk-` uuid prefix.
+The two splices are baked against the bundle var names of the
+prebuilt's version. Translate them to the current target's names:
 
-Anchor (the user-message render path):
+**extension.js loader (combined J + K splice).** The `old` anchor in
+the prebuilt is the original loader function body
+(`return <CHAIN_WALKER>(<PARSE>(x),K)}` form — no J or K applied yet).
+Find the loader by its post-Patch-H signature
+(`function <LOADER>(V,K){if(!<EXIST>(V))return[];let B=await <FIND_FILE>(V,K?.dir);…return <CHAIN_WALKER>(<PARSE>(x),K)}`)
+and identify by role:
 
-```
-if(Z.type==="user"){if(Z.parentToolUseId)return null;if(Z.isSynthetic)return null;return n1.default.createElement(XR0,{session:$,message:Z,index:J,context:Y,key:J,isHighlighted:X,areThinkingBlocksExpanded:Q,setAreThinkingBlocksExpanded:G,setInputError:q,onCreateNewSession:z})}
-```
+- `<LOADER>` — the function name
+- `<EXIST>` — the existence check
+- `<FIND_FILE>` — finds path/size given session id
+- `<READ_BUF>` — Patch H's read function
+- `<PARSE>` — JSONL → message array
+- `<CHAIN_WALKER>` — chain-walk + filter pipeline
+- `<PATH>` — node `path` module under bundler-assigned name
+- `<FS_PROMISES>` — `fs.promises` under bundler-assigned name
+- `<FS_RAW>` — `fs` module with `.readFile` used by `<READ_BUF>`
 
-Variable names will drift; identify by structure: this is the only `Z.type==="user"`
-branch that creates `XR0` after the two early-return guards. Replace the `return`
-expression with a wrap-on-prefix block:
+Substitute these in the prebuilt's `new` string and apply. Confirm
+exactly one occurrence of the `old` anchor before replacing. (Warning:
+**don't apply Patch J as a separate splice if you're using v1.4 K**
+— the v1.4 prebuilt combines J + K into one splice that replaces the
+loader's original body wholesale. Skip Step 12 in this case.)
 
-```js
-let _ws=n1.default.createElement(XR0,{...same args...});
-if(typeof Z.uuid==="string"){
-  let _r=Z.uuid.startsWith("pfgk-bookend")?"bookend":Z.uuid.startsWith("pfgk-seam-")?"seam":null;
-  if(_r){
-    let _o=_r==="seam"?"bookend":"seam";
-    let _bg=_r==="seam"?"rgba(255,159,28,0.20)":"rgba(220,53,69,0.18)";
-    let _bd=_r==="seam"?"#ff9f1c":"#dc3545";
-    let _emoji="⚠️";  // ⚠️
-    _ws=n1.default.createElement("div",{
-      className:"pfgkAlert pfgk-"+_r,
-      "data-pfgk-role":_r,
-      style:{background:_bg,borderLeft:"4px solid "+_bd,borderRadius:"6px",padding:"6px 12px 12px",margin:"6px 0",cursor:"pointer"},
-      title:"Click to jump to "+_o,
-      onClick:function(){var _t=document.querySelector("[data-pfgk-role=\""+_o+"\"]");if(_t)_t.scrollIntoView({behavior:"smooth",block:"center"})}
-    },
-      n1.default.createElement("style",{key:"_pfgks"},".pfgkAlert .content_xGDvVg.collapsed_xGDvVg{max-height:none!important}.pfgkAlert .truncationGradient_xGDvVg{display:none}.pfgkAlert .buttonContainer_xGDvVg{display:none}.pfgkAlert .actionButton_v2CdxQ{display:none}"),
-      n1.default.createElement("div",{key:"_pfgkemoji",style:{fontSize:"42px",textAlign:"center",lineHeight:1.1,padding:"6px 0 4px",userSelect:"none"}},_emoji),
-      _ws
-    )
-  }
-}
-return _ws;
-```
-
-The injected `<style>` rule suppresses the `Show more`/`Show less` collapse button, the
-truncation gradient, and the edit/fork action button — none of which make sense on a
-synthetic message. The rule-class names (`content_xGDvVg`, `collapsed_xGDvVg`, etc.) come
-from the bundle's CSS modules and may drift between releases — locate by inspecting the
-DOM around a real user-message bubble if any rule stops applying.
+**webview/index.js render wrap.** The user-message render branch
+contains `if(Z.type==="user")…return <REACT>.default.createElement(<USER_MSG_COMPONENT>,{…})`.
+Identify `<USER_MSG_COMPONENT>` (e.g. `XR0` in 2.1.126, `GR0` in
+2.1.132) — the component name is the only thing that drifts between
+bundles; React var (`n1`), all signal/prop names, and CSS module
+names are stable. Substitute and apply.
 
 ### Critical: don't set `isMeta:true` on the ghosts
 
-The chain walker's render filter (`Sz4` in 2.1.126) drops messages with `isMeta` truthy.
-We rejected setting it on the synthetic ghosts because that hides them. Compact summary
-messages render despite being functionally synthetic because they don't set `isMeta`
-(only `isCompactSummary`, which Sz4 doesn't check).
+The chain walker's render filter (`Sz4` in 2.1.126) drops messages
+with `isMeta` truthy. We rejected setting it on the synthetic ghosts
+because that hides them. Compact summary messages render despite
+being functionally synthetic because they don't set `isMeta` (only
+`isCompactSummary`, which Sz4 doesn't check).
 
 ### Verify
 
 ```
 grep -c '_kFired=!0' $EXT/extension.js
 grep -c 'pfgk-bookend' $EXT/extension.js
+grep -c 'pfgk-bridge' $EXT/extension.js
 grep -c 'pfgkAlert pfgk-' $EXT/webview/index.js
 node --check $EXT/extension.js && node --check $EXT/webview/index.js
 ```
 
-Each grep should be ≥ 1.
+Each grep should be ≥ 1 (or, for `pfgk-bridge`, ≥ 1 if any boundary
+was cross-file resolved by Patch J — embedded literal regardless).
 
 ### Test
 
-Open a session known to have a dangling lpu (search for a `compact_boundary` whose
-`logicalParentUuid` resolves to no `"uuid":"…"` line anywhere on disk). Reload VSCode.
-The chat panel should render the bookend at the top of the recovered span and the seam
-at the boundary, both as colored bubbles with a ⚠️ banner. Clicking either should
-smooth-scroll to the other.
+Open a session known to have a dangling lpu (search for a
+`compact_boundary` whose `logicalParentUuid` resolves to no
+`"uuid":"…"` line anywhere on disk). Reload VSCode. The chat panel
+should render the bookend at the top of the recovered span, seams
+at each phantom-lpu boundary, and bridges at each cross-file-resolved
+boundary — all as colored bubbles with a ⚠️ banner. Clicking any
+ghost cycles to the next.
 
 ## Step 14 — summary to the user
 
@@ -1264,7 +1268,7 @@ is ambiguous.
 - The CSS and JS files in `webview/` are minified onto a single line each;
   use `python3` for string replacement rather than the Edit tool (Read
   fails on them).
-- If any of the three patches cannot be located (pattern shape changed
+- If any of the eleven patches cannot be located (pattern shape changed
   substantially), stop and report that one to the user rather than guessing
   — these are patches against obfuscated code and a wrong splice could be
   disruptive.
