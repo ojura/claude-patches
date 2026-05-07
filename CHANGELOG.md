@@ -208,14 +208,33 @@ tag (`/*pfg-v1*/`, no minor).
 - **D** — chain walker bridges compaction boundaries via
   `logicalParentUuid` (read-side fix; the API path is bounded
   independently by `getMessagesAfterCompactBoundary`).
-- **E** — sidebar pencil rename + session-title resolver order fixes.
-- **F** — sticky title cache invalidation across session switch.
-- **G** — sessionPanels destructure / claude --resume subprocess
-  wiring for fork/rewind UI.
-- **H** — bypass `CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP` env gate (the
-  precompact-skip behavior is the desired default).
-- **I** — remove the render cap that hides messages past a fixed
-  count.
+- **E** — title resolver order: put `firstPrompt` ahead of
+  `lastPrompt` in the resolver chain, so session titles don't drift
+  to "whatever the user most recently typed". Resolver-order fix
+  only — the rename-propagation fix is F.
+- **F** — sidebar pencil-rename propagation through the
+  `sessionStates` Map, so renamed titles don't flip back on session
+  switch / broadcast. Three coordinated splices: `updateSessionState`
+  preserves missing fields; `q8.renameSession` invokes
+  `onSessionStateChanged` after success; sidebar `q8` ctor wires
+  the callback. Plus F.2 (drop title at the `update_session_state`
+  boundary so panel reactives can't clobber the Map) and F.3
+  (manager writes `panel.title` directly so tab title updates
+  cross-webview).
+- **G** — fork-conversation handler pushes a `sessionStates` Map
+  entry for the new fork immediately, so it appears in the sidebar
+  without requiring a first message. Two splices: G.1 widens the
+  panel ctor callback with a skip-bookkeeping flag; G.2 makes
+  `fork_conversation` push a Map entry derived from the source's
+  `custom-title`/`ai-title`.
+- **H** — disable the 5 MB precompact-skip optimization in the loader
+  (rewriting the env-var-gated condition so the optimization never
+  fires). Pre-boundary scrollback for sessions > 5 MB becomes
+  visible to the chain walker.
+- **I** — neutralize the webview's hardcoded 500-message render cap
+  (rewrite the cap function to identity), so sessions with > 600
+  messages don't silently truncate to the last 500 in the chat
+  panel.
 - **J** — cross-file `logicalParentUuid` resolution (sibling-prepend
   before the chain walker runs).
 

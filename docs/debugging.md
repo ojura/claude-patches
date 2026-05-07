@@ -27,7 +27,9 @@ the launch flags and IDE-product paths differ.
 >   webview iframes BREAKS the iframe (chrome-error). `Page.reload`
 >   is rejected on iframe targets. Don't try them. Use mechanism 3
 >   (`Input.dispatchKeyEvent` for `workbench.action.reloadWindow`)
->   or mechanism 5 (disk-edit + Reload Window).
+>   or mechanism 5 (disk-edit + Reload Window). **Bare `Ctrl+R` is
+>   unreliable** (keybinding-context-sensitive); the canonical
+>   reload is `Ctrl+Shift+P` → type `Reload Window` → `Enter`.
 > - **Verifying a code change took effect**: see the K case study
 >   "End-to-end verification of the fix" paragraph — the exact recipe
 >   is `Input.dispatchKeyEvent` reload + BP-free verification via
@@ -39,6 +41,44 @@ the launch flags and IDE-product paths differ.
 >   running code (top gotcha).
 > - **Reaching the manager singleton**: not on `extension.exports` /
 >   `globalThis` / `require.cache`. Use the BP-stash trick (Recipe 1).
+> - **Invoking the chain walker for a session** without BP setup:
+>   `await mgr.getConnection(sid).then(c => c.sendRequest({type: 'get_session_request', sessionId: sid}))` from the inner
+>   active-frame. Returns the walker's H array directly. See
+>   "Trigger the chain walker without BP setup" recipe.
+>
+> ### ABSOLUTE RULE: DOM verification before push
+>
+> **Never claim "tests passed end-to-end" or push code that affects
+> rendering without DOM verification.** RPC output / `messages.peek()`
+> / chain walker H / `node --check` / byte-stability are all valid
+> sanity checks but **none of them substitute for a
+> `[data-pfgk-role=...]` count + `document.body.textContent.includes(...)` query against the actual rendered iframe**.
+> The DOM is the user's view of truth; everything else is internal
+> model agreement.
+>
+> If pushing requires action you don't have (e.g., reload to
+> re-render), wait for the action and verify after. Do not push
+> first and verify later. The push commits to a public artifact
+> end-users will fetch; reverting after the fact loses confidence
+> and forces a fix.
+>
+> The rule is verifiable: any attempt at `git commit` / `git push`
+> for code that affects rendering must have, in immediate prior
+> context, the output of a query like:
+>
+> ```js
+> JSON.stringify({
+>   pfgkAlert: document.querySelectorAll('.pfgkAlert').length,
+>   bookend: document.querySelectorAll('[data-pfgk-role="bookend"]').length,
+>   broken: document.querySelectorAll('[data-pfgk-role="broken"]').length,
+>   bodyHas<expected_text>: document.body.textContent.includes('<expected text>'),
+> })
+> ```
+>
+> against the actual rendered iframe, with values matching the test's
+> predictions. No exceptions for "but the chain walker output looked
+> right" or "but the source has the change". The rendered DOM gates
+> the push.
 >
 > The cost of pausing to skim the relevant section is seconds. The
 > cost of cowboying is minutes per failed mechanism plus often
@@ -1058,10 +1098,52 @@ BP-stash trick.
 
 ### Inspector ports change on exthost restart
 
-`Developer: Reload Window` restarts the exthost; ephemeral ports
-reshuffle. `9229` itself can change hands — if the original
-first-spawned window closes and another spawns, the new one captures
-`9229`. Re-identify `mine` and `target` after any window-state change.
+`Developer: Reload Window` (or `Restart Extension Host`) restarts
+the per-window exthost; ephemeral ports reshuffle. `9229` itself
+can change hands — if the original first-spawned window closes and
+another spawns, the new one captures `9229`. Re-identify `mine` and
+`target` after any window-state change.
+
+### Per-window exthosts: enumerate ALL of them, not just `9229`
+
+If `ps -ef | grep inspect-extensions` returns ONE port (`9229`),
+that does NOT mean there's only one exthost. Each window gets its
+OWN exthost, but **only the first one to spawn captures the sticky
+`--inspect-extensions=9229` flag**. Subsequent exthosts get
+`--inspect=127.0.0.1:<ephemeral>` (e.g. `11277`, `45647`) — same
+process type (`utility-sub-type=node.mojom.NodeService`), different
+flag form.
+
+Failure mode this gotcha prevents: assuming "shared exthost across
+windows" because `9229` is the only port your initial scan finds.
+The conclusion is wrong; you missed the ephemeral inspect ports on
+the other windows' exthosts.
+
+Canonical enumeration:
+
+```sh
+# All Antigravity exthost processes (one per window)
+ps -ef --no-headers | awk '$3==<antigravity_main_pid> && /node.mojom.NodeService/'
+
+# Their inspect ports — note the TWO forms
+for pid in $(ps -ef --no-headers | awk '/node.mojom.NodeService/ {print $2}'); do
+  cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | \
+    grep -oE -- '--inspect[a-zA-Z=:-]*[0-9.:]+' | head -1
+done
+```
+
+Sticky `9229` is special only in being the first; behaviorally,
+ephemeral-port exthosts are identical (full CDP, full `Debugger`,
+full `Runtime` etc).
+
+### `Restart Extension Host` brings the next exthost back to `9229`
+
+Empirically: when the per-window exthost is restarted via the
+`Developer: Restart Extension Host` palette command, the killed
+exthost frees its ephemeral port and the respawn binds to the
+sticky `9229` (because the original sticky-holder was killed too,
+or the slot is otherwise free). So a window that previously used
+`11277` may now be on `9229`. Re-discover ports after every restart.
 
 ### `location.reload()` on a webview iframe leaves it in `chrome-error://chromewebdata/`
 
@@ -1171,6 +1253,184 @@ Mitigations:
 - The user-visible verification (DOM probe for `.pfgkAlert` after
   Reload Window) catches this regardless; the byte-stability check
   alone does not.
+
+### `conn.sendRequest` is the canonical chain-walker invocation
+
+You don't always need a BP-with-side-effect-condition + RPC dispatch
+dance to capture a chain walker's H array. From the inner active-frame:
+
+```js
+let mgr = root[fk].child.child.child.memoizedProps.sessions;
+let conn = await mgr.getConnection(sid);
+let resp = await conn.sendRequest({type: "get_session_request", sessionId: sid});
+let H = resp?.messages || [];
+```
+
+This goes through the normal webview→exthost RPC path. The exthost
+runs `getSession` → `Br` → `Bz4` → `zi` and returns H over the wire.
+Faster setup than BP + dispatch when you just need walker output for
+inspection. Use the BP recipe when you need locals INSIDE the walker
+(e.g., V before K modifies it, or intermediate state).
+
+`conn.sendRequest` works for ANY sessionId, including hidden sessions
+that aren't in `mgr.sessions.value`. The conn is sid-bound but the
+RPC handler reads any sid you pass.
+
+### Hidden sessions are filtered out of `mgr.sessions.value`
+
+If a user has hidden a session via the trash icon in the session
+panel, that session won't appear in `mgr.sessions.value` (the
+sidebar list). But its JSONL file still exists on disk and the
+chain walker still loads it on demand.
+
+The hide-state lives in vscode's globalState, NOT workspaceState:
+
+```sh
+# Read hidden session ids from the extension's globalState
+python3 -c "
+import sqlite3, json
+con = sqlite3.connect('/home/juraj/.config/Antigravity/User/globalStorage/state.vscdb')
+data = json.loads(con.execute(\"SELECT value FROM ItemTable WHERE key='Anthropic.claude-code'\").fetchone()[0])
+print(data.get('hiddenSessionIds', []))
+"
+```
+
+Use `mgr.getConnection(sid)` to query a hidden session's chain
+walker output regardless of its visibility state.
+
+### `conn.outstandingRequests` can leave the wire jammed after killed eval processes
+
+Each `conn.sendRequest` adds an entry to `conn.outstandingRequests`
+(Map keyed by requestId) and awaits the response promise. If the
+caller process is killed before the response arrives, the entry
+stays in the Map. Subsequent `sendRequest` calls **may appear to
+hang** because the conn's wire processing gets degraded by the
+backlog.
+
+Symptom: `await conn.sendRequest({...})` never resolves; exthost is
+idle (`pcpu` = 1.2%, `cpuTime` flat); no error logged.
+
+Recovery from inside the inner active-frame:
+
+```js
+let conn = await mgr.getConnection(sid);
+for (let k of [...conn.outstandingRequests.keys()]) {
+  try { conn.cancelRequest(k); } catch(_){}
+}
+conn.outstandingRequests.clear();
+```
+
+After clearing, fresh `sendRequest` calls work normally.
+
+Prevention: kill cleanly with `pkill -f eval_in_inner_frame.mjs`
+before retrying — finalize-on-exit cancels the request.
+Alternatively wrap `eval_in_inner_frame.mjs` invocations in
+`timeout <N>` to bound their lifetime.
+
+### Don't clear the `>` prefix when typing into command palette
+
+`Ctrl+Shift+P` opens the palette in **command mode** with a `>`
+prefix in the input. If you do `input.value = ""` (or otherwise
+clear it) before typing, the palette drops to **file-picker mode**
+where `Enter` opens a file matching the typed string instead of
+running a command.
+
+Always APPEND-only: type your command after the existing `>`. The
+final input value should look like `>Reload Window`, not
+`Reload Window`.
+
+Verify before pressing Enter:
+
+```js
+JSON.stringify({
+  text: document.querySelector('.quick-input-and-message input').value,
+  firstSugg: document.querySelector('.quick-input-list .monaco-list-row')?.textContent?.slice(0, 80),
+})
+```
+
+`text` should start with `>`; `firstSugg` should be the command name
+you intended (e.g. "Developer: Reload Window..."), not a filename.
+
+### Body click before Ctrl+Shift+P when iframe focus is suspect
+
+If a webview iframe is focus-trapped (especially a broken
+chrome-error one — see earlier gotcha), `Ctrl+Shift+P` may open the
+palette but typing won't reach the input (focus stays on the
+iframe). Body-area mouse click first to take focus from the iframe:
+
+```js
+await call('Input.dispatchMouseEvent', {type:'mousePressed',  x:5, y:5, button:'left', clickCount:1});
+await call('Input.dispatchMouseEvent', {type:'mouseReleased', x:5, y:5, button:'left', clickCount:1});
+```
+
+Then verify `document.activeElement.tagName === 'BODY'` before
+firing Ctrl+Shift+P. If it's still `IFRAME`, the iframe is broken
+and needs explicit recovery (close the panel via UI, or
+`Reload Window`).
+
+### Patch K verification recipes (clone-to-induce-non-uniqueness, rename-to-induce-breakage)
+
+For testing K's edge cases (v1.5+ ambiguity warning + reconstruction-
+failed marker), the JSONL filesystem is the test fixture:
+
+**Test #1 — induce sibling-backfill non-uniqueness** (verifies the
+`AMBIGUOUS RECONSTRUCTION` warning fires on the bookend + relevant
+seam markers):
+
+```sh
+PROJ=~/.claude/projects/-<workspace>
+# Pick a session you know is the K1-backfill source for the target.
+# Clone it to a new uuid filename — same content, structurally
+# qualifies for backfill, makes count > 1.
+cp $PROJ/<source-sid>.jsonl $PROJ/<source-sid>-clone-aaaa-bbbb-cccccccccccc.jsonl
+# Reload Window via palette → re-fetch chain walker for target session
+# DOM-verify [data-pfgk-role="bookend"] count = 1, bodyHasAMBIG === true
+# Cleanup: rm the clone
+```
+
+**Test #5 — induce reconstruction failure** (verifies the
+`pfgk-broken-` marker variant fires with critical styling):
+
+```sh
+PROJ=~/.claude/projects/-<workspace>
+# Rename the K1-backfill source so K1 finds no qualifying sibling.
+# Suffix with .test-disabled (also rename .bak to keep the pair).
+mv $PROJ/<source-sid>.jsonl     $PROJ/<source-sid>.jsonl.test-disabled
+mv $PROJ/<source-sid>.jsonl.bak $PROJ/<source-sid>.jsonl.test-disabled.bak
+# Reload Window via palette
+# DOM-verify [data-pfgk-role="broken"] count = 1, bodyHasINCOMPLETE === true
+# Cleanup: rename back
+```
+
+Both tests target the SAME session (the one whose chain walker
+output you're inspecting). The fixture changes its sibling
+environment, not its own content.
+
+**End-to-end DOM verification template** (used after each fixture
+change + reload):
+
+```js
+JSON.stringify({
+  pfgkAlert: document.querySelectorAll('.pfgkAlert').length,
+  bookend:  document.querySelectorAll('[data-pfgk-role="bookend"]').length,
+  seam:     document.querySelectorAll('[data-pfgk-role="seam"]').length,
+  bridge:   document.querySelectorAll('[data-pfgk-role="bridge"]').length,
+  broken:   document.querySelectorAll('[data-pfgk-role="broken"]').length,
+  bodyHasAMBIG:      document.body.textContent.includes('AMBIGUOUS RECONSTRUCTION'),
+  bodyHasINCOMPLETE: document.body.textContent.includes('INCOMPLETE TRANSCRIPT'),
+  msgs: document.querySelectorAll('[class*=message_]').length,
+})
+```
+
+Predictions:
+- Baseline (no fixture): 4 markers (1 bookend + 2 seams + 1 bridge),
+  0 broken, no AMBIG, no INCOMPLETE.
+- Test #1 (clone present): SAME marker counts but `bodyHasAMBIG ===
+  true`, bookend + at least one seam contain "AMBIGUOUS
+  RECONSTRUCTION:" prefix.
+- Test #5 (source renamed away): `bookend` count = 0, `broken`
+  count = 1, `bodyHasINCOMPLETE === true`. Total `msgs` drops by
+  ~size of the missing source's pre-content.
 
 ---
 
