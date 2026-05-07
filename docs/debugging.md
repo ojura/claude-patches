@@ -1155,17 +1155,20 @@ result was dead code: the K wrap branch lived after a `return
 createElement(...)` statement and never executed.
 
 Mitigations:
-- When iterating a patch in place, **re-bake from pristine before
-  synthesizing the prebuilt**, or maintain a separate
-  `.pre-patchK.bak` checkpoint that's never overwritten.
-- After synthesizing a new prebuilt, **verify against pristine** by
-  applying it to a fresh `.bak` from a freshly-installed extension
-  (not the iteratively-modified one). If the application doesn't
-  produce a working patch, the prebuilt is incremental, not
-  comprehensive.
+- **Treat `.bak` as the pristine pre-patch baseline, always.** Never
+  overwrite it once it exists — for end-users and maintainers alike.
+  This invariant makes `build-prebuilt.py`'s `live - .bak` diff
+  always capture the full pristine→patched transformation, not an
+  incremental hop. Per-iteration snapshots get explicit
+  `.pre-patchX.bak` names (see `apply-patch-fg.py`'s
+  `.pre-patchFG.bak` for the pattern); those can be transient.
+- If `.bak` ever drifted off pristine, recover by reinstalling the
+  extension from scratch and re-baking from clean before any further
+  patch work. See [`MAINTAINER.md`](../MAINTAINER.md) for the
+  detailed invariant + recovery procedure.
 - The user-visible verification (DOM probe for `.pfgkAlert` after
-  Reload Window) catches this; the byte-stability check alone does
-  not.
+  Reload Window) catches this regardless; the byte-stability check
+  alone does not.
 
 ---
 
@@ -1524,8 +1527,10 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT_NEW" 'JSON.stringify({
 - **Byte-stability ≠ correctness**. The check validates determinism
   against the .bak you have, not behavioral correctness against a
   pristine .bak. (Gotcha.)
-- **Iterative patch development pollutes .bak.** Re-bake from pristine
-  before final synthesis when iterating in place. (MAINTAINER rule.)
+- **`.bak` is the pristine pre-patch baseline — never overwrite it.**
+  Iteration checkpoints get explicit `.pre-patchX.bak` names. This
+  invariant makes the diff-based prebuilt synthesis correct by
+  construction. (MAINTAINER rule.)
 - **DOM probing is the user-visible verification.** `node --check` and
   byte-stability are necessary but not sufficient.
 - **Don't improvise reload mechanisms.** `location.reload()` on a

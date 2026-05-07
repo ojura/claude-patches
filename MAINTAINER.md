@@ -253,17 +253,28 @@ missing transformation as an explicit splice. See
 [`docs/debugging.md`](docs/debugging.md) "Byte-stability check is
 necessary but not sufficient" gotcha.
 
-**Maintainer rule of thumb when iterating a patch:**
+**Invariant: `.bak` is always the pristine pre-patch baseline.**
 
-- Either re-bake from a pristine extension install before final
-  prebuilt synthesis (delete `<file>.bak`, reinstall extension,
-  re-apply patches, then run `build-prebuilt.py`).
-- Or maintain a separate immutable checkpoint like `.pre-patchK.bak`
-  or `.pristine.bak` that's never overwritten across iterations.
-- After publishing the prebuilt, verify it against a pristine fresh
-  install before declaring it shipped: download to a clean test
-  extension dir and confirm the resulting code actually runs (DOM
-  probe for the rendered K marker, not just `node --check`).
+This is the rule that makes `build-prebuilt.py`'s diff
+(`live - .bak`) always capture the full pristine→patched
+transformation, never an incremental hop. Maintain it strictly:
+
+- **Never overwrite `.bak` once it exists.** SKILL.md Step 2 already
+  says "skip the backup if a `.bak` already exists" for end-users;
+  the same discipline applies to maintainers iterating a patch.
+- For per-iteration checkpoints (e.g., snapshot of post-v1.3 live
+  before re-applying v1.4), use explicit `<file>.pre-patchX.bak`
+  names. `apply-patch-fg.py` uses this pattern (it writes
+  `extension.js.pre-patchFG.bak`). These can be transient — overwrite
+  freely; they're per-iteration, not pristine.
+- If `.bak` somehow drifted off pristine (re-patched atop already-
+  patched live, or the file was overwritten before this rule was
+  formalized), recover by reinstalling the extension from scratch
+  and re-baking from clean before any further patch work.
+- After publishing the prebuilt, verify it against a fresh install
+  before declaring it shipped: download to a clean test extension
+  dir and confirm the resulting code actually runs (DOM probe for
+  the rendered K marker, not just `node --check`).
 
 ### Verifying a published prebuilt before declaring shipped
 
