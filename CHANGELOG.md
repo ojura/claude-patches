@@ -14,6 +14,85 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` — that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`.
 
+## v1.5 — 2026-05-07 — Patch K reconstruction-quality signaling
+
+Patch K gains two new signals to surface reconstruction quality at
+the marker level. Behavior of the previous v1.4 mechanism unchanged
+when reconstruction is unambiguous and complete; the new signals
+fire only in degenerate cases.
+
+### Non-uniqueness warning (`AMBIGUOUS RECONSTRUCTION`)
+
+K1's sibling-backfill loop now counts how many sibling .jsonls
+structurally qualify for a given phantom-lpu (shared phantom-lpu
++ pre-content before their own first phantom-lpu boundary). If
+more than one sibling qualifies, the chosen "canonical pre-content"
+is by definition ambiguous — different filesystems / readdir
+orderings could pick a different sibling and produce a different
+chain root.
+
+Behavior change: K1 no longer `break`s after the first qualifying
+sibling. The full count is captured in `_ambigPhLpus` (set of
+phantom-lpus with >1 candidates), and:
+
+- The bookend ghost's content prepends a "⚠ AMBIGUOUS
+  RECONSTRUCTION: N phantom-lpu compaction event(s) had multiple
+  sibling-file candidates for backfill..." prefix when
+  `_ambigPhLpus.size > 0`.
+- Each seam ghost whose underlying phantom-lpu is ambiguous gets a
+  matching prefix on its content.
+
+Verified end-to-end via DOM probe: clone a sibling .jsonl in the
+project dir to induce non-uniqueness, reload, observe
+`bodyHasAMBIG === true`, bookend rendered with the warning text +
+ambient styling unchanged (warning is content-side only, not
+visual).
+
+### Reconstruction-failed marker (`pfgk-broken-`)
+
+Bookend predicate (b) — the relaxed predicate that fires when
+predicate (a) finds no clean parent==null user/assistant chain
+root — now plants a NEW marker variant with uuid prefix
+`pfgk-broken-` (was: `pfgk-bookend-`). The webview render wrap
+recognizes this as a fourth role with a deliberately stronger
+visual style than the regular bookend so the user can't miss it
+at a glance:
+
+- Background `rgba(180,0,0,0.50)` (saturated red, 50% alpha vs
+  the regular bookend's 18%).
+- Full border `4px solid #990000` (was: only border-left;
+  broken gets all-around).
+- Border-left still `6px solid #990000` (preserves the
+  side-stripe accent shared with other markers).
+- Box-shadow `0 0 12px rgba(180,0,0,0.6)` — red glow.
+- Emoji `⛔` (was: `⚠️` shared across all roles).
+- Content text: "⛔ INCOMPLETE TRANSCRIPT — RECONSTRUCTION
+  FAILED..." (was: "PATCH K · Conversation origin (chain root
+  recovered)..."). Critical signal that upstream lineage is
+  missing from this view.
+
+This handles the case where K can't make the rendered chain reach
+a true canonical root despite trying — typically because the
+sibling .jsonl that originally held the canonical pre-compaction
+content has been deleted / moved / renamed, and no other sibling
+shares the phantom-lpu.
+
+Verified end-to-end via DOM probe: rename a sibling .jsonl
+(the one K1 backfilled from) so reconstruction fails, reload,
+observe `[data-pfgk-role="broken"]` count = 1, `[data-pfgk-role
+="bookend"]` count = 0, `bodyHasINCOMPLETE === true`,
+`getComputedStyle(brokenEl).backgroundColor === "rgba(180, 0, 0,
+0.35)"`.
+
+### Why a separate marker variant rather than a flag on the bookend
+
+Visual differentiation matters: `bookend` is a *positive* signal
+("we successfully reached the conversation origin"). When that's
+not actually true, we need a marker that visually stands apart at
+a glance, not just by reading the message text. Different uuid
+prefix → different role → different colors and header → user
+can't miss it.
+
 ## v1.4 — 2026-05-04 — Patch K cross-conversation backfill
 
 Patch K becomes fully topology-driven. The rendered chain spans the
