@@ -1339,3 +1339,204 @@ hard to confirm empirically; `setScriptSource` injection of the same
 trace failed silently, per the gotcha. The mechanic generalises beyond
 Patch K — it's the answer for any "rendered messages don't match
 on-disk JSONL" question.
+
+---
+
+## Case study: dead K wrap from non-pristine `.bak` synthesis (2.1.132)
+
+A second case study, demonstrating how a prebuilt can pass byte-stability
+checks while shipping dead code, and the empirical workflow to diagnose +
+recover.
+
+### Symptom
+
+Antigravity upgrades to `2.1.132`. `/patch-claude` runs the manual-fallback
+path (no prebuilt exists for this version yet). Maintainer translates the
+v1.4 K splices from the `2.1.126` prebuilt with bundle-var renames
+(`XR0` → `GR0` etc.), `node --check` passes, `build-prebuilt.py`
+synthesizes a new prebuilt for `2.1.132`, byte-stability check passes,
+prebuilt pushed.
+
+User reports K rendering is broken: "ancient version of Patch K. Where
+is the circular navigation?"
+
+### Step 1: precheck patches are loaded
+
+```sh
+WS=$(curl -s http://127.0.0.1:9229/json | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])')
+node /tmp/cdp-eval.mjs "$WS" '(function(){
+  var s = require("fs").readFileSync(
+    "/home/juraj/.antigravity/extensions/anthropic.claude-code-2.1.132-linux-x64/extension.js","utf-8");
+  return JSON.stringify({sigs: ["/*pfg-v1.4*/"].filter(t=>s.includes(t)),
+                         hasK: s.includes("_kFired"), hasBridge: s.includes("pfgk-bridge-")});
+})()'
+// {"sigs":["/*pfg-v1.4*/"], "hasK":true, "hasBridge":true} — extension.js patch is live.
+```
+
+### Step 2: probe the rendered DOM in the chat panel
+
+Find the chat panel's webview iframe target via `/json/list` (filter for
+`type:"iframe"` whose parent page is the target window's). Then drill into
+the inner `active-frame` and probe for K wrap markers:
+
+```sh
+WS_CHAT="ws://127.0.0.1:9222/devtools/page/<chat-iframe-id>"
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" 'JSON.stringify({
+  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
+  bookend: document.querySelectorAll("[data-pfgk-role=\"bookend\"]").length,
+  hasPatchKMarker: document.body.textContent.includes("PATCH K · ")
+})'
+// {"pfgkAlert":0,"bookend":0,"hasPatchKMarker":true}
+```
+
+The K message text is in the DOM (`PATCH K · Conversation origin...`)
+but `pfgkAlert: 0` — the wrap div isn't being rendered. The K bookend
+is showing as a plain user message bubble.
+
+### Step 3: walk DOM up from the K text node to identify where the wrap *should* be
+
+```sh
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" '(function(){
+  var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  var n;
+  while (n = w.nextNode()) if (n.nodeValue.includes("PATCH K · Conversation")) break;
+  if (!n) return "not found";
+  var path = []; var c = n.parentElement;
+  for (var i=0; i<10 && c; i++) { path.push({tag: c.tagName, cls: (c.className||"").slice(0,80)}); c = c.parentElement; }
+  return JSON.stringify(path);
+})()'
+```
+
+Result shows `SPAN → DIV.content_xGDvVg → DIV.contentWrapper_xGDvVg → DIV.userMessage_07S1Yg → ...` — the K message is inside a normal
+`userMessage` bubble, with NO `pfgkAlert` parent. The wrap React node
+that's supposed to wrap the user-message createElement isn't there.
+
+### Step 4: inspect the patched `webview/index.js` source
+
+```sh
+grep -A 1 'pfgkAlert' "$EXT/webview/index.js" | head
+```
+
+The wrap code IS present in the source:
+
+```js
+if(Z.type==="user"){
+  if(Z.parentToolUseId)return null;
+  if(Z.isSynthetic)return null;
+  return n1.default.createElement(GR0,{...});       // ← returns immediately
+  if(typeof Z.uuid==="string"){...; _ws=createElement("div", ..., _ws); ...}
+  return _ws                                          // ← UNREACHABLE
+}
+```
+
+The `return n1.default.createElement(GR0,...)` makes everything after it
+dead code. The wrap branch never runs.
+
+### Step 5: diagnose the synthesis pitfall
+
+The `2.1.126` prebuilt's K webview splice OLD anchor was
+`G,setInputError:q,onCreateNewSession:z})}if(Z.type==="assistant"...`
+(80 chars). The corresponding NEW string changed `})}` to
+`});<wrap code>; return _ws}`. For this to produce a wrapped result,
+the createElement call must NOT be preceded by `return ` — instead
+preceded by `let _ws=`.
+
+**In `2.1.126`**, the patch was developed iteratively (v1.2 → v1.3 → v1.4).
+By the time the v1.4 prebuilt was synthesized, an earlier iteration had
+already transformed `return createElement(...)` to `let _ws=createElement(...)`.
+That transformation was equally present in `.bak` (post-iteration) and
+live (post-iteration), so `build-prebuilt.py`'s diff didn't capture it.
+The synthesized splice covered only the wrap-internal v1.3→v1.4 changes.
+Byte-stability passed because re-applying the splice to that `.bak`
+reproduces live exactly — but the .bak wasn't pristine.
+
+**In `2.1.132`** (fresh install, `.bak` IS pristine `return createElement(...)`),
+the splice's grep anchor matched, `node --check` passed, byte-stability
+passed — but the result was dead code.
+
+### Step 6: fix and re-synthesize
+
+Add an explicit `return → let _ws=` transformation as a separate splice:
+
+```py
+old = "return n1.default.createElement(GR0,{session:$,...,onCreateNewSession:z});"
+new = "let _ws=n1.default.createElement(GR0,{session:$,...,onCreateNewSession:z});"
+```
+
+After applying, `build-prebuilt.py` synthesis now captures 4
+`webview/index.js` splices (was 3): the new transformation + the original
+3. Byte-stability passes (deterministic against the new pristine `.bak`).
+
+### Step 7: reload via mechanism 3 and verify in DOM
+
+This is the recovery + verify path. The maintainer first improvised
+with `location.reload()` on the iframe (DON'T — see gotcha) which left
+the iframe in `chrome-error://chromewebdata/`. Then `Page.reload` on
+the iframe target (DON'T — rejected as not top-level). Then command
+palette typing failed because focus was held by the broken iframe.
+
+The recovery path that actually works:
+
+```js
+// 1. Body-area mouse click to take focus from the broken iframe
+await call('Input.dispatchMouseEvent', {type:'mousePressed', x:5, y:5, button:'left', clickCount:1});
+await call('Input.dispatchMouseEvent', {type:'mouseReleased', x:5, y:5, button:'left', clickCount:1});
+
+// 2. Verify document.activeElement is now BODY, not IFRAME
+//    (skip this and you'll waste turns wondering why typing doesn't reach the palette)
+
+// 3. Open command palette: Ctrl+Shift+P sets the ">" command-mode prefix
+await call('Input.dispatchKeyEvent', {type:'rawKeyDown', modifiers:10, key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
+await call('Input.dispatchKeyEvent', {type:'keyUp', modifiers:10, key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
+
+// 4. CRITICAL: do NOT clear the input — clearing drops the ">" prefix and
+//    puts the palette into file-picker mode, where Enter opens a file
+//    instead of running a command. Type APPEND-style.
+
+// 5. Type "Reload Window" via char events
+for (const ch of "Reload Window") {
+  await call('Input.dispatchKeyEvent', {type:'char', text:ch, unmodifiedText:ch});
+}
+
+// 6. Verify firstSugg matches "Developer: Reload Window..."
+
+// 7. Enter, wait ~10s for reload
+await call('Input.dispatchKeyEvent', {type:'rawKeyDown', key:'Enter', code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
+await call('Input.dispatchKeyEvent', {type:'keyUp', key:'Enter', code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
+```
+
+After reload, re-discover the new chat-panel iframe target (the ID
+changes on reload), and re-probe:
+
+```sh
+WS_CHAT_NEW="ws://127.0.0.1:9222/devtools/page/<new-iframe-id>"
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT_NEW" 'JSON.stringify({
+  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
+  bookend: document.querySelectorAll("[data-pfgk-role=\"bookend\"]").length,
+  seam: document.querySelectorAll("[data-pfgk-role=\"seam\"]").length,
+  bridge: document.querySelectorAll("[data-pfgk-role=\"bridge\"]").length
+})'
+// {"pfgkAlert":4,"bookend":1,"seam":2,"bridge":1} — fix verified end-to-end.
+```
+
+### What this case study demonstrates
+
+- **Byte-stability ≠ correctness**. The check validates determinism
+  against the .bak you have, not behavioral correctness against a
+  pristine .bak. (Gotcha.)
+- **Iterative patch development pollutes .bak.** Re-bake from pristine
+  before final synthesis when iterating in place. (MAINTAINER rule.)
+- **DOM probing is the user-visible verification.** `node --check` and
+  byte-stability are necessary but not sufficient.
+- **Don't improvise reload mechanisms.** `location.reload()` on a
+  webview iframe leaves it in chrome-error; `Page.reload` is rejected
+  on iframe targets. Use mechanism 3 (Reload Window via key events) or
+  mechanism 5 (disk + Reload Window). (Gotcha.)
+- **Focus-stuck-to-iframe blocks command palette typing.** Body-area
+  mouse click first; verify `document.activeElement` before typing.
+  (Gotcha.)
+- **Don't clear the `>` prefix when the palette is in command mode.**
+  Append, don't replace. (Pitfall.)
+
+The first three points are the substantive lessons; the last three are
+recovery paths from cowboying-when-the-playbook-already-said-not-to.

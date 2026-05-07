@@ -265,6 +265,56 @@ necessary but not sufficient" gotcha.
   extension dir and confirm the resulting code actually runs (DOM
   probe for the rendered K marker, not just `node --check`).
 
+### Verifying a published prebuilt before declaring shipped
+
+Byte-stability + `node --check` + manual smoke (open a session, see
+markers) are necessary but easy to fool yourself with. The
+authoritative test is the user-facing one: **does the rendered DOM
+contain the wrap elements the patch is supposed to produce?**
+
+Recipe (assumes the prebuilt has been applied to a fresh install,
+window has been reloaded, and a session known to trigger Patch K is
+open in a chat panel):
+
+```sh
+# Find the chat panel's webview iframe target
+PAGE_ID=$(curl -s http://127.0.0.1:9222/json/list | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+# Look for an iframe whose parent page title matches the target window
+for t in d:
+    if t.get("type") == "iframe":
+        # Filter further by URL/parent — see docs/debugging.md
+        ...')
+
+# DOM probe inside the inner active-frame
+WS="ws://127.0.0.1:9222/devtools/page/$PAGE_ID"
+node /tmp/eval_in_inner_frame.mjs "$WS" 'JSON.stringify({
+  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
+  bookend: document.querySelectorAll("[data-pfgk-role=\"bookend\"]").length,
+  seam: document.querySelectorAll("[data-pfgk-role=\"seam\"]").length,
+  bridge: document.querySelectorAll("[data-pfgk-role=\"bridge\"]").length
+})'
+```
+
+For a session known to have phantom-lpu boundaries the result should
+be `{pfgkAlert: ≥1, bookend: 1, seam: ≥1, bridge: ≥0}` — non-zero
+wrap counts confirm the wrap React node is actually rendering, not
+just the K message text.
+
+If the wrap counts are zero but the message text is in the DOM
+(`document.body.textContent.includes("PATCH K · ")` returns true),
+the splice produced dead code. See [`docs/debugging.md`'s
+"Case study: dead K wrap from non-pristine .bak synthesis"](docs/debugging.md)
+for the empirical diagnosis walkthrough.
+
+The full CDP toolkit + recipes live in
+[`docs/debugging.md`](docs/debugging.md) — read the
+"⚠️ Read this BEFORE improvising" banner there before reaching for
+ad-hoc reload mechanisms; several common ones (`location.reload()`,
+`Page.reload` on iframes) are documented gotchas that break the
+install state.
+
 ## util/ scripts: what they don't do
 
 - They don't validate that your patches are *correct* — only that
