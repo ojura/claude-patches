@@ -227,12 +227,51 @@ file, something captured into the diff that shouldn't have.
 In practice this hasn't happened (upstream bundles are deterministic),
 but the check is the cheap insurance against it ever shipping.
 
+### Byte-stability does NOT imply correctness
+
+Byte-stability proves the splice is **deterministic against the .bak
+you have**. It does not prove the splice produces correct *behavior*
+when applied to a different .bak (e.g., a fresh extension install).
+
+If `.bak` isn't pristine — typically because you iteratively developed
+the patch in place and never re-baked from a fresh install — the
+synthesis only captures the **last incremental hop**, not the full
+pristine→post-patch transformation. Earlier transformations are
+present in both `.bak` and live, so the diff doesn't see them.
+Translating the resulting prebuilt to a fresh bundle then leaves
+those earlier transformations missing, often producing dead code or
+silent no-ops while passing every byte-stability check.
+
+This bit us during 2.1.132's first synthesis: the v1.4 K webview
+wrap captured from a 2.1.126 install with non-pristine `.bak` was
+missing the `return createElement(...)` → `let _ws=createElement(...)`
+transformation (which had been introduced in v1.2 or v1.3 K iteration
+and was already in the post-iteration `.bak`). Applying the splice to
+a fresh 2.1.132 install left the K wrap as dead code after the
+`return` statement. Diagnosed by CDP DOM probe; fixed by adding the
+missing transformation as an explicit splice. See
+[`docs/debugging.md`](docs/debugging.md) "Byte-stability check is
+necessary but not sufficient" gotcha.
+
+**Maintainer rule of thumb when iterating a patch:**
+
+- Either re-bake from a pristine extension install before final
+  prebuilt synthesis (delete `<file>.bak`, reinstall extension,
+  re-apply patches, then run `build-prebuilt.py`).
+- Or maintain a separate immutable checkpoint like `.pre-patchK.bak`
+  or `.pristine.bak` that's never overwritten across iterations.
+- After publishing the prebuilt, verify it against a pristine fresh
+  install before declaring it shipped: download to a clean test
+  extension dir and confirm the resulting code actually runs (DOM
+  probe for the rendered K marker, not just `node --check`).
+
 ## util/ scripts: what they don't do
 
 - They don't validate that your patches are *correct* — only that
-  they're *byte-stable*. If you applied Patch D wrong (only one of
-  two walkers patched), the prebuilt will be byte-stable but
-  functionally broken. Test the live patches before synthesizing.
+  they're *byte-stable* against the .bak in the install dir. If you
+  applied Patch D wrong (only one of two walkers patched), the
+  prebuilt will be byte-stable but functionally broken. Test the live
+  patches before synthesizing.
 - They don't auto-locate `.bak` files anywhere other than alongside
   each target. If your backups are named `.pre-patchA.bak` or live in
   another directory, copy them to `extension.js.bak` etc. before

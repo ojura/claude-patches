@@ -14,6 +14,41 @@ generalise to upstream VS Code with minor adjustments — the inspector
 ports, IPC plumbing, and CommonJS module structure are the same; only
 the launch flags and IDE-product paths differ.
 
+> ## ⚠️ Read this BEFORE improvising
+>
+> If you found this doc because you're about to debug a running
+> Antigravity / VS Code install: **read the relevant section first,
+> then act**. Do not freelance reload commands, eval expressions,
+> or reload mechanisms before checking whether the playbook already
+> covers your case. Specifically:
+>
+> - **Reload mechanisms**: see "Refresh / reload playbook" — six
+>   verified mechanisms ordered by precision. `location.reload()` on
+>   webview iframes BREAKS the iframe (chrome-error). `Page.reload`
+>   is rejected on iframe targets. Don't try them. Use mechanism 3
+>   (`Input.dispatchKeyEvent` for `workbench.action.reloadWindow`)
+>   or mechanism 5 (disk-edit + Reload Window).
+> - **Verifying a code change took effect**: see the K case study
+>   "End-to-end verification of the fix" paragraph — the exact recipe
+>   is `Input.dispatchKeyEvent` reload + BP-free verification via
+>   fiber-walk + DOM probing. `node --check` and byte-stability
+>   passing are NOT verification.
+> - **Capturing function-internal state**: see "Recipe: capture
+>   function-internal state with a side-effect BP". Don't try
+>   `setScriptSource` for code injection — it silently doesn't swap
+>   running code (top gotcha).
+> - **Reaching the manager singleton**: not on `extension.exports` /
+>   `globalThis` / `require.cache`. Use the BP-stash trick (Recipe 1).
+>
+> The cost of pausing to skim the relevant section is seconds. The
+> cost of cowboying is minutes per failed mechanism plus often
+> breaking the install state (chrome-error iframes, broken focus,
+> etc.). The playbook exists because every recipe in it was earned
+> by failing the cowboy way first.
+>
+> If you find a case the playbook doesn't cover, document it here
+> after solving it. If you find an outdated recipe, fix it.
+
 ---
 
 ## Mental model
@@ -1027,6 +1062,110 @@ BP-stash trick.
 reshuffle. `9229` itself can change hands — if the original
 first-spawned window closes and another spawns, the new one captures
 `9229`. Re-identify `mine` and `target` after any window-state change.
+
+### `location.reload()` on a webview iframe leaves it in `chrome-error://chromewebdata/`
+
+Using `Runtime.evaluate` to call `location.reload()` inside a
+vscode-webview's inner active-frame does NOT cleanly reload the
+webview — the iframe ends up navigating to
+`chrome-error://chromewebdata/` with an empty body. The webview
+content (React app, scripts, body) is GONE and doesn't recover until
+the window is reloaded. This is because vscode-webview's outer CSP
+wrapper expects to re-issue the load via its own RPC channel, not
+via in-frame navigation.
+
+Don't use `location.reload()` on webview frames. To reload webview
+content after editing `webview/index.js` on disk, use mechanism 5
+from the refresh playbook: `Input.dispatchKeyEvent` for
+`workbench.action.reloadWindow` (Ctrl+R or via command palette →
+"Developer: Reload Window"). Mechanism 5 is the verified path; the
+case study below uses it.
+
+### `Page.reload` is rejected on iframe targets
+
+`Page.reload` on a vscode-webview iframe target returns:
+
+```
+{ code: -32000, message: 'Command can only be executed on top-level targets' }
+```
+
+CDP only allows `Page.reload` on top-level pages. The webview iframe
+inherits its lifecycle from its parent workbench page — reload that
+instead (or use the refresh playbook's mechanism 3/5).
+
+### Focus-lost-to-broken-iframe blocks command-palette typing
+
+Symptom: `Input.dispatchKeyEvent` for Ctrl+Shift+P opens the palette
+(verified by `.quick-input-widget` appearing in DOM), but subsequent
+`type:'char'` events don't reach the palette input. Reading
+`document.querySelector('.quick-input-and-message input').value`
+shows the palette input is unchanged or has stale text from a prior
+session.
+
+Cause: an iframe in the workbench (often a broken
+`chrome-error://chromewebdata/` from an earlier botched
+`location.reload()`) has captured focus. `document.activeElement`
+returns `IFRAME` instead of the palette `INPUT`, so the char events
+go to the iframe (where they're discarded). JS-side `i.focus()` on
+the palette input fails to take focus back — the iframe re-grabs it
+synchronously after the JS focus call returns.
+
+Recovery requires fixing the iframe state: close+reopen the offending
+panel via UI, or `Developer: Reload Window`. In a healthy workbench
+(no chrome-error iframes), command palette typing via
+`Input.dispatchKeyEvent` works fine — verified end-to-end.
+
+Always verify the `document.activeElement` after opening the palette:
+
+```js
+JSON.stringify({focused: document.activeElement?.tagName + '/' + (document.activeElement?.className||'').slice(0,40)})
+```
+
+If it's anything other than `INPUT/quick-input-and-message ...`, the
+keystrokes won't reach the palette. Stop and recover the iframe state
+before attempting to type.
+
+### Byte-stability check is necessary but not sufficient for splice correctness
+
+`util/build-prebuilt.py` validates the synthesized splice by re-applying
+it to a fresh copy of `.bak` and confirming the result is byte-identical
+to the live patched file. **This proves the splice is deterministic; it
+does not prove the splice is correct.**
+
+If `.bak` itself isn't pristine — e.g., the patch was iteratively
+developed in place and `.bak` was captured *between* iterations — the
+splice synthesis only captures the diff between *the latest .bak state*
+and *the current live state*, missing transformations that were
+introduced by an earlier patch iteration and are now equally present
+in both `.bak` and live.
+
+Concrete instance: Patch K's webview wrap was developed iteratively
+across v1.2 → v1.3 → v1.4 in the 2.1.126 install. The `let _ws=`
+prefix on the `createElement(GR0,...)` call was introduced in an
+earlier K iteration (v1.2 or v1.3). By the time the v1.4 prebuilt was
+synthesized, `.bak` already had `let _ws=` (because no one re-baked
+from pristine after the iteration). The captured splice therefore
+covered only the v1.3→v1.4 wrap-internal change, NOT the pristine
+`return createElement(...)` → `let _ws=createElement(...)`
+transformation that was needed for the wrap to do anything at all.
+
+Translating that splice to a fresh bundle (e.g. 2.1.132, where `.bak`
+IS pristine) applied cleanly via grep, byte-stability passed, but the
+result was dead code: the K wrap branch lived after a `return
+createElement(...)` statement and never executed.
+
+Mitigations:
+- When iterating a patch in place, **re-bake from pristine before
+  synthesizing the prebuilt**, or maintain a separate
+  `.pre-patchK.bak` checkpoint that's never overwritten.
+- After synthesizing a new prebuilt, **verify against pristine** by
+  applying it to a fresh `.bak` from a freshly-installed extension
+  (not the iteratively-modified one). If the application doesn't
+  produce a working patch, the prebuilt is incremental, not
+  comprehensive.
+- The user-visible verification (DOM probe for `.pfgkAlert` after
+  Reload Window) catches this; the byte-stability check alone does
+  not.
 
 ---
 
