@@ -11,9 +11,21 @@ same extension version may exist under `prebuilt/<VER>/` if the
 patchset still supports that version; otherwise apply patches
 manually via the SKILL.md fallback.
 
+## Path structure
+
+```
+prebuilt/archive/broken/v<patchset-version>/<bundle-version>/apply.py
+```
+
+Both the patchset version (e.g. `v1.4`) AND the bundle version
+(e.g. `2.1.126`) participate in the path. The patchset version is
+the outer dir because the same bundle version can have a broken
+prebuilt for one patchset and a working prebuilt for another
+(future fix), and we want both archived without collision.
+
 ## Criteria for landing here
 
-A prebuilt belongs in `prebuilt/archive/broken/<VER>/` if:
+A prebuilt belongs in `prebuilt/archive/broken/v<patchset>/<VER>/` if:
 
 1. It was once published at `prebuilt/<VER>/apply.py`.
 2. Empirical user-visible verification (DOM probe, behavior test,
@@ -35,7 +47,7 @@ below to document the diagnosis.
 
 ## Per-version notes
 
-### 2.1.126
+### v1.4 / 2.1.126
 
 - **Bug**: K webview wrap is dead code on fresh installs. The
   splice's OLD anchor matches `})}if(Z.type==="assistant"...` but

@@ -26,6 +26,7 @@ This script is a *maintainer* tool — it produces output that gets
 committed and used by end-users via the much simpler
 prebuilt/<VER>/apply.py. End-users never run util/build-prebuilt.py.
 """
+import glob
 import json
 import os
 import shutil
@@ -293,30 +294,69 @@ def main():
 
     out_path = os.path.join(out_dir, "apply.py")
 
-    # Guardrail: refuse to publish a prebuilt byte-identical to one already
-    # archived as known-broken for the same version. This catches the "404
-    # → re-synthesize from non-pristine live install → re-publish the same
-    # broken file" failure mode (see prebuilt/archive/broken/README.md for
-    # the diagnostic context).
-    broken_path = os.path.join(REPO_ROOT, "prebuilt", "archive", "broken", version, "apply.py")
-    if "--force-republish-broken" not in sys.argv and os.path.exists(broken_path):
-        with open(broken_path, "r") as f:
-            broken_content = f.read()
-        if broken_content == script:
-            print()
-            print(f"REFUSING to publish: byte-identical to known-broken prebuilt at")
-            print(f"  {broken_path}")
-            print()
-            print(f"This means the live install you're synthesizing from has the same")
-            print(f"non-pristine .bak that produced the archived broken prebuilt. The")
-            print(f"prebuilt would inherit the same dead-code / silent-no-op bug.")
-            print()
-            print(f"Action: see prebuilt/archive/broken/README.md for the diagnosis,")
-            print(f"then either reinstall the extension from scratch (to get a pristine")
-            print(f".bak) or fix the splice on the live install before re-running.")
-            print(f"To override anyway (you'd better have a reason): pass")
-            print(f"--force-republish-broken.")
-            sys.exit(2)
+    # Guardrail bundle: refuse to publish a prebuilt that's byte-identical to
+    # something the maintainer probably shouldn't be re-publishing.
+    #
+    # Three cases caught:
+    #   (a) byte-identical to a known-broken archived prebuilt for THIS bundle
+    #       version, under ANY patchset version. Catches "404 → re-synthesize
+    #       from non-pristine live install → re-publish the same broken file".
+    #   (b) byte-identical to the currently-published prebuilt at
+    #       prebuilt/<VER>/apply.py — and the embedded SIGNATURE constant is
+    #       unchanged. Means the maintainer is shipping no functional change
+    #       (probably forgot to bump skill/SKILL.md's `**Patchset version**`
+    #       before re-baking and synthesizing).
+    #
+    # Override: --force-republish-broken (use only with explicit reason).
+    if "--force-republish-broken" not in sys.argv:
+        # Case (a): glob across all patchset versions
+        broken_glob = os.path.join(
+            REPO_ROOT, "prebuilt", "archive", "broken", "*", version, "apply.py"
+        )
+        for broken_path in glob.glob(broken_glob):
+            with open(broken_path, "r") as f:
+                broken_content = f.read()
+            if broken_content == script:
+                rel = os.path.relpath(broken_path, REPO_ROOT)
+                print()
+                print(f"REFUSING to publish: byte-identical to known-broken prebuilt at")
+                print(f"  {rel}")
+                print()
+                print(f"This means the live install you're synthesizing from has the same")
+                print(f"non-pristine .bak that produced the archived broken prebuilt. The")
+                print(f"prebuilt would inherit the same dead-code / silent-no-op bug.")
+                print()
+                print(f"Action: see prebuilt/archive/broken/README.md for the diagnosis,")
+                print(f"then either reinstall the extension from scratch (pristine .bak)")
+                print(f"or fix the splice on the live install before re-running.")
+                print(f"To override anyway: pass --force-republish-broken.")
+                sys.exit(2)
+
+        # Case (b): identical to currently-published, no signature change
+        if os.path.exists(out_path):
+            with open(out_path, "r") as f:
+                current_content = f.read()
+            if current_content == script:
+                # Extract the SIGNATURE from both — if both have the same signature
+                # AND same content, the maintainer is probably re-publishing without
+                # a meaningful change.
+                import re as _re
+                cur_sig_m = _re.search(r'SIGNATURE\s*=\s*"([^"]+)"', current_content)
+                cur_sig = cur_sig_m.group(1) if cur_sig_m else None
+                if cur_sig == SIGNATURE:
+                    print()
+                    print(f"REFUSING to publish: byte-identical to currently-published")
+                    print(f"  prebuilt/{version}/apply.py, with the same signature ({SIGNATURE}).")
+                    print()
+                    print(f"No functional change is being shipped. This usually means the")
+                    print(f"maintainer forgot to bump `**Patchset version**` in skill/SKILL.md")
+                    print(f"before re-baking and re-synthesizing.")
+                    print()
+                    print(f"Action: bump skill/SKILL.md's `**Patchset version**` line, then")
+                    print(f"re-apply patches locally (verify only the signature tag changed)")
+                    print(f"before re-running build-prebuilt.py.")
+                    print(f"To override (e.g. legitimate no-op resync): pass --force-republish-broken.")
+                    sys.exit(2)
 
     with open(out_path, "w") as f:
         f.write(script)

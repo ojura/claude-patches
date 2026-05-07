@@ -343,9 +343,14 @@ If user-visible verification reveals an already-published prebuilt
 is broken (and a fixed re-synthesis isn't going to happen for that
 extension version — e.g., it's been superseded by a newer one):
 
-1. **Move it to `prebuilt/archive/broken/<VER>/`** rather than
-   deleting. Keeps the historical record so future investigators
-   can see exactly what shipped.
+1. **Move it to `prebuilt/archive/broken/v<patchset>/<VER>/`**
+   rather than deleting. The patchset version is the outer dir
+   because the same bundle version can have a broken prebuilt for
+   one patchset and a working prebuilt for another future fix —
+   we want both archived without collision. Example:
+   `prebuilt/archive/broken/v1.4/2.1.126/apply.py`. Keeps the
+   historical record so future investigators can see exactly what
+   shipped.
 2. **Document the diagnosis** in
    [`prebuilt/archive/broken/README.md`](prebuilt/archive/broken/README.md)'s
    per-version notes section — what the bug was, why it shipped

@@ -202,9 +202,12 @@ different correct actions:
    you have push access, synthesize and publish.
 
 2. **Version was deliberately archived as broken.** Check
-   `prebuilt/archive/broken/<VER>/`. If a directory exists there,
-   the prior published prebuilt was found buggy and removed — see
-   `prebuilt/archive/broken/README.md` for per-version diagnoses.
+   `prebuilt/archive/broken/v*/<VER>/` (the broken archive is
+   namespaced by patchset version: e.g.
+   `prebuilt/archive/broken/v1.4/2.1.126/`). If any patchset's broken
+   archive has this bundle version, the prior published prebuilt was
+   found buggy — see `prebuilt/archive/broken/README.md` for
+   per-version diagnoses.
    Action: do NOT re-synthesize from your live install if its `.bak`
    was the source of the original broken prebuilt — you'll just
    reproduce the bug. `build-prebuilt.py` has a guardrail that
@@ -220,8 +223,8 @@ different correct actions:
 To check which case you're in:
 
 ```sh
-ls "$REPO_ROOT/prebuilt/archive/broken/$VER/" 2>/dev/null && \
-    echo "WARNING: this version has a known-broken prebuilt — read the archive README before publishing"
+ls "$REPO_ROOT"/prebuilt/archive/broken/*/$VER/ 2>/dev/null && \
+    echo "WARNING: this bundle version has a known-broken prebuilt under some patchset — read the archive README before publishing"
 ls "$REPO_ROOT/prebuilt/archive/v1/$VER/"     2>/dev/null && \
     echo "Note: superseded older-patchset-version prebuilt exists; this is fine"
 ```

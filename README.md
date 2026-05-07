@@ -57,9 +57,11 @@ claude-patches/
 │   │                        # pristine .bak files, byte-stable verified.
 │   └── archive/
 │       ├── v1/              # superseded by current patchset version
-│       └── broken/          # known-broken prebuilts (don't run); see
-│                            # the README in that directory for criteria
-│                            # and per-version diagnoses
+│       └── broken/          # known-broken prebuilts (don't run);
+│           └── v<patchset>/ # outer dir: which patchset version
+│               └── <VER>/   # inner dir: which bundle version
+│                            # see the README in archive/broken/ for
+│                            # criteria and per-version diagnoses
 ├── docs/
 │   ├── patches.md           # detailed per-patch documentation
 │   └── debugging.md         # CDP introspection reference for the bundled
