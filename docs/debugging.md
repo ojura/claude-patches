@@ -1159,9 +1159,11 @@ Mitigations:
   overwrite it once it exists — for end-users and maintainers alike.
   This invariant makes `build-prebuilt.py`'s `live - .bak` diff
   always capture the full pristine→patched transformation, not an
-  incremental hop. Per-iteration snapshots get explicit
-  `.pre-patchX.bak` names (see `apply-patch-fg.py`'s
-  `.pre-patchFG.bak` for the pattern); those can be transient.
+  incremental hop.
+- **Per-patch checkpoints are named after the settled patch they
+  contain** (`.patchX.bak` = "settled state of patch X"), not after
+  the next patch in line. Self-documenting; doesn't require knowing
+  the patch ordering to interpret.
 - If `.bak` ever drifted off pristine, recover by reinstalling the
   extension from scratch and re-baking from clean before any further
   patch work. See [`MAINTAINER.md`](../MAINTAINER.md) for the
@@ -1528,9 +1530,10 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT_NEW" 'JSON.stringify({
   against the .bak you have, not behavioral correctness against a
   pristine .bak. (Gotcha.)
 - **`.bak` is the pristine pre-patch baseline — never overwrite it.**
-  Iteration checkpoints get explicit `.pre-patchX.bak` names. This
-  invariant makes the diff-based prebuilt synthesis correct by
-  construction. (MAINTAINER rule.)
+  Per-patch checkpoints are `.patchX.bak` (= settled state of patch
+  X), named after the patch they contain rather than the next patch
+  in line. This invariant makes the diff-based prebuilt synthesis
+  correct by construction. (MAINTAINER rule.)
 - **DOM probing is the user-visible verification.** `node --check` and
   byte-stability are necessary but not sufficient.
 - **Don't improvise reload mechanisms.** `location.reload()` on a

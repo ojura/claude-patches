@@ -262,11 +262,17 @@ transformation, never an incremental hop. Maintain it strictly:
 - **Never overwrite `.bak` once it exists.** SKILL.md Step 2 already
   says "skip the backup if a `.bak` already exists" for end-users;
   the same discipline applies to maintainers iterating a patch.
-- For per-iteration checkpoints (e.g., snapshot of post-v1.3 live
-  before re-applying v1.4), use explicit `<file>.pre-patchX.bak`
-  names. `apply-patch-fg.py` uses this pattern (it writes
-  `extension.js.pre-patchFG.bak`). These can be transient — overwrite
-  freely; they're per-iteration, not pristine.
+- **Per-patch checkpoints are named after the settled patch they
+  contain.** When patch X is finalized, snapshot the live file as
+  `<file>.patchX.bak`. That name self-documents what's in the
+  snapshot ("the settled state of patch X"). Use `.patchY.bak` after
+  Y is finalized, and so on. Don't use `.pre-patchY.bak` — it only
+  says what comes next, forcing the reader to know the patch
+  ordering to figure out what's actually in there.
+- During iteration of patch Y, work directly on live (which is
+  already at `.patchX.bak`'s state). When Y is finalized, save
+  `.patchY.bak` as the new checkpoint. `.patchX.bak` stays around as
+  the rollback target if Y turns out wrong.
 - If `.bak` somehow drifted off pristine (re-patched atop already-
   patched live, or the file was overwritten before this rule was
   formalized), recover by reinstalling the extension from scratch
@@ -275,6 +281,11 @@ transformation, never an incremental hop. Maintain it strictly:
   before declaring it shipped: download to a clean test extension
   dir and confirm the resulting code actually runs (DOM probe for
   the rendered K marker, not just `node --check`).
+
+(`apply-patch-fg.py` uses `<file>.pre-patchFG.bak` as a working
+checkpoint — that's a script-internal artifact rather than a
+maintainer-curated checkpoint, and the script reads/writes it
+itself, so the existing name is grandfathered.)
 
 ### Verifying a published prebuilt before declaring shipped
 
