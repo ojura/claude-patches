@@ -50,11 +50,16 @@ claude-patches/
 │                            # as a fallback when no prebuilt exists for the
 │                            # current extension version.
 ├── prebuilt/
-│   └── 2.1.126/
-│       └── apply.py         # version-pinned, self-contained apply script
-│                            # covering ALL patches A through K. Built by
-│                            # diffing the live patched bundle against its
-│                            # pristine .bak files, byte-stable verified.
+│   ├── <VER>/
+│   │   └── apply.py         # version-pinned, self-contained apply script
+│   │                        # covering ALL patches A through K. Built by
+│   │                        # diffing the live patched bundle against its
+│   │                        # pristine .bak files, byte-stable verified.
+│   └── archive/
+│       ├── v1/              # superseded by current patchset version
+│       └── broken/          # known-broken prebuilts (don't run); see
+│                            # the README in that directory for criteria
+│                            # and per-version diagnoses
 ├── docs/
 │   ├── patches.md           # detailed per-patch documentation
 │   └── debugging.md         # CDP introspection reference for the bundled

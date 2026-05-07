@@ -337,6 +337,28 @@ ad-hoc reload mechanisms; several common ones (`location.reload()`,
 `Page.reload` on iframes) are documented gotchas that break the
 install state.
 
+### When a published prebuilt turns out broken
+
+If user-visible verification reveals an already-published prebuilt
+is broken (and a fixed re-synthesis isn't going to happen for that
+extension version — e.g., it's been superseded by a newer one):
+
+1. **Move it to `prebuilt/archive/broken/<VER>/`** rather than
+   deleting. Keeps the historical record so future investigators
+   can see exactly what shipped.
+2. **Document the diagnosis** in
+   [`prebuilt/archive/broken/README.md`](prebuilt/archive/broken/README.md)'s
+   per-version notes section — what the bug was, why it shipped
+   (what synthesis pitfall), what supersedes it, what the
+   workaround is.
+3. **End-users running the broken prebuilt's old URL** will get a
+   404 from raw.githubusercontent.com after the move. The skill's
+   Step 0 falls through to manual application in that case, which
+   is the intended fallback.
+
+The current contents of `prebuilt/archive/broken/` document the
+2.1.126 K-wrap-dead-code case as a worked example.
+
 ## util/ scripts: what they don't do
 
 - They don't validate that your patches are *correct* — only that
