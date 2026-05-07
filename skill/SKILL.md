@@ -190,9 +190,45 @@ The steps below assume push access to the upstream `claude-patches`
 repo. If you don't have that, skip this section: you have patches
 applied locally and that is enough.
 
-To check capability without guessing at identity, dry-run a push from
-the local clone (this just probes credentials; it doesn't actually
-push):
+#### Pre-step 0: don't synthesize-and-publish on every 404
+
+A 404 on `prebuilt/<VER>/apply.py` (Step 0c) does NOT automatically
+mean "publish a new prebuilt". Three distinct cases produce 404, with
+different correct actions:
+
+1. **Genuine new version, no prebuilt yet** (e.g., upstream just
+   released `2.1.<N>` and nothing has been synthesized for it).
+   Action: apply patches manually via Steps 2–13 and 8/9, then if
+   you have push access, synthesize and publish.
+
+2. **Version was deliberately archived as broken.** Check
+   `prebuilt/archive/broken/<VER>/`. If a directory exists there,
+   the prior published prebuilt was found buggy and removed — see
+   `prebuilt/archive/broken/README.md` for per-version diagnoses.
+   Action: do NOT re-synthesize from your live install if its `.bak`
+   was the source of the original broken prebuilt — you'll just
+   reproduce the bug. `build-prebuilt.py` has a guardrail that
+   refuses to publish a byte-identical-to-archived-broken prebuilt,
+   but it's a backstop, not a substitute for understanding why the
+   archive entry exists. End-user fallback in this case is the same
+   as for genuine new versions: manual application via Steps 2–13.
+
+3. **Version was archived as superseded** (e.g., older patchset
+   version under `prebuilt/archive/v1/`). Same handling as case 1
+   if a current-patchset prebuilt is missing.
+
+To check which case you're in:
+
+```sh
+ls "$REPO_ROOT/prebuilt/archive/broken/$VER/" 2>/dev/null && \
+    echo "WARNING: this version has a known-broken prebuilt — read the archive README before publishing"
+ls "$REPO_ROOT/prebuilt/archive/v1/$VER/"     2>/dev/null && \
+    echo "Note: superseded older-patchset-version prebuilt exists; this is fine"
+```
+
+To check publish capability without guessing at identity, dry-run a
+push from the local clone (this just probes credentials; it doesn't
+actually push):
 
 ```sh
 # Uses $REPO_ROOT discovered in Step 0a.

@@ -292,6 +292,32 @@ def main():
             print(f"  {relpath}: byte-identical to live ({len(v)} bytes)")
 
     out_path = os.path.join(out_dir, "apply.py")
+
+    # Guardrail: refuse to publish a prebuilt byte-identical to one already
+    # archived as known-broken for the same version. This catches the "404
+    # → re-synthesize from non-pristine live install → re-publish the same
+    # broken file" failure mode (see prebuilt/archive/broken/README.md for
+    # the diagnostic context).
+    broken_path = os.path.join(REPO_ROOT, "prebuilt", "archive", "broken", version, "apply.py")
+    if "--force-republish-broken" not in sys.argv and os.path.exists(broken_path):
+        with open(broken_path, "r") as f:
+            broken_content = f.read()
+        if broken_content == script:
+            print()
+            print(f"REFUSING to publish: byte-identical to known-broken prebuilt at")
+            print(f"  {broken_path}")
+            print()
+            print(f"This means the live install you're synthesizing from has the same")
+            print(f"non-pristine .bak that produced the archived broken prebuilt. The")
+            print(f"prebuilt would inherit the same dead-code / silent-no-op bug.")
+            print()
+            print(f"Action: see prebuilt/archive/broken/README.md for the diagnosis,")
+            print(f"then either reinstall the extension from scratch (to get a pristine")
+            print(f".bak) or fix the splice on the live install before re-running.")
+            print(f"To override anyway (you'd better have a reason): pass")
+            print(f"--force-republish-broken.")
+            sys.exit(2)
+
     with open(out_path, "w") as f:
         f.write(script)
     os.chmod(out_path, 0o755)
