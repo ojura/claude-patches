@@ -14,6 +14,117 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` — that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`.
 
+## v1.6 — 2026-05-07 — Patch K silent-failure fix + marker enrichment
+
+Fixes a silent-data-loss bug introduced (or unmasked) by v1.5, plus
+substantially enriches marker content with concrete diagnostic data.
+Behavioral compatibility: all v1.5 cases still render identically;
+v1.6 only adds a fallback marker for the bug case + extra text in
+existing markers.
+
+### Bug: K silently rendered ZERO markers when chain begins with phantom-lpu boundary
+
+Symptom (DOM-observed on a real session): chat panel reconstructs
+the chain via Patch J's cross-file prepend, the prepended sibling
+itself begins with a phantom-lpu compaction boundary (i.e., the
+boundary is at index 0 of `_parsed` after J prepend), but K renders
+ZERO markers — no bookend, no seam, no broken. The user sees a
+chain that's missing upstream lineage with no visual signal that
+data is missing.
+
+Root cause: the post-K bookend / broken / bridge planting block was
+gated on `if (_kFired)`, where `_kFired` becomes true only when K2
+*successfully plants* a seam. K2 needs an in-file predecessor in
+`_parsed` to anchor the seam to (so the walker following the
+rewritten lpu has somewhere to go). For a boundary at index 0 of
+`_parsed`, no predecessor exists → K2 `continue`s → `_kFired`
+stays false → all fallback markers (including the broken-marker
+predicate (b) explicitly designed for this case) are skipped.
+
+Fix: introduce a separate `_kAttempted` flag set whenever K2
+*detects* a phantom-lpu boundary it would want to fix (regardless
+of whether the seam plant succeeded). Gate the fallback block on
+`_kAttempted` instead of `_kFired`. The broken-marker predicate (b)
+now fires correctly when reconstruction failed.
+
+Generalized as a playbook design rule:
+[`docs/debugging.md`](docs/debugging.md) "K detected vs K
+succeeded: gate downstream logic on attempt, not effect".
+
+### Marker informativeness: surface concrete data instead of generic prose
+
+K v1.5's marker text was prose-heavy with truncated 8-12 character
+uuid prefixes — sufficient to identify a marker AS a marker but
+not actionable for cross-referencing or bug reports. v1.6 adds
+per-marker concrete data:
+
+- **Bookend (a)** now lists each K1 backfill source per phantom-lpu:
+  `phantom <full-uuid>: backfilled <N> msgs from <sibling-filename>
+  (chosen from <K> candidates)` if ambiguous. Plus the wall-clock
+  breakdown (see below).
+- **Seam** shows: `missing phantom uuid: <full-uuid>` and
+  `reattached to in-file predecessor: <full-uuid>`.
+- **Bridge** shows: `boundary uuid: <full-uuid>`, `J-resolved
+  predecessor uuid: <full-uuid> (lives in sibling: <filename>)`,
+  `K bridge points at in-file predecessor: <full-uuid>`.
+- **Broken** shows: `dead-end phantom uuid: <full-uuid>`, `sibling
+  .jsonls examined in project dir: <N>`, `phantoms successfully
+  backfilled: <N>`, `phantoms K could not backfill: <N>`. Plus the
+  wall-clock breakdown.
+
+UUIDs are surfaced full (no truncation); they're the primary value
+for cross-referencing across files. The truncation/collapse `<style>`
+already in the wrap handles overflow visually.
+
+### K stitching wall-clock instrumentation
+
+`Date.now()` checkpoints at four stages of `Bz4`: parse boundary,
+post-J-prepend boundary, post-K1 boundary, and the implicit pre-zi
+checkpoint. Surfaced in bookend (a) and broken marker text:
+
+```
+K stitching wall-clock: parse 15ms, J cross-file prepend 2785ms,
+K1 sibling backfill 649ms, K2/K3/bookend 3ms
+```
+
+Empirically: J's cross-file prepend dominates (typically 2-3s on
+multi-MB siblings); K1 is hundreds of ms; K2/K3/bookend is single-
+digit ms. The numbers identify J as the bottleneck for any future
+K perf work without needing extra instrumentation.
+
+### Red-on-red broken-marker header readability fix
+
+The shared header style (`color: _bd, borderBottom: "2px dashed
+"+_bd`) renders fine for low-saturation roles (bookend `rgba(220,
+53,69,0.18)`, seam `rgba(255,159,28,0.20)`, bridge `rgba(255,107,
+28,0.20)`) but produces near-invisible header text on the broken
+role's high-saturation `rgba(180,0,0,0.50)` bg. Fix: override
+header `color:` and `borderBottom:` to white for the broken role
+specifically. DOM-verified `getComputedStyle(brokenHeaderDiv).color
+=== "rgb(255, 255, 255)"` post-fix.
+
+Generalized as a playbook gotcha:
+[`docs/debugging.md`](docs/debugging.md) "Red-on-red (and other
+role-specific bg-color clashes)".
+
+### End-to-end verification
+
+All four changes DOM-verified pre-push (per the playbook's absolute
+DOM-verification rule):
+
+- Baseline (no fixture) on a session previously showing 2 markers:
+  still 2 markers (bookend + seam), no broken, no AMBIG —
+  bookend's K1 source line + wall-clock are present, seam's full
+  uuids are visible.
+- Test #5 (rename K1 source jsonl to break reconstruction):
+  `[data-pfgk-role="broken"]` count = 1 (was 0 in v1.5 with same
+  fixture — the silent failure mode), bodyHasINCOMPLETE === true,
+  full phantom uuid visible in marker text, header `getComputedStyle
+  .color === "rgb(255, 255, 255)"` (readable on saturated red bg),
+  `MARKER 1 OF 1 · CYCLE TO TOP ↺` confirms broken is in the
+  click-cycle navigation list (closes the v1.5 click-cycle gap
+  too).
+
 ## v1.5 — 2026-05-07 — Patch K reconstruction-quality signaling
 
 Patch K gains two new signals to surface reconstruction quality at
