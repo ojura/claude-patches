@@ -606,43 +606,57 @@ it — use a generic walker that finds objects by method-name signature:
 ```js
 (function(){
   const found = [];
+  // Cross-origin-safe property test. fiber.memoizedProps can hold Window
+  // references from cross-origin webview iframes; bare `o[k]` against those
+  // throws SecurityError and aborts the walker silently (found ends up empty,
+  // no stack trace, no obvious failure mode). Wrap every property access.
   function looksLikeMgr(o) {
     if (!o || typeof o !== 'object') return false;
-    for (const k of ['getSession','sendRequest','listSessions','renameSession']) {
-      if (typeof o[k] === 'function') return k;
-    }
-    const proto = Object.getPrototypeOf(o);
-    if (proto && proto !== Object.prototype) {
-      for (const m of ['getSession','sendRequest','listSessions','renameSession']) {
-        if (Object.getOwnPropertyNames(proto).includes(m)) return 'proto:'+m;
+    try {
+      for (const k of ['getSession','sendRequest','listSessions','renameSession']) {
+        if (typeof o[k] === 'function') return k;
       }
-    }
+      const proto = Object.getPrototypeOf(o);
+      if (proto && proto !== Object.prototype) {
+        for (const m of ['getSession','sendRequest','listSessions','renameSession']) {
+          if (Object.getOwnPropertyNames(proto).includes(m)) return 'proto:'+m;
+        }
+      }
+    } catch { return false; }
   }
   let visited = 0;
   function walk(fiber, depth, label) {
     if (!fiber || visited > 8000 || depth > 60) return;
     visited++;
-    const mp = fiber.memoizedProps;
-    if (mp && typeof mp === 'object') {
-      for (const [k, v] of Object.entries(mp)) {
-        if (v && typeof v === 'object') {
-          const m = looksLikeMgr(v);
-          if (m) found.push({ where: label+'/props.'+k, depth, match: m });
+    try {
+      const mp = fiber.memoizedProps;
+      if (mp && typeof mp === 'object') {
+        for (const k of Object.keys(mp)) {
+          let v;
+          try { v = mp[k]; } catch { continue; }    // cross-origin guard
+          if (v && typeof v === 'object') {
+            const m = looksLikeMgr(v);
+            if (m) found.push({ where: label+'/props.'+k, depth, match: m });
+          }
         }
       }
-    }
-    let st = fiber.memoizedState; let h = 0;
-    while (st && h < 30) {
-      const ms = st.memoizedState;
-      if (ms && typeof ms === 'object') {
-        const m = looksLikeMgr(ms);
-        if (m) found.push({ where: label+'/hook['+h+']', depth, match: m });
-        if ('current' in ms && ms.current && looksLikeMgr(ms.current)) {
-          found.push({ where: label+'/hook['+h+'].current', depth });
-        }
+      let st = fiber.memoizedState; let h = 0;
+      while (st && h < 30) {
+        try {
+          const ms = st.memoizedState;
+          if (ms && typeof ms === 'object') {
+            const m = looksLikeMgr(ms);
+            if (m) found.push({ where: label+'/hook['+h+']', depth, match: m });
+            try {
+              if ('current' in ms && ms.current && looksLikeMgr(ms.current)) {
+                found.push({ where: label+'/hook['+h+'].current', depth });
+              }
+            } catch {}
+          }
+        } catch {}
+        st = st.next; h++;
       }
-      st = st.next; h++;
-    }
+    } catch {}
     if (fiber.child) walk(fiber.child, depth+1, label+'>c');
     if (fiber.sibling) walk(fiber.sibling, depth, label+'>s');
   }
@@ -659,6 +673,19 @@ Wrap in IIFE — `Runtime.evaluate` rejects top-level `return`. Stash
 references on `globalThis` so subsequent evals can navigate without
 re-walking. Empirically, on a session-list webview, the manager sits at
 `host.child.child.child.memoizedProps.sessions`.
+
+**Cross-origin guard is mandatory.** Several fiber.memoizedProps slots in
+the Antigravity workbench tree hold Window references from cross-origin
+webview iframes (`origin="vscode-webview://<authority>"`). Touching any
+property on those Windows from the wrong-origin context throws
+`SecurityError: Failed to read a named property '...' from 'Window'`.
+Without per-property `try`/`catch`, the walker bails on the first such
+slot and silently returns zero matches — looks identical to "manager
+genuinely not on this fiber tree", which is the wrong conclusion. If
+`found` is empty AND the panel clearly has rendered messages, suspect
+this gotcha first. Re-eval with `try`/`catch` wrappers around every
+`mp[k]`, `st.memoizedState`, and `ms.current` access; the manager
+typically materializes immediately.
 
 ### Manager structure
 
