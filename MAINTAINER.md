@@ -79,10 +79,11 @@ patched live extension dir          maintainer tool             new prebuilt
 
 ## Sanity checks before push
 
-- `prebuilt/<VER>/apply.py` is ~22KB. If it's huge (>50KB) something
-  drifted (probably a non-deterministic field like a timestamp or
-  random UUID got captured into a splice — those should never be in
-  diff regions).
+- `prebuilt/<VER>/apply.py` is ~24KB at v1.5 (was ~22KB at v1.4,
+  ~17KB pre-K). Trends upward as patches accumulate. If it's huge
+  (>50KB) something drifted (probably a non-deterministic field
+  like a timestamp or random UUID got captured into a splice —
+  those should never be in diff regions).
 - The splice count is roughly 14 in `extension.js`, 3–4 in
   `webview/index.js`, 1 in `webview/index.css` (~18–19 total at v1.4).
   Counts can drift slightly across bundles because adjacent diff hunks

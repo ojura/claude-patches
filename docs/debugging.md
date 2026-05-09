@@ -1283,16 +1283,25 @@ panel, that session won't appear in `mgr.sessions.value` (the
 sidebar list). But its JSONL file still exists on disk and the
 chain walker still loads it on demand.
 
-The hide-state lives in vscode's globalState, NOT workspaceState:
+The hide-state lives in vscode's globalState, NOT workspaceState.
+Path varies by IDE — pick whichever you're patching:
+
+| IDE         | globalState path                                              |
+|-------------|---------------------------------------------------------------|
+| VS Code     | `~/.config/Code/User/globalStorage/state.vscdb`               |
+| Antigravity | `~/.config/Antigravity/User/globalStorage/state.vscdb`        |
+| Cursor      | `~/.config/Cursor/User/globalStorage/state.vscdb`             |
+| VSCodium    | `~/.config/VSCodium/User/globalStorage/state.vscdb`           |
 
 ```sh
-# Read hidden session ids from the extension's globalState
+# Auto-find via glob (picks first match — fine for single-IDE setups)
+GS_DB=$(ls ~/.config/*/User/globalStorage/state.vscdb 2>/dev/null | head -1)
 python3 -c "
-import sqlite3, json
-con = sqlite3.connect('/home/juraj/.config/Antigravity/User/globalStorage/state.vscdb')
+import sqlite3, json, sys
+con = sqlite3.connect(sys.argv[1])
 data = json.loads(con.execute(\"SELECT value FROM ItemTable WHERE key='Anthropic.claude-code'\").fetchone()[0])
 print(data.get('hiddenSessionIds', []))
-"
+" "$GS_DB"
 ```
 
 Use `mgr.getConnection(sid)` to query a hidden session's chain
@@ -1431,6 +1440,105 @@ Predictions:
 - Test #5 (source renamed away): `bookend` count = 0, `broken`
   count = 1, `bodyHasINCOMPLETE === true`. Total `msgs` drops by
   ~size of the missing source's pre-content.
+
+### "K detected" vs "K succeeded": gate downstream logic on attempt, not effect
+
+A subtle K design lesson learned the hard way: when downstream
+logic (bookend planting, broken-marker fallback) needs to react to
+the *presence* of a problem, gate on whether K *detected* the
+problem, not whether K *fixed* it.
+
+Concrete instance from v1.5 → v1.6: the post-K "plant bookend or
+broken marker" block was gated on `if(_kFired)`, where `_kFired`
+became true only when K2 successfully planted a seam. But K2 has
+its own preconditions (needs an in-file predecessor in `_parsed`
+to anchor the seam to). For a session whose chain begins with a
+phantom-lpu compaction boundary at index 0 of `_parsed` after J's
+prepend (i.e., the boundary is at the very start), K2 has nothing
+to anchor to and `continue`s — `_kFired` stays false. The bookend/
+broken/bridge block is then skipped entirely and the rendered chain
+shows **zero markers despite having phantom-lpu data loss** — silent
+failure, exactly the bug the broken marker was supposed to prevent.
+
+Fix: introduce a separate `_kAttempted` flag set whenever K detects
+a phantom-lpu boundary it would WANT to fix (regardless of whether
+the seam plant succeeded). Gate downstream "plant a marker"
+fallback on `_kAttempted`. The bookend(b) → broken-marker predicate
+then fires correctly even when K2 couldn't anchor a seam.
+
+Rule of thumb: any K stage that has multiple preconditions for
+side-effect success (plant a ghost) should also set a "detection"
+flag with weaker preconditions (just "saw the problem"). The
+detection flag is what user-facing fallback markers gate on.
+
+### Marker informativeness: surface concrete data, not prose
+
+When designing user-facing diagnostic markers (bookend, seam, bridge,
+broken — or any analogous synthesized message), include the concrete
+data the marker is acting on. Generic prose ("a compaction event
+happened here") is far less useful than the specific identifiers
+involved:
+
+- **Phantom uuid** that was unresolvable (full uuid, not truncated —
+  users may grep for it across files).
+- **Sibling filename** that K1 backfilled from (so user can correlate
+  with their own session list / fork structure).
+- **Predecessor uuid** the seam stitched to (for chain-walking
+  verification).
+- **Counts** (number of qualifying siblings, msgs prepended,
+  phantoms attempted vs backfilled).
+- **Wall-clock timing** of K stages (parse / J prepend / K1 / K2-3-
+  bookend) — surfaces perf hotspots and helps the user judge whether
+  slow chain rendering is K's fault or downstream React's.
+
+Don't truncate uuids in marker text just for display compactness;
+the value of full uuids for cross-referencing exceeds the cost of
+a slightly longer string. The truncation/collapse `<style>` already
+in the wrap handles overflow visually.
+
+K v1.5 marker text was prose-heavy with truncated uuid prefixes;
+v1.6 added per-marker data tracking + full uuids + wall-clock
+timing. The v1.6 markers are usable as standalone diagnostic
+artifacts (paste into a bug report, the data is all there); v1.5
+markers required the user to also dump the chain walker output
+elsewhere.
+
+### Red-on-red (and other role-specific bg color clashes)
+
+Webview render wrap that uses the SAME header text/border color
+(`color:_bd, borderBottom:"2px dashed "+_bd`) across all marker
+roles works fine when bg colors are subtle (rgba alpha 0.18-0.20),
+because the dark border-color stands out enough on the lighter bg.
+
+But when a role bumps bg to higher saturation (broken role: `rgba(180,
+0,0,0.50)`) AND the same role uses a dark border color (`#990000`),
+the header text rendered in `color:_bd = #990000` becomes
+near-invisible on the dark-red bg. Same can happen for any role
+whose bg is high-saturation and bd matches the bg's hue.
+
+Fix: detect the high-saturation role in the header style and
+override `color:` (and `borderBottom:`) to a contrasting value:
+
+```js
+color: _r==="broken" ? "#ffffff" : _bd,
+borderBottom: "2px dashed " + (_r==="broken" ? "#ffffff" : _bd),
+```
+
+Verify empirically via DOM probe:
+
+```js
+JSON.stringify({
+  bg: getComputedStyle(brokenEl).backgroundColor,
+  header_color: getComputedStyle(brokenHeaderDiv).color,
+})
+```
+
+Header color should be sufficiently distant in lab-distance from
+bg color. White vs dark-red is fine; dark-red vs dark-red is not.
+
+When adding any new role with elevated bg saturation, manually
+verify header readability before considering the wrap change
+shipped.
 
 ---
 
