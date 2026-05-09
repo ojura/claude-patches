@@ -1145,6 +1145,82 @@ sticky `9229` (because the original sticky-holder was killed too,
 or the slot is otherwise free). So a window that previously used
 `11277` may now be on `9229`. Re-discover ports after every restart.
 
+### Iframe IDs change on every Reload Window
+
+Each `Developer: Reload Window` rebuilds the renderer's iframe
+targets from scratch. The CDP target IDs you cached from
+`/json/list` (e.g., `WS=ws://127.0.0.1:9222/devtools/page/<old-id>`)
+are dead the moment the window reloads — connecting to them just
+hangs.
+
+After every reload, **re-discover** the chat-panel iframe by walking
+`/json/list` again with whatever filter matches your panel:
+
+```sh
+curl -fsS http://127.0.0.1:9222/json/list | python3 -c "
+import sys, json
+for t in json.load(sys.stdin):
+    if t.get('type')=='iframe' and t.get('parentId')=='<workbench-page-id>' and '1c9b69d1' in t.get('url',''):
+        print(t['id']); break
+"
+```
+
+The same applies to inner active-frame discovery — its frameId
+inside the parent iframe also changes. The discovery walker
+inside `eval_in_inner_frame.mjs` re-fetches each call so it's
+naturally robust; bash scripts that cache the outer iframe ID
+between reloads are not.
+
+Wait ~14–16 seconds after triggering Reload Window before
+re-fetching `/json/list`. The renderer takes a moment to bring
+the new iframes up; an immediate fetch may catch a transient state
+with no chat panel iframe yet.
+
+### `Debugger.getScriptSource` shows the in-memory script, NOT disk
+
+`fs.readFileSync('.../extension.js')` from an exthost CDP eval
+returns the file's CURRENT on-disk content. That's useful for
+checking what's *available*, but it does NOT tell you what code is
+actually *running* in the exthost — Node modules are loaded once
+at process start (or `require()`-time) and cached.
+
+To check what code is *actually loaded* (the in-memory module
+source), use the Debugger domain:
+
+```sh
+node - <<'JS'
+const ws = new WebSocket('ws://127.0.0.1:<exthost-port>/<id>');
+let nextId = 1; const pending = new Map(); const scripts = new Map();
+ws.addEventListener('message', ev => {
+  const msg = JSON.parse(ev.data);
+  if (msg.id && pending.has(msg.id)) { const {resolve} = pending.get(msg.id); pending.delete(msg.id); resolve(msg.result); }
+  else if (msg.method === 'Debugger.scriptParsed' && msg.params.url?.includes('extension.js')) scripts.set(msg.params.scriptId, msg.params.url);
+});
+function call(method, params={}) { const id = nextId++; return new Promise(r => { pending.set(id, {resolve: r}); ws.send(JSON.stringify({id, method, params})); }); }
+await new Promise(r => ws.addEventListener('open', r));
+await call('Debugger.enable');
+await new Promise(r => setTimeout(r, 4000));    // drain scriptParsed events
+const ext = [...scripts.entries()].find(([id, url]) => url.endsWith('extension.js'));
+const src = (await call('Debugger.getScriptSource', {scriptId: ext[0]})).scriptSource;
+console.log({length: src.length, has_my_marker: src.includes('<unique substring of recent edit>')});
+ws.close();
+JS
+```
+
+Use this when you need to confirm "did my disk-edit actually get
+loaded by THIS exthost?" — particularly relevant when (a) you have
+multiple per-window exthosts and aren't sure which one serves the
+panel you're looking at, or (b) you ran disk-edit + Reload Window
+and want to verify the fresh exthost actually picked up the new
+code (vs. some unexpected caching).
+
+Concrete failure mode this catches: I once spent ~15 minutes
+believing v1.5 K was running because `readFileSync` showed the new
+signature on disk and v1.5 markers in the source — but the exthost
+serving the chat panel I was probing had v1.4 in memory (cached
+from before my disk edit). `Debugger.getScriptSource` immediately
+disambiguates.
+
 ### `location.reload()` on a webview iframe leaves it in `chrome-error://chromewebdata/`
 
 Using `Runtime.evaluate` to call `location.reload()` inside a
