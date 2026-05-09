@@ -723,30 +723,78 @@ backfill should produce identical recovered origins across the tree.
 
 ### Background: walker constraints + recovery topology
 
-The renderer's chain walker (`Ez4` in 2.1.126) is **single-chain**:
-it builds a uuid→msg map, finds all roots (uuids that aren't anyone's
-parent), walks up from each to the first user/assistant tip, then
-picks `Z = the tip with the largest index in V` and walks UP from Z
-one more time to assemble the rendered chain. Anything not in that
-single backward walk from Z is dropped.
+The renderer's chain walker (`rO4` in 2.1.132, formerly `Ez4` in
+2.1.126) is **single-leaf, max-by-_parsed-index, traversing
+parentUuid (with logicalParentUuid fallback per Patch D) backward**:
 
-This constraint forces K's recovery to be topology-driven. The four
-synthesis steps (backfill / seam / bridge / bookend) work together
-to ensure the walker, starting from the live leaf, traverses the
-entire conversation tree:
+1. Build `K`: uuid → msg map from `V` (= `_parsed` after J's prepend
+   + K's modifications).
+2. Compute `B`: uuid → original index in `V` (positions in the
+   pre-walker array).
+3. Find all **leaves**: uuids that *aren't* used as anyone's
+   `parentUuid`. These are messages with no children in `V` —
+   typically the most recent user message, the most recent assistant
+   reply, plus any sibling tip in K's prepended content.
+4. For each leaf, walk up via `parentUuid` (with `logicalParentUuid`
+   fallback) to the first `user`/`assistant` ancestor. These become
+   candidates `U`. Filter out sidechain / teamName / isMeta tips →
+   `q`.
+5. **Pick the single leaf with the highest index in `B`** — i.e. the
+   one written latest into `_parsed`. Call it `Z`.
+6. Walk back from `Z` only via `parentUuid`/`lpu` fallback,
+   collecting `H`. Reverse `H`. Return.
 
-- Backfill prepends a forked sibling's pre-compaction content into
-  `_parsed` so the walker has somewhere to walk back to (when the
-  in-file chain root is a system boundary).
-- Seam ghosts give the walker a uuid to follow when boundaries have
-  phantom lpus.
-- Bridge ghosts redirect the walker from Patch J's cross-file
-  shortcut back into the in-file orphan chain.
-- Bookend at the chain root marks where the recovered chain begins.
+Three properties of this design that constrain K's recovery work:
 
-A simpler Ez4-side fix would collect content from ALL tips (multi-
-chain rendering) instead of just max-by-index Z, eliminating the need
-for bridges. That's a much bigger change and not currently attempted.
+- **Only ONE leaf's chain renders.** Other leaves' walks are computed
+  in step 4 but discarded in step 5. Adding content to `_parsed`
+  introduces new leaves, but their leaves get pruned out unless
+  they're connected (via parentUuid/lpu) into the chain rooted at
+  the chosen `Z`.
+- **The "root" of the rendered chain is wherever the walk
+  terminates** — not selected, just emerges. Could be a
+  `parent==null` user msg (clean canonical root), or could dead-end
+  at a system compact_boundary with unresolvable lpu (the case
+  predicate (b) catches as "broken").
+- **The leaf selection is index-based, not topology-based.** "Max
+  index in `_parsed`" = "latest written" ≈ "most recent message in
+  the live conversation". K can't change which leaf wins by
+  prepending content; prepended content's leaves have low indices
+  and lose to the live leaf.
+
+This design forces K's recovery to be topology-driven: K can't
+short-circuit to "render multiple chains"; it has to ensure the
+walker starting from the live leaf reaches every persisted message
+in this branch via parentUuid/lpu links. The four synthesis steps
+(backfill / seam / bridge / bookend) work together to satisfy that
+single-leaf-walk constraint:
+
+- **Backfill** (K1) prepends a forked sibling's pre-compaction
+  content into `_parsed` so the walker has somewhere to walk back
+  to (when the in-file chain root is a system boundary).
+- **Seam ghosts** (K2) give the walker a `uuid` to follow when
+  boundaries have phantom lpus — by rewriting `boundary.lpu =
+  seam.uuid` and parenting the seam to the in-file predecessor.
+- **Bridge ghosts** (K3) redirect the walker from Patch J's
+  cross-file shortcut back into the in-file orphan chain — by
+  reparenting the boundary's first child onto the bridge ghost.
+- **Bookend / broken** at the chain root marks where the recovered
+  chain begins (or, in `pfgk-broken-` case, where it failed to).
+
+**Common pitfall when designing K extensions**: "I added content to
+`_parsed`" ≠ "the user sees it rendered". You have to ensure
+parentUuid/lpu connectivity from the live leaf BACK through your
+prepended content to a true root. If you just prepend without
+linking, the walker picks the live leaf, walks back through
+existing links only, and your new content sits in `_parsed` as a
+disconnected sub-graph — pruned by step 5's max-by-index leaf
+selection.
+
+A simpler `rO4`-side fix would collect content from ALL tips (multi-
+leaf rendering — concatenate the walks from every leaf) instead of
+just max-by-index `Z`, eliminating the need for bridges and
+relaxing the connectivity-from-live-leaf constraint. That's a much
+bigger change and not currently attempted.
 
 ### How the cross-conversation backfill works
 
