@@ -104,27 +104,53 @@ def find_default_extension():
 # Each rule: (label, regex_for_old, replacement_template)
 # replacement_template uses \g<name> for backrefs to capture groups in regex_for_old.
 # Each regex must produce exactly one match in the unpatched file.
+#
+# Parameter-name agnosticism: minifier-assigned param names drift between
+# releases (e.g. (V,K,B) in 2.1.120-126 → (z,K,V) in 2.1.139). Each rule
+# captures the params it references and substitutes them into the
+# replacement via \g<name> backrefs, so the same regex matches any
+# minifier output that keeps the structural shape.
+
+# Reusable identifier-character class (JS-legal local-var prefix)
+_ID = r'[A-Za-z_$][A-Za-z_$0-9]*'
+
 RULES = [
     (
         "F.1+F.3 (updateSessionState preserves fields + writes panel.title)",
         re.compile(
-            r'updateSessionState\(V,K,B\)\{this\.sessionStates\.set\(V,\{sessionId:V,state:K,title:B\}\),this\.broadcastSessionStates\(\)\}'
+            r'updateSessionState\((?P<sid>' + _ID + r'),(?P<st>' + _ID + r'),(?P<ti>' + _ID + r')\)\{'
+            r'this\.sessionStates\.set\((?P=sid),\{sessionId:(?P=sid),state:(?P=st),title:(?P=ti)\}\),'
+            r'this\.broadcastSessionStates\(\)\}'
         ),
-        'updateSessionState(V,K,B){' + PATCHSET_SIG + 'let _p=this.sessionStates.get(V);this.sessionStates.set(V,{sessionId:V,state:K!=null?K:_p?.state??"idle",title:B!=null?B:_p?.title}),this.broadcastSessionStates();if(B!=null){let _pnl=this.sessionPanels.get(V);if(_pnl)_pnl.title=B}}',
+        r'updateSessionState(\g<sid>,\g<st>,\g<ti>){' + PATCHSET_SIG
+        + r'let _p=this.sessionStates.get(\g<sid>);'
+        r'this.sessionStates.set(\g<sid>,{sessionId:\g<sid>,'
+        r'state:\g<st>!=null?\g<st>:_p?.state??"idle",'
+        r'title:\g<ti>!=null?\g<ti>:_p?.title}),'
+        r'this.broadcastSessionStates();'
+        r'if(\g<ti>!=null){let _pnl=this.sessionPanels.get(\g<sid>);if(_pnl)_pnl.title=\g<ti>}}',
     ),
     (
         "F.2 (drop title at update_session_state boundary)",
         re.compile(
-            r'if\(V\.request\.type==="update_session_state"\)return this\.onSessionStateChanged\?\.\(V\.request\.sessionId,V\.request\.state,V\.request\.title\),\{type:"update_session_state_response"\}'
+            r'if\((?P<d>' + _ID + r')\.request\.type==="update_session_state"\)'
+            r'return this\.onSessionStateChanged\?\.\((?P=d)\.request\.sessionId,(?P=d)\.request\.state,(?P=d)\.request\.title\),'
+            r'\{type:"update_session_state_response"\}'
         ),
-        'if(V.request.type==="update_session_state")return this.onSessionStateChanged?.(V.request.sessionId,V.request.state,void 0),{type:"update_session_state_response"}',
+        r'if(\g<d>.request.type==="update_session_state")'
+        r'return this.onSessionStateChanged?.(\g<d>.request.sessionId,\g<d>.request.state,void 0),'
+        r'{type:"update_session_state_response"}',
     ),
     (
         "F-s2 (q8.renameSession invokes onSessionStateChanged)",
         re.compile(
-            r'async renameSession\(V,K,B\)\{return\{type:"rename_session_response",skipped:await\(await (?P<storage>[A-Za-z_$][A-Za-z_$0-9]*)\.load\(this\.cwd,this\.logger\)\)\.renameSession\(V,K,B\)\}\}'
+            r'async renameSession\((?P<sid>' + _ID + r'),(?P<title>' + _ID + r'),(?P<isAi>' + _ID + r')\)\{'
+            r'return\{type:"rename_session_response",skipped:await\(await (?P<storage>' + _ID + r')\.load\(this\.cwd,this\.logger\)\)\.renameSession\((?P=sid),(?P=title),(?P=isAi)\)\}\}'
         ),
-        r'async renameSession(V,K,B){let _r=await(await \g<storage>.load(this.cwd,this.logger)).renameSession(V,K,B);if(!_r)this.onSessionStateChanged?.(V,void 0,K);return{type:"rename_session_response",skipped:_r}}',
+        r'async renameSession(\g<sid>,\g<title>,\g<isAi>){'
+        r'let _r=await(await \g<storage>.load(this.cwd,this.logger)).renameSession(\g<sid>,\g<title>,\g<isAi>);'
+        r'if(!_r)this.onSessionStateChanged?.(\g<sid>,void 0,\g<title>);'
+        r'return{type:"rename_session_response",skipped:_r}}',
     ),
     (
         "F-s3 (sidebar q8 ctor wires onSessionStateChanged)",
@@ -133,10 +159,20 @@ RULES = [
     ),
     (
         "G.1 (panel ctor callback supports skip-bookkeeping flag)",
+        # Captures: a1/a2/a3 = callback args, kvar/lvar = Map destructure,
+        #          pvar = outer panel reference (this varies — V in 2.1.120,
+        #          z in 2.1.139).
         re.compile(
-            r'\(H,D,(?P<p3>[A-Za-z_$][A-Za-z_$0-9]*)\)=>\{this\.updateSessionState\(H,D,(?P=p3)\);for\(let\[(?P<kvar>[A-Za-z_$][A-Za-z_$0-9]*),(?P<lvar>[A-Za-z_$][A-Za-z_$0-9]*)\]of this\.sessionPanels\)if\((?P=lvar)===V&&(?P=kvar)!==H\)this\.sessionPanels\.delete\((?P=kvar)\);if\(this\.sessionPanels\.set\(H,V\),V\.active\)this\.activeSessionId=H\}'
+            r'\((?P<a1>' + _ID + r'),(?P<a2>' + _ID + r'),(?P<a3>' + _ID + r')\)=>\{'
+            r'this\.updateSessionState\((?P=a1),(?P=a2),(?P=a3)\);'
+            r'for\(let\[(?P<kvar>' + _ID + r'),(?P<lvar>' + _ID + r')\]of this\.sessionPanels\)'
+            r'if\((?P=lvar)===(?P<pvar>' + _ID + r')&&(?P=kvar)!==(?P=a1)\)this\.sessionPanels\.delete\((?P=kvar)\);'
+            r'if\(this\.sessionPanels\.set\((?P=a1),(?P=pvar)\),(?P=pvar)\.active\)this\.activeSessionId=(?P=a1)\}'
         ),
-        r'(H,D,\g<p3>,_sk)=>{this.updateSessionState(H,D,\g<p3>);if(!_sk){for(let[\g<kvar>,\g<lvar>]of this.sessionPanels)if(\g<lvar>===V&&\g<kvar>!==H)this.sessionPanels.delete(\g<kvar>);if(this.sessionPanels.set(H,V),V.active)this.activeSessionId=H}}',
+        r'(\g<a1>,\g<a2>,\g<a3>,_sk)=>{this.updateSessionState(\g<a1>,\g<a2>,\g<a3>);'
+        r'if(!_sk){for(let[\g<kvar>,\g<lvar>]of this.sessionPanels)'
+        r'if(\g<lvar>===\g<pvar>&&\g<kvar>!==\g<a1>)this.sessionPanels.delete(\g<kvar>);'
+        r'if(this.sessionPanels.set(\g<a1>,\g<pvar>),\g<pvar>.active)this.activeSessionId=\g<a1>}}',
     ),
     # G.2 is built dynamically below — its replacement references three
     # bundle-globals (fs, path, projectRoot resolver) whose names drift
@@ -148,15 +184,17 @@ RULES = [
 def discover_globals(s):
     """Locate fs / path / projectRoot-resolver names from the storage class's
     renameSession, which has a fixed structural shape:
-      async renameSession(V,K,B){let x=<RES>(this.projectRoot),G=<PATH>.join(x,`${V}.jsonl`);...
-        ...await <FS>.promises.appendFile(G,...)...}
+      async renameSession(<sid>,<title>,<isAi>){let <a>=<RES>(this.projectRoot),<b>=<PATH>.join(<a>,`${<sid>}.jsonl`);...
+        ...await <FS>.promises.appendFile(<b>,...)...}
+    Param names AND local names drift across releases — both are captured.
     Returns (fs, path, res) or raises if any can't be located uniquely.
     """
     rx = re.compile(
-        r'async renameSession\(V,K,B\)\{let x=(?P<res>[A-Za-z_$][A-Za-z_$0-9]*)\(this\.projectRoot\),'
-        r'G=(?P<path>[A-Za-z_$][A-Za-z_$0-9]*)\.join\(x,`\$\{V\}\.jsonl`\)'
+        r'async renameSession\((?P<sid>' + _ID + r'),' + _ID + r',' + _ID + r'\)\{'
+        r'let (?P<a>' + _ID + r')=(?P<res>' + _ID + r')\(this\.projectRoot\),'
+        r'(?P<b>' + _ID + r')=(?P<path>' + _ID + r')\.join\((?P=a),`\$\{(?P=sid)\}\.jsonl`\)'
         r'.{0,1500}?'
-        r'(?P<fs>[A-Za-z_$][A-Za-z_$0-9]*)\.promises\.appendFile\(G,'
+        r'(?P<fs>' + _ID + r')\.promises\.appendFile\((?P=b),'
     )
     m = rx.search(s)
     if not m:
@@ -244,11 +282,13 @@ def main():
 
     # Build G.2 rule dynamically with the discovered globals
     g2_old = re.compile(
-        r'case"fork_conversation":return\{type:"fork_conversation_response",sessionId:await\(await (?P<storage>[A-Za-z_$][A-Za-z_$0-9]*)\.load\(this\.cwd,this\.logger\)\)\.forkSession\(V\.request\.forkedFromSession,V\.request\.resumeSessionAt\)\};'
+        r'case"fork_conversation":return\{type:"fork_conversation_response",'
+        r'sessionId:await\(await (?P<storage>' + _ID + r')\.load\(this\.cwd,this\.logger\)\)\.forkSession\('
+        r'(?P<d>' + _ID + r')\.request\.forkedFromSession,(?P=d)\.request\.resumeSessionAt\)\};'
     )
     g2_new = (
         'case"fork_conversation":{let _m=await \\g<storage>.load(this.cwd,this.logger),'
-        '_src=V.request.forkedFromSession,_sid=await _m.forkSession(_src,V.request.resumeSessionAt);'
+        '_src=\\g<d>.request.forkedFromSession,_sid=await _m.forkSession(_src,\\g<d>.request.resumeSessionAt);'
         f'let _t="";try{{let _lines=(await {fs_g}.promises.readFile({path_g}.join({res_g}(_m.projectRoot),'
         '`${_src}.jsonl`),"utf8")).split(`\\\\n`),_c="",_a="";'
         'for(let _line of _lines){if(!_line)continue;try{let _M=JSON.parse(_line);'
