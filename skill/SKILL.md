@@ -5,9 +5,9 @@ description: Reapply Juraj's ten local patches to a newly updated anthropic.clau
 
 # Reapply anthropic.claude-code extension patches
 
-**Patchset version**: `1.6`
+**Patchset version**: `1.7`
 
-Eleven patches live out-of-tree and need to be reapplied every time the bundled
+Twelve patches live out-of-tree and need to be reapplied every time the bundled
 `anthropic.claude-code-*-linux-x64` extension updates. The minified code
 changes variable names between releases, so do NOT blindly search-and-replace
 literal strings from prior versions — locate the pattern structurally, then
@@ -177,7 +177,12 @@ fi
        reference for J in isolation. Step 13 also covers the
        webview/index.js render wrap that makes K's seam/bookend/bridge
        ghosts visually distinct.
-    5. If the F+G script reports anchors not matching uniquely, the
+    5. **Patch L**: follow Step 14 (one-line spawn-args splice that
+       forces `--thinking-display summarized` on every IDE-spawned
+       claude subprocess). Required for Opus 4.7+ to render thinking
+       summaries in the chat panel; without it the on-disk thinking
+       blocks come back empty.
+    6. If the F+G script reports anchors not matching uniquely, the
        bundle structure has shifted enough to break its regexes.
        End-user fallback: apply F+G manually from Step 8 and Step 9,
        then **stop** — do not attempt the maintainer steps below.
@@ -1277,13 +1282,163 @@ at each phantom-lpu boundary, and bridges at each cross-file-resolved
 boundary — all as colored bubbles with a ⚠️ banner. Clicking any
 ghost cycles to the next.
 
-## Step 14 — summary to the user
+## Step 14 — Patch L: IDE-spawned CLI always passes `--thinking-display summarized`
+
+### Why
+
+For `claude-opus-4-7[1m]` (and presumably any 4.7+ model), Anthropic
+changed the API default for the `thinking.display` field from
+`"summarized"` to `"omitted"`. Documented in their own migration
+guide: [Migrating to Claude Opus 4.7](https://platform.claude.com/docs/en/about-claude/models/migration-guide#migrating-to-claude-opus-4-7).
+With `display: "omitted"`, the API returns thinking content blocks
+with an empty `thinking` field and a multi-KB `signature` only. The
+webview renders these as the static `<div class="thinkingStatic">Thinking</div>`
+stub because its `thinking.length > 0` branch can't fire.
+
+Background tracker: [#49902](https://github.com/anthropics/claude-code/issues/49902),
+[#49322](https://github.com/anthropics/claude-code/issues/49322),
+[#49268](https://github.com/anthropics/claude-code/issues/49268),
+[#8477](https://github.com/anthropics/claude-code/issues/8477) (and
+seven more variants in the same thread). Anthropic has not shipped a
+first-party fix as of v2.1.142.
+
+The bundled CLI HAS a gate that sets `display = "summarized"` when
+the user's `settings.json` has `showThinkingSummaries: true`, but the
+gate is `!getIsNonInteractiveSession() && showThinkingSummaries === true`.
+The IDE spawns the CLI subprocess with `--print --input-format
+stream-json --output-format stream-json`, which makes
+`getIsNonInteractiveSession() === true`, so the auto-default never
+fires for IDE chat panels. The user's setting is silently ignored
+in the place it matters most.
+
+The CLI also accepts an explicit `--thinking-display <mode>` flag
+that bypasses the non-interactive gate (first branch in the gate
+takes precedence). The IDE's SDK-side spawn code already KNOWS how
+to pass this flag, but only when `thinkingConfig.display` is set on
+the spawn-time options. The chat-panel caller never sets it, so the
+flag is never pushed to argv, and the API returns redacted thinking.
+
+This patch closes the gap by defaulting the flag to `"summarized"`
+when no explicit display is configured. End-to-end DOM-verified
+pre-publish: post-patch chat-panel turns produce thinking blocks
+with non-empty text on disk, restoring the expandable `<details>`
+render path.
+
+### WebSearch safety
+
+[#56984](https://github.com/anthropics/claude-code/issues/56984)
+reports that the `CLAUDE_CODE_EXTRA_BODY` workaround for this same
+bug breaks WebSearch (`400 Thinking may not be enabled when
+tool_choice forces tool use`) and WebFetch (`400 adaptive thinking is
+not supported on this model`). Those failures are about
+`thinking.type` being forced into requests where the CLI's per-call
+logic would have left it out or set it disabled. Patch L only sets
+`display`, not `type`. The CLI's per-request gate is
+`q.type !== "disabled"`, so when WebSearch / WebFetch / auto-mode
+classifier paths build their own request config (often with
+`q.type = "disabled"` or with a thinking-incompatible model), the
+entire `thinking` field is dropped from the request regardless of
+`q.display`.
+
+Verified empirically pre-publish: ran `claude --print
+--thinking-display summarized --allowed-tools WebSearch "..."` with
+a forced WebSearch query and got 5+ requests, all 200 OK, no 400.
+
+### Locate and patch
+
+In `extension.js`, find the SDK-side spawn-args builder. The
+specific anchor is the one-line gate that pushes the
+`--thinking-display` flag conditionally on `U.display`:
+
+```
+if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
+```
+
+Locate via grep:
+
+```sh
+grep -c 'if(U.type!=="disabled"&&U.display)i.push("--thinking-display"' "$EXT/extension.js"
+```
+
+Expect exactly 1 match.
+
+### Splice
+
+Old:
+```
+if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
+```
+
+New:
+```
+if(U.type!=="disabled")i.push("--thinking-display",U.display||"summarized")
+```
+
+Two minimal changes:
+
+1. Drop the `&&U.display` guard. The flag should always be pushed
+   when thinking isn't disabled; the value is what varies.
+2. Add `||"summarized"` as the fallback value when no explicit
+   display is configured.
+
+Effect: every IDE-spawned CLI subprocess gets
+`--thinking-display summarized` in argv. The CLI's commander parser
+sets `z.thinkingDisplay = "summarized"`, the K3 build site's first
+branch fires (bypassing the non-interactive gate), the API request
+body's `thinking.display` becomes `"summarized"`, and the API
+returns thinking content blocks with text instead of the empty +
+signature stub.
+
+### Verify
+
+```
+grep -c 'if(U.type!=="disabled")i.push("--thinking-display",U.display||"summarized")' $EXT/extension.js
+```
+
+Expect `1`. Old form (with `&&U.display`) should be gone.
+
+### Test
+
+After reload: open a chat panel, ask any reasoning-heavy query
+that triggers thinking, then inspect the session JSONL:
+
+```sh
+python3 -c '
+import json
+path = "<path-to-session.jsonl>"
+for line in open(path):
+    line = line.strip()
+    if not line: continue
+    try: m = json.loads(line)
+    except: continue
+    if m.get("type") != "assistant": continue
+    content = (m.get("message") or {}).get("content")
+    if not isinstance(content, list): continue
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "thinking":
+            tl = len(b.get("thinking",""))
+            print(f"ts={m.get(\"timestamp\")} text_len={tl}")
+'
+```
+
+Post-patch turns should have `text_len > 0`. Pre-patch turns stay
+at `text_len = 0` (the on-disk data can't be retroactively
+recovered).
+
+For WebSearch regression check (the residual #56984 concern): run a
+real web-search query through the chat panel. The CLI should NOT
+hit `400 Thinking may not be enabled when tool_choice forces tool
+use`. If it does, revert the patch and use the `claudeProcessWrapper`
+shim approach from #49322 comments instead, which can scope the
+flag to top-level invocations only.
+
+## Step 15 — summary to the user
 
 Report which version was patched and which files were touched, using
 markdown relative links. Remind the user to reload the VSCode window for the
 patches to take effect.
 
-Also summarize any drift observations from any earlier step (0 through 13):
+Also summarize any drift observations from any earlier step (0 through 14):
 anchors that didn't match as written, structural shifts beyond pure
 variable renaming, prebuilt-fetch / install-locate / backup quirks,
 variable renames the F+G script auto-absorbed that future readers

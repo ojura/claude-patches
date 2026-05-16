@@ -14,6 +14,84 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` — that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`.
 
+## v1.7 — 2026-05-17 — Patch L: force `--thinking-display summarized` on IDE-spawned CLI
+
+Restores thinking summaries in the VS Code / Antigravity chat panel
+for `claude-opus-4-7[1m]` (and presumably any 4.7+ model). Closes
+the same gap that #49902 / #49322 / #49268 / #8477 / #56984 and
+several more upstream tickets describe.
+
+### Root cause
+
+For Opus 4.7, Anthropic flipped the API default for
+`thinking.display` from `"summarized"` to `"omitted"` (documented in
+their migration guide). With `display: "omitted"`, the API returns
+thinking content blocks with an empty `thinking` field and a
+multi-KB `signature` only. The webview renders these as the static
+`<div class="thinkingStatic">Thinking</div>` stub because its
+`thinking.length > 0` branch can't fire.
+
+The bundled CLI HAS a gate that sets `display = "summarized"` when
+`settings.json` has `showThinkingSummaries: true`, but the gate is
+`!getIsNonInteractiveSession() && showThinkingSummaries === true`.
+The IDE spawns the CLI subprocess with `--print --input-format
+stream-json --output-format stream-json`, which makes the session
+non-interactive, so the gate never fires for IDE chat panels. The
+user's setting is silently ignored where it matters most.
+
+The CLI also accepts an explicit `--thinking-display <mode>` flag
+that bypasses the non-interactive gate. The IDE's SDK-side spawn
+code already knows how to pass it, but only when
+`thinkingConfig.display` is set on the spawn-time options. The
+chat-panel caller never sets it, so the flag is never pushed to
+argv.
+
+### Patch L (one-line splice in `extension.js`)
+
+```
+- if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
++ if(U.type!=="disabled")i.push("--thinking-display",U.display||"summarized")
+```
+
+Drops the `&&U.display` guard (which was suppressing the flag) and
+adds `||"summarized"` as the fallback value. Every IDE-spawned CLI
+subprocess now receives `--thinking-display summarized` in argv, the
+CLI's first display-gate branch fires regardless of interactive
+state, the API request body includes `thinking.display:
+"summarized"`, and the API returns thinking with content.
+
+End-to-end DOM-verified pre-publish: post-patch chat-panel turns
+produce thinking blocks with `text_len > 0` on disk (sampled at
+209, 511, 612, 2117, 115 chars in the verification session). The
+expandable `<details>` render path is back. Old (pre-patch) blocks
+on disk stay empty because their data was never persisted.
+
+### WebSearch / WebFetch safety
+
+#56984 reports that the `CLAUDE_CODE_EXTRA_BODY` workaround for
+this same bug breaks WebSearch (`400 Thinking may not be enabled
+when tool_choice forces tool use`) and WebFetch (`400 adaptive
+thinking is not supported on this model`). Those failures are about
+`thinking.type` being forced into requests where the CLI's per-call
+logic would have left it disabled. Patch L is structurally distinct:
+it sets `display` only, not `type`. The CLI's per-request gate is
+`q.type !== "disabled"`, so when WebSearch / WebFetch / auto-mode
+classifier paths build their own per-request thinking config with
+`type` disabled (or with a thinking-incompatible model), the entire
+`thinking` field is dropped regardless of `q.display`.
+
+Verified empirically pre-publish: `claude --print --thinking-display
+summarized --allowed-tools WebSearch "search ..."` produced 5+ API
+requests, all 200 OK, no 400 errors. The forced-tool-use path is
+unaffected.
+
+### Splice count and signature
+
+20 total splices now (was 19): 15 in `extension.js` (was 14, +1 for
+L), 4 in `webview/index.js`, 1 in `webview/index.css`. Signature
+bumped from `/*pfg-v1.6*/` to `/*pfg-v1.7*/`. End-users on v1.6 will
+get auto-restore + reapply on the next `apply.py` run.
+
 ## v1.6 — 2026-05-07 — Patch K silent-failure fix + marker enrichment
 
 Fixes a silent-data-loss bug introduced (or unmasked) by v1.5, plus
