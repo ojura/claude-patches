@@ -21,6 +21,13 @@ for `claude-opus-4-7[1m]` (and presumably any 4.7+ model). Closes
 the same gap that #49902 / #49322 / #49268 / #8477 / #56984 and
 several more upstream tickets describe.
 
+Upstream-fix proposal filed at [anthropics/claude-code#59844](https://github.com/anthropics/claude-code/issues/59844)
+with two options: a one-line CLI fix (drop the
+`!getIsNonInteractiveSession()` gate from the CLI's
+`K3.display = "summarized"` assignment) or this same one-line
+extension fix as the fallback. When/if upstream lands either, Patch
+L can be retired.
+
 ### Root cause
 
 For Opus 4.7, Anthropic flipped the API default for

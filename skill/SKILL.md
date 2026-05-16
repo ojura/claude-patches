@@ -1302,6 +1302,13 @@ Background tracker: [#49902](https://github.com/anthropics/claude-code/issues/49
 seven more variants in the same thread). Anthropic has not shipped a
 first-party fix as of v2.1.142.
 
+Upstream-fix proposal: [#59844](https://github.com/anthropics/claude-code/issues/59844)
+documents two one-line options: dropping the
+`!getIsNonInteractiveSession()` gate from the CLI's
+`K3.display = "summarized"` assignment (preferred) or this same
+extension splice as the fallback. If/when upstream lands either,
+Patch L becomes retire-able.
+
 The bundled CLI HAS a gate that sets `display = "summarized"` when
 the user's `settings.json` has `showThinkingSummaries: true`, but the
 gate is `!getIsNonInteractiveSession() && showThinkingSummaries === true`.
