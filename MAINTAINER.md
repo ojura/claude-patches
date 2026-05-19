@@ -121,21 +121,32 @@ that working state while migrating the on-disk signature.
    script's regex anchors drifted relative to the bundle and need
    investigation before you ship a prebuilt.
 
-3. **Synthesize the new prebuilt(s).** For every supported extension
-   version: `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>`.
-   This captures the new signature into `prebuilt/<VER>/apply.py` and
-   byte-validates against the live patched files.
+3. **Archive stale prebuilts.** Move every `prebuilt/<VER>/apply.py`
+   whose embedded `SIGNATURE` is from the *old* patchset version into
+   `prebuilt/archive/vOLD/<VER>/apply.py`. This is critical: a stale
+   prebuilt left in `prebuilt/<VER>/` will be fetched by the skill,
+   detect its own old signature as "Already patched", and exit with a
+   false-positive `PATCHES_APPLIED` — the user never gets the new
+   patches. Archive layout: `prebuilt/archive/v1.6/2.1.139/apply.py`.
 
-4. **Add a CHANGELOG entry.** `CHANGELOG.md` is a per-version
+4. **Synthesize the new prebuilt(s).** For every extension version you
+   have installed: `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>`.
+   This captures the new signature into `prebuilt/<VER>/apply.py` and
+   byte-validates against the live patched files. If you can't
+   synthesize for a version you don't have installed, just archive it
+   (Step 3) — the skill will fall through to manual application for
+   those users until someone publishes a prebuilt.
+
+5. **Add a CHANGELOG entry.** `CHANGELOG.md` is a per-version
    historical log. Newest first; describe what changed and why.
    Critically, `CHANGELOG.md` is *deliberately excluded* from the
    sync allowlist (Step 6) — its `pfg-vN` mentions must stay frozen
    to the version they describe.
 
-5. **Stage everything**: `git add -A`. Doing this *before* sync makes
+6. **Stage everything**: `git add -A`. Doing this *before* sync makes
    the sync's effect visible as the only unstaged delta in Step 7.
 
-6. **Sync README.md**:
+7. **Sync README.md**:
    `python3 util/sync-version-mentions.py`. Rewrites `pfg-vX[.Y]`
    mentions in `README.md` (the only file in `SYNC_TARGETS`).
    Everything else either resolves the version dynamically
@@ -145,7 +156,7 @@ that working state while migrating the on-disk signature.
    the one file where a literal version genuinely belongs in the
    text (the public-facing README).
 
-7. **Review the unstaged diff**: `git diff`. The only changes here
+8. **Review the unstaged diff**: `git diff`. The only changes here
    should be the sync rewrites. If anything outside the allowlist
    was touched, the script is operating on a stale list (a doc file
    gained a current-state claim that needs to be added to
@@ -154,7 +165,7 @@ that working state while migrating the on-disk signature.
    that ended up there), promote that line out of the allowlisted
    file or rewrite it to not match the regex.
 
-8. **Stage and commit**: `git add -A && git commit ...`.
+9. **Stage and commit**: `git add -A && git commit ...`.
 
 End-users running the new prebuilt against an older-version-patched
 extension will get: *"Stale patchset (file has vX, current is vY);
