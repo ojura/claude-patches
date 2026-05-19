@@ -150,6 +150,21 @@ elif curl -fsSL -o /tmp/apply.py "https://raw.githubusercontent.com/ojura/claude
   echo "Remote prebuilt for $VER downloaded to $PREBUILT"
 fi
 if [ -n "$PREBUILT" ]; then
+  # Stale-prebuilt guard: if local clone exists, compare the prebuilt's
+  # embedded signature to version.py. A stale prebuilt (e.g. pfg-v1.6
+  # when current is pfg-v1.7) would detect its own old signature as
+  # "Already patched" and exit — a false positive that silently skips
+  # the newer patches. Treat stale as "no prebuilt".
+  if [ -n "$REPO_ROOT" ]; then
+    CURRENT_SIG="$(python3 "$REPO_ROOT/version.py" 2>/dev/null)"
+    PREBUILT_SIG="$(grep -oE '/\*pfg-v[0-9.]+\*/' "$PREBUILT" | head -1)"
+    if [ -n "$CURRENT_SIG" ] && [ "$PREBUILT_SIG" != "$CURRENT_SIG" ]; then
+      echo "Prebuilt is stale ($PREBUILT_SIG vs current $CURRENT_SIG) — treating as no prebuilt."
+      PREBUILT=
+    fi
+  fi
+fi
+if [ -n "$PREBUILT" ]; then
   python3 "$PREBUILT" "$EXT"
   echo "PATCHES_APPLIED: skill complete; reload VSCode."
   exit 0
