@@ -31,7 +31,7 @@ def find_default_ext_dir():
     # Strongest signal: CLAUDE_CODE_EXECPATH (set by the IDE-hosted Claude
     # Code CLI) points at the extension install of the running session.
     # Caveat: standalone CLI layout (~/.local/share/claude/...) also sets
-    # this var but isn't an extension install — match the structural name
+    # this var but isn't an extension install; match the structural name
     # explicitly so it falls through to the glob fallback in that case.
     execpath = os.environ.get("CLAUDE_CODE_EXECPATH", "")
     if execpath:
@@ -52,7 +52,7 @@ def find_default_ext_dir():
         return None
     if len(matches) > 1:
         sys.exit(
-            f"Multiple installs of {VERSION} detected — pass the path "
+            f"Multiple installs of {VERSION} detected. Pass the path "
             f"explicitly, or invoke from inside the IDE you want to patch "
             f"(CLAUDE_CODE_EXECPATH disambiguates):\n  "
             + "\n  ".join(matches)
@@ -110,7 +110,7 @@ def main():
         for i, (old, new) in enumerate(file_splices):
             cnt = s.count(old)
             if cnt == 0:
-                # Maybe already patched — check that new is present
+                # Maybe already patched; check that new is present
                 if s.count(new) >= 1:
                     print(f"  {relpath} splice {i}: already applied (skipped)")
                     continue
@@ -141,7 +141,7 @@ def main():
             print("node --check FAILED:", r.stderr)
             sys.exit("Patched files may be broken; investigate before reload.")
     except FileNotFoundError:
-        print("node not found on PATH — skipping syntax check.")
+        print("node not found on PATH, skipping syntax check.")
 
     print(f"Patches A-G applied (prebuilt {VERSION}). Reload VSCode to activate.")
 
