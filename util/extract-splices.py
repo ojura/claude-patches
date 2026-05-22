@@ -9,7 +9,7 @@ Usage:
 Algorithm:
   - Walk byte-by-byte to find all positions where the two files differ.
   - Group adjacent diff positions into contiguous "diff regions" (with a
-    small same-byte gap allowed within a region — splices are usually
+    small same-byte gap allowed within a region; splices are usually
     separated by lots of unchanged code, but a single splice may have
     interleaved short matches).
   - For each region, anchor it: extract the changed span from each side,
@@ -54,7 +54,7 @@ def find_diff_regions(a: bytes, b: bytes):
     splices = []
     a_pos, b_pos = a_mid_start, b_mid_start
     while a_pos < a_mid_end or b_pos < b_mid_end:
-        # Look for a long match starting near (a_pos, b_pos) — try shifting
+        # Look for a long match starting near (a_pos, b_pos); try shifting
         # b_pos by various deltas to align with the next unchanged run.
         # Simplification: just look for a run of GAP_THRESHOLD identical
         # bytes that exists in both halves.

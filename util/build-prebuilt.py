@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Maintainer tool — synthesize a prebuilt apply.py for a freshly-patched
+Maintainer tool: synthesize a prebuilt apply.py for a freshly-patched
 extension version.
 
 Given a patched extension directory (post-A-K) and its three pre-patch
@@ -22,7 +22,7 @@ Example:
 After running, commit prebuilt/<VER>/apply.py to the repo so future users
 with that version can skip synthesis.
 
-This script is a *maintainer* tool — it produces output that gets
+This script is a *maintainer* tool: it produces output that gets
 committed and used by end-users via the much simpler
 prebuilt/<VER>/apply.py. End-users never run util/build-prebuilt.py.
 """
@@ -83,7 +83,7 @@ def find_default_ext_dir():
     # Strongest signal: CLAUDE_CODE_EXECPATH (set by the IDE-hosted Claude
     # Code CLI) points at the extension install of the running session.
     # Caveat: standalone CLI layout (~/.local/share/claude/...) also sets
-    # this var but isn't an extension install — match the structural name
+    # this var but isn't an extension install. Match the name pattern
     # explicitly so it falls through to the glob fallback in that case.
     execpath = os.environ.get("CLAUDE_CODE_EXECPATH", "")
     if execpath:
@@ -104,7 +104,7 @@ def find_default_ext_dir():
         return None
     if len(matches) > 1:
         sys.exit(
-            f"Multiple installs of {{VERSION}} detected — pass the path "
+            f"Multiple installs of {{VERSION}} detected. Pass the path "
             f"explicitly, or invoke from inside the IDE you want to patch "
             f"(CLAUDE_CODE_EXECPATH disambiguates):\\n  "
             + "\\n  ".join(matches)
@@ -174,7 +174,7 @@ def main():
         for i, (old, new) in enumerate(file_splices):
             cnt = s.count(old)
             if cnt == 0:
-                # Maybe already patched — check that new is present
+                # Maybe already patched; check that new is present
                 if s.count(new) >= 1:
                     print(f"  {{relpath}} splice {{i}}: already applied (skipped)")
                     continue
@@ -205,7 +205,7 @@ def main():
             print("node --check FAILED:", r.stderr)
             sys.exit("Patched files may be broken; investigate before reload.")
     except FileNotFoundError:
-        print("node not found on PATH — skipping syntax check.")
+        print("node not found on PATH, skipping syntax check.")
 
     print(f"Patches A-K applied (prebuilt {{VERSION}}). Reload VSCode to activate.")
 
@@ -302,7 +302,7 @@ def main():
     #       version, under ANY patchset version. Catches "404 → re-synthesize
     #       from non-pristine live install → re-publish the same broken file".
     #   (b) byte-identical to the currently-published prebuilt at
-    #       prebuilt/<VER>/apply.py — and the embedded SIGNATURE constant is
+    #       prebuilt/<VER>/apply.py, and the embedded SIGNATURE constant is
     #       unchanged. Means the maintainer is shipping no functional change
     #       (probably forgot to bump skill/SKILL.md's `**Patchset version**`
     #       before re-baking and synthesizing).
@@ -337,7 +337,7 @@ def main():
             with open(out_path, "r") as f:
                 current_content = f.read()
             if current_content == script:
-                # Extract the SIGNATURE from both — if both have the same signature
+                # Extract the SIGNATURE from both; if both have the same signature
                 # AND same content, the maintainer is probably re-publishing without
                 # a meaningful change.
                 import re as _re

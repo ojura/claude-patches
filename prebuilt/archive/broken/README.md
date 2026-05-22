@@ -30,7 +30,7 @@ A prebuilt belongs in `prebuilt/archive/broken/v<patchset>/<VER>/` if:
 1. It was once published at `prebuilt/<VER>/apply.py`.
 2. Empirical user-visible verification (DOM probe, behavior test,
    etc.) revealed it doesn't deliver the patchset's intended
-   behavior on a fresh install — typically because the splice was
+   behavior on a fresh install. Typically this is because the splice was
    synthesized off a non-pristine `.bak` and missed an earlier
    pristine→post-patch transformation. See
    [`docs/debugging.md`](../../../docs/debugging.md) "Case study:
@@ -63,7 +63,7 @@ below to document the diagnosis.
   `return → let _ws=` transformation that was equally present in
   both files.
 - **Byte-stability passed** because the splice is deterministic
-  against that non-pristine `.bak` — but the splice doesn't produce
+  against that non-pristine `.bak`, but the splice doesn't produce
   a working patch on a pristine install.
 - **Fixed in**: not fixed for 2.1.126 directly; the lesson was
   applied to 2.1.132's prebuilt (commit 126a095), which adds the

@@ -5,7 +5,7 @@ Extracts the version from skill/SKILL.md (the canonical declaration). Both
 util/build-prebuilt.py and skill/apply-patch-fg.py import from here, so
 bumping requires editing exactly ONE line in SKILL.md.
 
-The line in SKILL.md must match the regex below — currently:
+The line in SKILL.md must match the regex below. Currently:
     **Patchset version**: `1.4`
 
 build-prebuilt.py also auto-syncs the README.md `pfg-vN` mention to the

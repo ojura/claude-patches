@@ -8,7 +8,7 @@ intended workflow:
 
   1. Bump `**Patchset version**` in skill/SKILL.md (the SSOT).
   2. Re-apply patches locally and confirm the only diff vs the
-     pre-bump live extension is the signature tag — anything else
+     pre-bump live extension is the signature tag; anything else
      means apply-patch-fg.py drifted.
   3. python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>
   4. Add a CHANGELOG.md entry for the new version.
@@ -43,7 +43,7 @@ from version import PATCHSET_VERSION  # SSOT extracted from skill/SKILL.md
 # Every other file resolves the version dynamically:
 #   - skill/SKILL.md         bash blocks call `python3 version.py`; prose
 #                            uses "the patchset signature" abstractly.
-#   - MAINTAINER.md          same approach — internal doc, same audience as
+#   - MAINTAINER.md          same approach: internal doc, same audience as
 #                            SKILL.md, no need to hardcode.
 #   - skill/apply-patch-fg.py, util/build-prebuilt.py, util/sync-...
 #                            import PATCHSET_VERSION/SIGNATURE from version.py.
