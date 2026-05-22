@@ -1,14 +1,14 @@
 ---
 name: patch-claude
-description: Reapply Juraj's ten local patches to a newly updated anthropic.claude-code VS Code extension. Auto-detects which IDE-hosted install is the running one via CLAUDE_CODE_EXECPATH. Use when the user says "the extension updated, reapply patches" or similar. Backs up files, reapplies all ten patches, verifies each one.
+description: Reapply Juraj's twelve local patches to all anthropic.claude-code IDE extension installs. Discovers every install across VS Code, Antigravity, Cursor, VSCodium via CLAUDE_CODE_EXECPATH + glob. Use when the user says "the extension updated, reapply patches" or similar. Backs up files, reapplies all twelve patches, verifies each one.
 ---
 
 # Reapply anthropic.claude-code extension patches
 
 **Patchset version**: `1.7`
 
-Twelve patches live out-of-tree and need to be reapplied every time the bundled
-`anthropic.claude-code-*-linux-x64` extension updates. The minified code
+Twelve patches live out-of-tree and need to be reapplied every time a bundled
+`anthropic.claude-code-*` extension updates. The minified code
 changes variable names between releases, so do NOT blindly search-and-replace
 literal strings from prior versions — locate the pattern structurally, then
 edit.
@@ -20,11 +20,13 @@ This single bash block does three things in one round-trip:
 1. **Self-update** the skill if it's a symlinked clone of
    `ojura/claude-patches` (fast-forward only; aborts on dirty / non-FF
    state with a helpful message).
-2. **Locate the target install** via `CLAUDE_CODE_EXECPATH` (the IDE-
+2. **Locate all target installs** via `CLAUDE_CODE_EXECPATH` (the IDE-
    hosted Claude Code CLI sets this directly to the running install)
-   or a fallback glob across `~/.<ide>/extensions/` for any IDE that
-   pulls from Open VSX (VS Code, Antigravity, Cursor, VSCodium, etc.).
-3. **Fetch the prebuilt for that version** and run it. Prebuilts are
+   plus a fallback glob across `~/.<ide>/extensions/` for every IDE
+   that pulls from Open VSX or the VS Code marketplace (VS Code,
+   Antigravity, Cursor, VSCodium, etc.). Collects all installs,
+   deduplicates by realpath, and patches each one.
+3. **Fetch the prebuilt for each version** and run it. Prebuilts are
    self-validating (detect the patchset signature, idempotent,
    byte-stable verified at synthesis time) — so this step either
    applies the patches cleanly OR no-ops because they're already
@@ -106,70 +108,122 @@ else
   echo "  ln -s ~/claude-patches/skill ~/.claude/skills/<any-name>"
 fi
 
-# --- Step 0b: locate the target install ---
+# --- Step 0b: locate ALL target installs ---
 # CLAUDE_CODE_EXECPATH is set to different things in different layouts:
-#   - IDE-hosted: .../extensions/anthropic.claude-code-X.Y.Z-linux-x64/resources/native-binary/claude
+#   - IDE-hosted: .../extensions/anthropic.claude-code-X.Y.Z[-<platform>]/resources/native-binary/claude
 #   - Standalone CLI: ~/.local/share/claude/versions/X.Y.Z (no extension to patch)
-# Walk the path looking for an "anthropic.claude-code-*-linux-x64" component
-# so we don't get fooled by the standalone layout into picking ~/.local/share.
-EXT=
+# Walk the path looking for an "anthropic.claude-code-*" component with
+# extension.js, so we don't get fooled by the standalone layout.
+# Collect ALL installs across all IDEs, not just the first match.
+# VS Code marketplace installs have no platform suffix (e.g.
+# anthropic.claude-code-2.1.145); Open VSX adds one (e.g.
+# anthropic.claude-code-2.1.146-linux-x64). Both are valid.
+EXTS=()
+_seen_real=()
+
+# EXECPATH-derived install goes first (the running one).
 if [ -n "${CLAUDE_CODE_EXECPATH:-}" ]; then
   P="$CLAUDE_CODE_EXECPATH"
   while [ "$P" != "/" ] && [ "$P" != "." ] && [ -n "$P" ]; do
     case "$(basename "$P")" in
-      anthropic.claude-code-*-linux-x64)
-        if [ -f "$P/extension.js" ]; then EXT="$P"; fi
+      anthropic.claude-code-*)
+        if [ -f "$P/extension.js" ]; then
+          _real="$(readlink -f "$P")"
+          EXTS+=("$P")
+          _seen_real+=("$_real")
+        fi
         break
         ;;
     esac
     P="$(dirname "$P")"
   done
 fi
-if [ -z "$EXT" ]; then
-  EXT="$(ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 2>/dev/null | sort -V | tail -1)"
-fi
-if [ -z "$EXT" ] || [ ! -f "$EXT/extension.js" ]; then
-  echo "ABORT: could not locate the extension install. EXT='$EXT'"
+
+# Glob across all IDE extension dirs for any remaining installs.
+for _ext in ~/.*/extensions/anthropic.claude-code-*; do
+  [ -f "$_ext/extension.js" ] || continue
+  _real="$(readlink -f "$_ext")"
+  _dup=0
+  for _s in "${_seen_real[@]+"${_seen_real[@]}"}"; do
+    if [ "$_s" = "$_real" ]; then _dup=1; break; fi
+  done
+  [ "$_dup" = 1 ] && continue
+  EXTS+=("$_ext")
+  _seen_real+=("$_real")
+done
+
+if [ ${#EXTS[@]} -eq 0 ]; then
+  echo "ABORT: could not locate any extension installs."
   exit 1
 fi
-VER="$(basename "$EXT" | sed 's/^anthropic.claude-code-//; s/-linux-x64$//')"
-echo "Target: $EXT (version $VER)"
+echo "Found ${#EXTS[@]} install(s):"
+for _ext in "${EXTS[@]}"; do echo "  $_ext"; done
 
-# --- Step 0c: try the prebuilt (covers all patches A–L in one shot) ---
+# --- Step 0c: try prebuilts for each install ---
 # Prefer the local clone's copy (already pulled by Step 0a) over curl.
 # curl from raw.githubusercontent.com is blocked by Claude Code's
 # auto-mode classifier ("code execution from external source"), so
 # the local path isn't just faster — it's the only one that works
 # in auto-approve mode.
-PREBUILT=
-if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/prebuilt/$VER/apply.py" ]; then
-  PREBUILT="$REPO_ROOT/prebuilt/$VER/apply.py"
-  echo "Local prebuilt for $VER: $PREBUILT"
-elif curl -fsSL -o /tmp/apply.py "https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py" 2>/dev/null; then
-  PREBUILT="/tmp/apply.py"
-  echo "Remote prebuilt for $VER downloaded to $PREBUILT"
-fi
-if [ -n "$PREBUILT" ]; then
-  # Stale-prebuilt guard: if local clone exists, compare the prebuilt's
-  # embedded signature to version.py. A stale prebuilt (e.g. pfg-v1.6
-  # when current is pfg-v1.7) would detect its own old signature as
-  # "Already patched" and exit — a false positive that silently skips
-  # the newer patches. Treat stale as "no prebuilt".
-  if [ -n "$REPO_ROOT" ]; then
-    CURRENT_SIG="$(python3 "$REPO_ROOT/version.py" 2>/dev/null)"
-    PREBUILT_SIG="$(grep -oE '/\*pfg-v[0-9.]+\*/' "$PREBUILT" | head -1)"
-    if [ -n "$CURRENT_SIG" ] && [ "$PREBUILT_SIG" != "$CURRENT_SIG" ]; then
-      echo "Prebuilt is stale ($PREBUILT_SIG vs current $CURRENT_SIG) — treating as no prebuilt."
-      PREBUILT=
+_manual_needed=()
+_applied=0
+
+_ver_from_dir() {
+  basename "$1" | sed 's/^anthropic.claude-code-//; s/-\(linux\|darwin\|win32\|alpine\)-\(x64\|arm64\)$//'
+}
+
+for EXT in "${EXTS[@]}"; do
+  VER="$(_ver_from_dir "$EXT")"
+  echo ""
+  echo "--- $EXT (version $VER) ---"
+
+  PREBUILT=
+  if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/prebuilt/$VER/apply.py" ]; then
+    PREBUILT="$REPO_ROOT/prebuilt/$VER/apply.py"
+    echo "Local prebuilt for $VER: $PREBUILT"
+  elif curl -fsSL -o "/tmp/apply_${VER}.py" "https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/$VER/apply.py" 2>/dev/null; then
+    PREBUILT="/tmp/apply_${VER}.py"
+    echo "Remote prebuilt for $VER downloaded to $PREBUILT"
+  fi
+  if [ -n "$PREBUILT" ]; then
+    # Stale-prebuilt guard: if local clone exists, compare the prebuilt's
+    # embedded signature to version.py. A stale prebuilt (e.g. pfg-v1.6
+    # when current is pfg-v1.7) would detect its own old signature as
+    # "Already patched" and exit — a false positive that silently skips
+    # the newer patches. Treat stale as "no prebuilt".
+    if [ -n "$REPO_ROOT" ]; then
+      CURRENT_SIG="$(python3 "$REPO_ROOT/version.py" 2>/dev/null)"
+      PREBUILT_SIG="$(grep -oE '/\*pfg-v[0-9.]+\*/' "$PREBUILT" | head -1)"
+      if [ -n "$CURRENT_SIG" ] && [ "$PREBUILT_SIG" != "$CURRENT_SIG" ]; then
+        echo "Prebuilt is stale ($PREBUILT_SIG vs current $CURRENT_SIG) — treating as no prebuilt."
+        PREBUILT=
+      fi
     fi
   fi
-fi
-if [ -n "$PREBUILT" ]; then
-  python3 "$PREBUILT" "$EXT"
-  echo "PATCHES_APPLIED: skill complete; reload VSCode."
+  if [ -n "$PREBUILT" ]; then
+    python3 "$PREBUILT" "$EXT"
+    _applied=$((_applied + 1))
+  else
+    echo "No prebuilt for $VER — needs manual application."
+    _manual_needed+=("$EXT")
+  fi
+done
+
+echo ""
+echo "=== Summary: ${_applied} applied, ${#_manual_needed[@]} need manual ==="
+if [ ${#_manual_needed[@]} -eq 0 ]; then
+  echo "PATCHES_APPLIED: all ${#EXTS[@]} install(s) patched; reload your IDE(s)."
   exit 0
 else
-  echo "No prebuilt for $VER — falling through to manual application (Steps 2–14 below)."
+  # Set EXT/VER for the first manual-needed install so Steps 2-14 proceed.
+  EXT="${_manual_needed[0]}"
+  VER="$(_ver_from_dir "$EXT")"
+  echo "No prebuilt for ${#_manual_needed[@]} install(s) — falling through to manual application."
+  echo "Starting with: $EXT (version $VER)"
+  if [ ${#_manual_needed[@]} -gt 1 ]; then
+    echo "After completing manual application for this install, re-run the skill for the rest:"
+    for _m in "${_manual_needed[@]:1}"; do echo "  $_m"; done
+  fi
 fi
 ```
 
@@ -177,7 +231,7 @@ fi
 
 - `RESTART_SKILL` → stop and re-invoke the skill (the local clone got
   fast-forwarded; SKILL.md on disk is now newer than what you read).
-- `PATCHES_APPLIED` → skill is complete. Tell the user to reload VSCode.
+- `PATCHES_APPLIED` → skill is complete. Tell the user to reload their IDE(s).
   Do NOT run any verification greps — they target manual-path splices
   with placeholder param names and will give false negatives on
   prebuilt-applied code. The patchset signature embedded in
