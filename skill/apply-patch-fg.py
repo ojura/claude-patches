@@ -93,7 +93,7 @@ def find_default_extension():
     candidates = by_version[latest]
     if len(candidates) > 1:
         sys.exit(
-            f"Multiple installs of {latest} detected — pass the path "
+            f"Multiple installs of {latest} detected. Pass the path "
             f"explicitly, or invoke from inside the IDE you want to patch "
             f"(CLAUDE_CODE_EXECPATH disambiguates):\n  "
             + "\n  ".join(candidates)
@@ -160,7 +160,7 @@ RULES = [
     (
         "G.1 (panel ctor callback supports skip-bookkeeping flag)",
         # Captures: a1/a2/a3 = callback args, kvar/lvar = Map destructure,
-        #          pvar = outer panel reference (this varies — V in 2.1.120,
+        #          pvar = outer panel reference (this varies: V in 2.1.120,
         #          z in 2.1.139).
         re.compile(
             r'\((?P<a1>' + _ID + r'),(?P<a2>' + _ID + r'),(?P<a3>' + _ID + r')\)=>\{'
@@ -174,10 +174,10 @@ RULES = [
         r'if(\g<lvar>===\g<pvar>&&\g<kvar>!==\g<a1>)this.sessionPanels.delete(\g<kvar>);'
         r'if(this.sessionPanels.set(\g<a1>,\g<pvar>),\g<pvar>.active)this.activeSessionId=\g<a1>}}',
     ),
-    # G.2 is built dynamically below — its replacement references three
-    # bundle-globals (fs, path, projectRoot resolver) whose names drift
-    # between releases (e.g. R1→W1, d5→n5 between 2.1.120 and 2.1.121).
-    # We discover them structurally before composing the rule.
+    # G.2 is built dynamically below: its replacement references three
+    # globals from the bundle (fs, path, projectRoot resolver) whose names drift
+    # between releases (e.g. R1 to W1, d5 to n5 between 2.1.120 and 2.1.121).
+    # We discover them by code shape before composing the rule.
 ]
 
 
@@ -186,7 +186,7 @@ def discover_globals(s):
     renameSession, which has a fixed structural shape:
       async renameSession(<sid>,<title>,<isAi>){let <a>=<RES>(this.projectRoot),<b>=<PATH>.join(<a>,`${<sid>}.jsonl`);...
         ...await <FS>.promises.appendFile(<b>,...)...}
-    Param names AND local names drift across releases — both are captured.
+    Param names AND local names drift across releases; both are captured.
     Returns (fs, path, res) or raises if any can't be located uniquely.
     """
     rx = re.compile(
@@ -224,7 +224,7 @@ def main():
     #   (b) legacy markers, in case an unsigned (pre-versioning) build
     #       was applied
     has_current_sig = PATCHSET_SIG in s
-    # Match v1, v1.1, v2, v2.5, etc. — number with optional .number suffix.
+    # Match v1, v1.1, v2, v2.5, etc.: number with optional .number suffix.
     # Letter suffixes (v1a) intentionally not supported.
     sig_match = re.search(r'/\*pfg-v(\d+(?:\.\d+)?)\*/', s)
     other_sig = sig_match.group(1) if sig_match and not has_current_sig else None
@@ -246,7 +246,7 @@ def main():
         return
 
     if other_sig or has_legacy_patches or force:
-        # Stale prior application OR forced re-apply — restore from backup
+        # Stale prior application OR forced re-apply: restore from backup
         bak = path + ".pre-patchFG.bak"
         if not os.path.exists(bak):
             sys.exit(
@@ -274,9 +274,9 @@ def main():
         with open(path, "r") as f:
             s = f.read()
 
-    # Discover bundle-global names for G.2's replacement (fs/path/resolver
+    # Discover the global names from the bundle for G.2's replacement (fs/path/resolver
     # rename between releases). The storage class's renameSession exposes
-    # all three in one structural anchor.
+    # all three in one place.
     fs_g, path_g, res_g = discover_globals(s)
     print(f"Discovered: fs={fs_g}, path={path_g}, projectRoot-resolver={res_g}")
 
@@ -342,7 +342,7 @@ def main():
             print("node --check FAILED:", r.stderr)
             sys.exit("Restoring may be needed. Investigate before reload.")
     except FileNotFoundError:
-        print("node not found on PATH — skipping syntax check.")
+        print("node not found on PATH, skipping syntax check.")
 
     print("Patches F and G applied. Reload the VSCode window to activate.")
 

@@ -4,17 +4,17 @@ Per-version notes for the `pfg` patchset signature embedded in
 `extension.js` after `updateSessionState(V,K,B){`. Newest first.
 
 `pfg` = Persistent Forking Glitches. The signature is the only
-on-disk record of which patchset version is live in a given install
-— end-users running a newer prebuilt against an older signature get
+on-disk record of which patchset version is live in a given install.
+End-users running a newer prebuilt against an older signature get
 auto-restore + reapply (no `--force` needed).
 
 > Maintainers: keep this file up to date when bumping
 > `**Patchset version**` in `skill/SKILL.md`. Each version's entry
 > here is **historical** and must not be auto-rewritten by the sync
-> mechanism in `util/build-prebuilt.py` — that's why CHANGELOG.md is
-> deliberately excluded from `SYNC_TARGETS`.
+> mechanism in `util/build-prebuilt.py` (that's why CHANGELOG.md is
+> deliberately excluded from `SYNC_TARGETS`).
 
-## v1.7 — 2026-05-17 — Patch L: force `--thinking-display summarized` on IDE-spawned CLI
+## v1.7 (2026-05-17): Patch L, force `--thinking-display summarized` on IDE-spawned CLI
 
 Restores thinking summaries in the VS Code / Antigravity chat panel
 for `claude-opus-4-7[1m]` (and presumably any 4.7+ model). Closes
@@ -99,7 +99,7 @@ L), 4 in `webview/index.js`, 1 in `webview/index.css`. Signature
 bumped from `/*pfg-v1.6*/` to `/*pfg-v1.7*/`. End-users on v1.6 will
 get auto-restore + reapply on the next `apply.py` run.
 
-## v1.6 — 2026-05-07 — Patch K silent-failure fix + marker enrichment
+## v1.6 (2026-05-07): Patch K silent-failure fix + marker enrichment
 
 Fixes a silent-data-loss bug introduced (or unmasked) by v1.5, plus
 substantially enriches marker content with concrete diagnostic data.
@@ -113,7 +113,7 @@ Symptom (DOM-observed on a real session): chat panel reconstructs
 the chain via Patch J's cross-file prepend, the prepended sibling
 itself begins with a phantom-lpu compaction boundary (i.e., the
 boundary is at index 0 of `_parsed` after J prepend), but K renders
-ZERO markers — no bookend, no seam, no broken. The user sees a
+ZERO markers (no bookend, no seam, no broken). The user sees a
 chain that's missing upstream lineage with no visual signal that
 data is missing.
 
@@ -139,20 +139,20 @@ succeeded: gate downstream logic on attempt, not effect".
 ### Marker informativeness: surface concrete data instead of generic prose
 
 K v1.5's marker text was prose-heavy with truncated 8-12 character
-uuid prefixes — sufficient to identify a marker AS a marker but
+uuid prefixes, sufficient to identify a marker AS a marker but
 not actionable for cross-referencing or bug reports. v1.6 adds
 per-marker concrete data:
 
-- **Bookend (a)** now lists each K1 backfill source per phantom-lpu:
+- **Bookend (a)**: now lists each K1 backfill source per phantom-lpu:
   `phantom <full-uuid>: backfilled <N> msgs from <sibling-filename>
   (chosen from <K> candidates)` if ambiguous. Plus the wall-clock
   breakdown (see below).
-- **Seam** shows: `missing phantom uuid: <full-uuid>` and
+- **Seam**: shows `missing phantom uuid: <full-uuid>` and
   `reattached to in-file predecessor: <full-uuid>`.
-- **Bridge** shows: `boundary uuid: <full-uuid>`, `J-resolved
+- **Bridge**: shows `boundary uuid: <full-uuid>`, `J-resolved
   predecessor uuid: <full-uuid> (lives in sibling: <filename>)`,
   `K bridge points at in-file predecessor: <full-uuid>`.
-- **Broken** shows: `dead-end phantom uuid: <full-uuid>`, `sibling
+- **Broken**: shows `dead-end phantom uuid: <full-uuid>`, `sibling
   .jsonls examined in project dir: <N>`, `phantoms successfully
   backfilled: <N>`, `phantoms K could not backfill: <N>`. Plus the
   wall-clock breakdown.
@@ -198,19 +198,19 @@ All four changes DOM-verified pre-push (per the playbook's absolute
 DOM-verification rule):
 
 - Baseline (no fixture) on a session previously showing 2 markers:
-  still 2 markers (bookend + seam), no broken, no AMBIG —
-  bookend's K1 source line + wall-clock are present, seam's full
+  still 2 markers (bookend + seam), no broken, no AMBIG.
+  Bookend's K1 source line + wall-clock are present, seam's full
   uuids are visible.
 - Test #5 (rename K1 source jsonl to break reconstruction):
   `[data-pfgk-role="broken"]` count = 1 (was 0 in v1.5 with same
-  fixture — the silent failure mode), bodyHasINCOMPLETE === true,
+  fixture, the silent failure mode), bodyHasINCOMPLETE === true,
   full phantom uuid visible in marker text, header `getComputedStyle
   .color === "rgb(255, 255, 255)"` (readable on saturated red bg),
   `MARKER 1 OF 1 · CYCLE TO TOP ↺` confirms broken is in the
   click-cycle navigation list (closes the v1.5 click-cycle gap
   too).
 
-## v1.5 — 2026-05-07 — Patch K reconstruction-quality signaling
+## v1.5 (2026-05-07): Patch K reconstruction-quality signaling
 
 Patch K gains two new signals to surface reconstruction quality at
 the marker level. Behavior of the previous v1.4 mechanism unchanged
@@ -223,7 +223,7 @@ K1's sibling-backfill loop now counts how many sibling .jsonls
 structurally qualify for a given phantom-lpu (shared phantom-lpu
 + pre-content before their own first phantom-lpu boundary). If
 more than one sibling qualifies, the chosen "canonical pre-content"
-is by definition ambiguous — different filesystems / readdir
+is by definition ambiguous: different filesystems / readdir
 orderings could pick a different sibling and produce a different
 chain root.
 
@@ -246,9 +246,9 @@ visual).
 
 ### Reconstruction-failed marker (`pfgk-broken-`)
 
-Bookend predicate (b) — the relaxed predicate that fires when
+Bookend predicate (b), the relaxed predicate that fires when
 predicate (a) finds no clean parent==null user/assistant chain
-root — now plants a NEW marker variant with uuid prefix
+root, now plants a NEW marker variant with uuid prefix
 `pfgk-broken-` (was: `pfgk-bookend-`). The webview render wrap
 recognizes this as a fourth role with a deliberately stronger
 visual style than the regular bookend so the user can't miss it
@@ -260,15 +260,15 @@ at a glance:
   broken gets all-around).
 - Border-left still `6px solid #990000` (preserves the
   side-stripe accent shared with other markers).
-- Box-shadow `0 0 12px rgba(180,0,0,0.6)` — red glow.
+- Box-shadow `0 0 12px rgba(180,0,0,0.6)` (red glow).
 - Emoji `⛔` (was: `⚠️` shared across all roles).
-- Content text: "⛔ INCOMPLETE TRANSCRIPT — RECONSTRUCTION
+- Content text: "⛔ INCOMPLETE TRANSCRIPT: RECONSTRUCTION
   FAILED..." (was: "PATCH K · Conversation origin (chain root
   recovered)..."). Critical signal that upstream lineage is
   missing from this view.
 
 This handles the case where K can't make the rendered chain reach
-a true canonical root despite trying — typically because the
+a true canonical root despite trying, typically because the
 sibling .jsonl that originally held the canonical pre-compaction
 content has been deleted / moved / renamed, and no other sibling
 shares the phantom-lpu.
@@ -289,10 +289,10 @@ a glance, not just by reading the message text. Different uuid
 prefix → different role → different colors and header → user
 can't miss it.
 
-## v1.4 — 2026-05-04 — Patch K cross-conversation backfill
+## v1.4 (2026-05-04): Patch K cross-conversation backfill
 
 Patch K becomes fully topology-driven. The rendered chain spans the
-entire conversation tree — every persisted message, with markers at
+entire conversation tree, every persisted message, with markers at
 each compaction event.
 
 K now has four synthesis steps:
@@ -324,13 +324,13 @@ order with seam/bridge/bookend ghosts marking the structural
 discontinuities. v1.3's `orphannotice` ghost is removed (subsumed by
 the bridge mechanism).
 
-## v1.3 — 2026-05-04 — Patch K orphannotice for unreachable seam
+## v1.3 (2026-05-04): Patch K orphannotice for unreachable seam
 
 Mitigation for sessions where the seam goes unrendered. The seam is
 planted on the orphan in-file chain; when a session also has a
 compact_boundary whose lpu resolves cross-file via Patch J's
 sibling-prepend, `Ez4`'s single-chain max-by-index walker picks the
-live-chain leaf and never traverses the orphan branch — so the seam
+live-chain leaf and never traverses the orphan branch, so the seam
 exists in `_parsed` but never reaches the DOM.
 
 Detection signal: seam was planted but bookend didn't fire (the
@@ -345,7 +345,7 @@ Render wrapper extended: orphannotice = amber `#ffc107`, vs orange
 seam `#ff9f1c` and red bookend `#dc3545`. No click-jump (no
 counterpart to scroll to).
 
-## v1.2 — 2026-05-03 — Add Patch K (lost+found-style orphan recovery)
+## v1.2 (2026-05-03): Add Patch K (lost+found-style orphan recovery)
 
 Read-side mitigation for sessions whose `compact_boundary`
 `logicalParentUuid` points at a uuid that was never persisted to
@@ -364,24 +364,24 @@ Two-file patch:
   (out-of-band signaling via uuid, not via message content).
 
 Render wrap injects a one-off `<style>` that suppresses the
-truncation gradient + collapse buttons + edit/fork action — none make
-sense on a synthetic message — and centers a 42px ⚠️ banner above
+truncation gradient + collapse buttons + edit/fork action (none make
+sense on a synthetic message) and centers a 42px ⚠️ banner above
 the bubble. Click anywhere on the colored container scrolls to the
 matching counterpart via `[data-pfgk-role="…"]` queries.
 
-Critical implementation note: ghosts must NOT set `isMeta: true` —
-the upstream `Sz4` filter strips those. Compact summaries get away
+Critical implementation note: ghosts must NOT set `isMeta: true`,
+because the upstream `Sz4` filter strips those. Compact summaries get away
 with being synthetic-ish via `isCompactSummary` (which `Sz4` doesn't
 check); we don't have that backdoor, so the synthetic flag stays off.
 
-## v1.1 — 2026-05-03 — Cover H/I/J in prebuilt + stale-sig migration
+## v1.1 (2026-05-03): Cover H/I/J in prebuilt + stale-sig migration
 
 Patches H, I, J had landed without bumping the signature, so v1
 prebuilt users never re-applied and were silently missing the
 cap-bypass / precompact-skip / cross-file lpu fixes. v1.1 introduces
 the version-aware migration path: prebuilt detects any prior `pfg-vN`
 signature (regex widened to support dotted minors), restores from
-`.bak`, and re-applies — no `--force` needed for end users on the
+`.bak`, and re-applies, with no `--force` needed for end users on the
 upgrade path.
 
 - `util/build-prebuilt.py`: template now does stale-sig detection +
@@ -390,25 +390,25 @@ upgrade path.
   prior v1 prebuilts archived to keep `prebuilt/` tidy without
   losing history (URL stability via the archive path).
 
-## v1 — 2026-04-28 → 2026-05-03 — Initial patchset
+## v1 (2026-04-28 → 2026-05-03): Initial patchset
 
 Patches A through J. Initial signature scheme with single-version
 tag (`/*pfg-v1*/`, no minor).
 
-- **A** — fork session writes a `custom-title` rescue entry when the
+- **A**: fork session writes a `custom-title` rescue entry when the
   fork JSONL's head 64KB would otherwise be unparseable for metadata.
-- **B** — drop `position: sticky` on tall message headers (linear
+- **B**: drop `position: sticky` on tall message headers (linear
   scroll instead of occluding the assistant reply).
-- **C** — disable the broken `isSlashCommand` heuristic
+- **C**: disable the broken `isSlashCommand` heuristic
   (`text.startsWith("/")` false-positives on pasted Unix paths).
-- **D** — chain walker bridges compaction boundaries via
+- **D**: chain walker bridges compaction boundaries via
   `logicalParentUuid` (read-side fix; the API path is bounded
   independently by `getMessagesAfterCompactBoundary`).
-- **E** — title resolver order: put `firstPrompt` ahead of
+- **E**: title resolver order: put `firstPrompt` ahead of
   `lastPrompt` in the resolver chain, so session titles don't drift
   to "whatever the user most recently typed". Resolver-order fix
-  only — the rename-propagation fix is F.
-- **F** — sidebar pencil-rename propagation through the
+  only; the rename-propagation fix is F.
+- **F**: sidebar pencil-rename propagation through the
   `sessionStates` Map, so renamed titles don't flip back on session
   switch / broadcast. Three coordinated splices: `updateSessionState`
   preserves missing fields; `q8.renameSession` invokes
@@ -417,21 +417,21 @@ tag (`/*pfg-v1*/`, no minor).
   boundary so panel reactives can't clobber the Map) and F.3
   (manager writes `panel.title` directly so tab title updates
   cross-webview).
-- **G** — fork-conversation handler pushes a `sessionStates` Map
+- **G**: fork-conversation handler pushes a `sessionStates` Map
   entry for the new fork immediately, so it appears in the sidebar
   without requiring a first message. Two splices: G.1 widens the
   panel ctor callback with a skip-bookkeeping flag; G.2 makes
   `fork_conversation` push a Map entry derived from the source's
   `custom-title`/`ai-title`.
-- **H** — disable the 5 MB precompact-skip optimization in the loader
+- **H**: disable the 5 MB precompact-skip optimization in the loader
   (rewriting the env-var-gated condition so the optimization never
-  fires). Pre-boundary scrollback for sessions > 5 MB becomes
-  visible to the chain walker.
-- **I** — neutralize the webview's hardcoded 500-message render cap
+  fires). Scrollback before the compact boundary for sessions > 5 MB
+  becomes visible to the chain walker.
+- **I**: disable the webview's hard 500-message cap
   (rewrite the cap function to identity), so sessions with > 600
   messages don't silently truncate to the last 500 in the chat
   panel.
-- **J** — cross-file `logicalParentUuid` resolution (sibling-prepend
+- **J**: cross-file `logicalParentUuid` resolution (sibling-prepend
   before the chain walker runs).
 
 Patches F and G use a regex-anchored `apply-patch-fg.py` script

@@ -2,7 +2,7 @@
 
 A reverse-engineer's reference for poking at a running
 `anthropic.claude-code-*-linux-x64` install via Chrome DevTools Protocol
-(CDP) — reading state, capturing function-internal data, dispatching RPCs,
+(CDP): reading state, capturing function-internal data, dispatching RPCs,
 walking React fibers, and triggering refreshes. Companion to
 [`patches.md`](patches.md), which covers WHAT each patch does and WHY;
 this one covers HOW to introspect the running bundle to build/verify
@@ -10,7 +10,7 @@ patches like them.
 
 The notes here are derived from empirical work on Antigravity (Google's
 VS Code fork that bundles claude-code via Open VSX). The mechanics
-generalise to upstream VS Code with minor adjustments — the inspector
+generalise to upstream VS Code with minor adjustments: the inspector
 ports, IPC plumbing, and CommonJS module structure are the same; only
 the launch flags and IDE-product paths differ.
 
@@ -22,7 +22,7 @@ the launch flags and IDE-product paths differ.
 > or reload mechanisms before checking whether the playbook already
 > covers your case. Specifically:
 >
-> - **Reload mechanisms**: see "Refresh / reload playbook" — six
+> - **Reload mechanisms**: see "Refresh / reload playbook" for six
 >   verified mechanisms ordered by precision. `location.reload()` on
 >   webview iframes BREAKS the iframe (chrome-error). `Page.reload`
 >   is rejected on iframe targets. Don't try them. Use mechanism 3
@@ -31,13 +31,13 @@ the launch flags and IDE-product paths differ.
 >   unreliable** (keybinding-context-sensitive); the canonical
 >   reload is `Ctrl+Shift+P` → type `Reload Window` → `Enter`.
 > - **Verifying a code change took effect**: see the K case study
->   "End-to-end verification of the fix" paragraph — the exact recipe
+>   "End-to-end verification of the fix" paragraph. The exact recipe
 >   is `Input.dispatchKeyEvent` reload + BP-free verification via
 >   fiber-walk + DOM probing. `node --check` and byte-stability
 >   passing are NOT verification.
 > - **Capturing function-internal state**: see "Recipe: capture
 >   function-internal state with a side-effect BP". Don't try
->   `setScriptSource` for code injection — it silently doesn't swap
+>   `setScriptSource` for code injection: it silently doesn't swap
 >   running code (top gotcha).
 > - **Reaching the manager singleton**: not on `extension.exports` /
 >   `globalThis` / `require.cache`. Use the BP-stash trick (Recipe 1).
@@ -100,7 +100,7 @@ involved when a chat panel is open:
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  Renderer (Chrome) — port 9222                             │
+│  Renderer (Chrome), port 9222                              │
 │   ├─ Workbench page (one per IDE window)                   │
 │   ├─ Outer vscode-webview iframe (CSP wrapper, empty body) │
 │   └─ Inner active-frame iframe (the React app)             │
@@ -109,7 +109,7 @@ involved when a chat panel is open:
                        │      │ electron IPC
                        │      ▼
 ┌────────────────────────────────────────────────────────────┐
-│  Extension host (Node.js) — one per window                 │
+│  Extension host (Node.js), one per window                  │
 │   ├─ extension.js (the bundled extension code)             │
 │   ├─ Singleton manager (sessionStates, sessionPanels, ...) │
 │   └─ Spawns claude --resume <sid> subprocesses             │
@@ -118,7 +118,7 @@ involved when a chat panel is open:
                        │ stream-json stdio
                        ▼
 ┌────────────────────────────────────────────────────────────┐
-│  claude --resume <sid> subprocess (Node.js) — one per chat │
+│  claude --resume <sid> subprocess (Node.js), one per chat  │
 │   └─ Talks to Anthropic API, streams tool-use events back  │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -140,22 +140,22 @@ host that owns their stdio.
 
 ### Ports as roles, not numbers
 
-`9229` is not "the target". It's whichever exthost spawned first —
+`9229` is not "the target". It's whichever exthost spawned first;
 could be your debugging target's window, could be the window that's
 running this Claude Code session itself.
 
 The roles you actually care about:
 
-- **`mine`** — the exthost belonging to the Claude Code session running
+- **`mine`**: the exthost belonging to the Claude Code session running
   this debugger. Touching `mine` is touching yourself: BPs fire on your
   own activity, freezing you mid-tool-call.
-- **`target`** — the exthost hosting the panel/session you want to
+- **`target`**: the exthost hosting the panel/session you want to
   inspect. The "outside" you're poking from.
-- **`renderer`** — port 9222, shared by all renderers (DOM-side).
+- **`renderer`**: port 9222, shared by all renderers (DOM-side).
 
 `mine` and `target` are typically two different exthost ports if you're
 debugging another window's project. They're the SAME port if you're
-debugging a panel in the same window as your Claude Code session — in
+debugging a panel in the same window as your Claude Code session; in
 that case BPs are double-edged (you'll trigger them yourself).
 
 **Identify `mine` first, every session.** Don't carry over assumptions
@@ -202,10 +202,10 @@ that didn't fire.
 ## Tooling
 
 Two tiny Node scripts cover all of CDP that you'll need. Both rely on
-Node 22+'s built-in `WebSocket` global — no `npm install`, no Python,
+Node 22+'s built-in `WebSocket` global: no `npm install`, no Python,
 no MCP servers.
 
-### `/tmp/cdp-eval.mjs` — one-shot Runtime.evaluate
+### `/tmp/cdp-eval.mjs`: one-shot Runtime.evaluate
 
 ```js
 // usage: node cdp-eval.mjs <ws-url> <expression-or-@file>
@@ -241,9 +241,9 @@ function send(method, params) {
 
 Critical flags:
 
-- `allowUnsafeEvalBlockedByCSP: true` — needed for vscode-webview iframes
+- `allowUnsafeEvalBlockedByCSP: true`: needed for vscode-webview iframes
   whose CSP otherwise blocks `eval`.
-- `includeCommandLineAPI: true` — exposes Node's `require` in the eval
+- `includeCommandLineAPI: true`: exposes Node's `require` in the eval
   scope. Without it you get `require is not defined` when trying to use
   `require('fs')`.
 
@@ -261,10 +261,10 @@ node /tmp/cdp-eval.mjs "$WS" '@/tmp/expr.js'
 ```
 
 For a webview iframe target, the WS URL is
-`ws://127.0.0.1:9222/devtools/page/<id>` — read `id` from
+`ws://127.0.0.1:9222/devtools/page/<id>`; read `id` from
 `http://127.0.0.1:9222/json/list`.
 
-### `/tmp/eval_in_inner_frame.mjs` — drill into the React app
+### `/tmp/eval_in_inner_frame.mjs`: drill into the React app
 
 `vscode-webview` iframes are double-nested. The outer iframe at
 `/json/list` is just a CSP wrapper with an empty body; the React app
@@ -314,13 +314,13 @@ function findInner(node, acc=[]) {
 const allFrames = findInner(tree.frameTree);
 
 // Discriminator: name === "active-frame". URLs are NOT reliable
-// — the inner's loaded URL is also index.html (same as outer), even
-// though its src attribute pointed at fake.html.
+// (the inner's loaded URL is also index.html, same as outer, even
+// though its src attribute pointed at fake.html).
 const innerFrame = allFrames.find(f => f.name === 'active-frame');
 if (!innerFrame) { console.error('FAIL: no name=active-frame'); process.exit(1); }
 
 // Pick MAIN-world context (origin matches webview, name is empty).
-// Reject __playwright_utility_world_* — those are isolated worlds that
+// Reject __playwright_utility_world_*; those are isolated worlds that
 // CANNOT see the page's globals or React state.
 const mainCtx = ctxEvents.find(c =>
   c.auxData?.frameId === innerFrame.id && !c.name && c.origin);
@@ -385,7 +385,7 @@ Useful URL query-param filters on iframes:
 | `id=<webview-uuid>` | unique per webview (matches between outer and inner) |
 | `&session=<sid>` | present on chat panels for a specific session |
 | `&purpose=webviewView` | present on **sidebar** webviews. Editor-tab panels lack this |
-| `&parentId=1` vs `&parentId=3` | VS Code container — correlates to area |
+| `&parentId=1` vs `&parentId=3` | VS Code container; correlates to area |
 
 ### Confirm an exthost's window cwd
 
@@ -397,7 +397,7 @@ node /tmp/cdp-eval.mjs "$WS" 'JSON.stringify({pid: process.pid, cwd: process.cwd
 `cwd` matches the workspace folder of the window owning that exthost.
 Match against your target window's workspace path. **Cross-project
 quirk**: a panel for a session in project A can be open inside a window
-for project B — the exthost is the WINDOW's, not the SESSION's. Don't
+for project B; the exthost is the WINDOW's, not the SESSION's. Don't
 assume by sessionId.
 
 ### Precheck: are the patches actually loaded?
@@ -418,7 +418,7 @@ Empty `sig` → patches aren't installed. `/patch-claude` first or you'll
 spend turns chasing phantoms in unpatched code. (Reading from disk is
 fine; in-memory and on-disk are identical for active-installed
 extensions, since CDP `setScriptSource` doesn't actually swap runtime
-code — see Gotchas.)
+code; see Gotchas.)
 
 ---
 
@@ -432,7 +432,7 @@ exthost).
 The mechanism: `Debugger.setBreakpoint` accepts a `condition` string
 that V8 evaluates AT EACH HIT in the live frame's scope. The condition
 has access to all locals. If the condition mutates `globalThis` and
-returns `false`, the BP is "hit" but doesn't pause execution — you get
+returns `false`, the BP is "hit" but doesn't pause execution: you get
 side-effect data capture without freezing.
 
 ```js
@@ -462,7 +462,7 @@ await call('Debugger.setBreakpoint', {
 ```
 
 The actualLocation in the BP-set response may differ from the requested
-line/col by a few columns — V8 snaps to the nearest valid statement
+line/col by a few columns; V8 snaps to the nearest valid statement
 boundary. Acceptable; just keep the BP set.
 
 ### Bash orchestration: hold the BP open across trigger + read
@@ -513,7 +513,7 @@ The webview→extension wire envelope is two-layer:
 
 To dispatch from outside, post via the OUTER vscode-webview iframe's
 bridge function. The renderer-side shim (`acquireVsCodeApi`) wraps
-`window.parent['__vscode_post_message__']` — that bridge is reachable
+`window.parent['__vscode_post_message__']`; that bridge is reachable
 directly on the outer iframe:
 
 ```js
@@ -555,7 +555,7 @@ Caveats:
   values may error silently. `get_session_request` and
   `list_sessions_request` accept any string.
 - Destructive handlers (`delete_session`, `close_channel`,
-  `interrupt_claude`, `launch_claude`) — don't probe blindly. Test
+  `interrupt_claude`, `launch_claude`): don't probe blindly. Test
   read-only RPCs first.
 
 ### Alternative: invoke the conn directly via fiber walk
@@ -581,7 +581,7 @@ and `sendRequest` as instance methods.
 
 The chat panel's React app stores the session manager, conn, and per-
 session state on the fiber tree. `acquireVsCodeApi` is consumed once at
-startup and the resulting `vscode` is captured in closure — invisible to
+startup and the resulting `vscode` is captured in closure, invisible to
 `Object.keys(window)`. Fiber walking is the way in.
 
 ### Get the host root
@@ -601,7 +601,7 @@ directly. Its `.stateNode` is the FiberRootNode (with cycle back via
 
 The depth/path from host to the React component holding the session
 manager varies per panel TYPE (sidebar / editor / chat). Don't hard-code
-it — use a generic walker that finds objects by method-name signature:
+it; use a generic walker that finds objects by method-name signature:
 
 ```js
 (function(){
@@ -669,7 +669,7 @@ it — use a generic walker that finds objects by method-name signature:
 })()
 ```
 
-Wrap in IIFE — `Runtime.evaluate` rejects top-level `return`. Stash
+Wrap in IIFE; `Runtime.evaluate` rejects top-level `return`. Stash
 references on `globalThis` so subsequent evals can navigate without
 re-walking. Empirically, on a session-list webview, the manager sits at
 `host.child.child.child.memoizedProps.sessions`.
@@ -680,7 +680,7 @@ webview iframes (`origin="vscode-webview://<authority>"`). Touching any
 property on those Windows from the wrong-origin context throws
 `SecurityError: Failed to read a named property '...' from 'Window'`.
 Without per-property `try`/`catch`, the walker bails on the first such
-slot and silently returns zero matches — looks identical to "manager
+slot and silently returns zero matches; looks identical to "manager
 genuinely not on this fiber tree", which is the wrong conclusion. If
 `found` is empty AND the panel clearly has rendered messages, suspect
 this gotcha first. Re-eval with `try`/`catch` wrappers around every
@@ -691,9 +691,9 @@ typically materializes immediately.
 
 The webview-side session manager (class `Wn` in v2.1.126):
 
-- `sessions` — Preact signal; `.value` is array of session entries
-- `activeSession` — signal; `.value.id` is current sessionId
-- `comms` — connection POOL (class `Qn`), proto: `get(sid)`, `open`,
+- `sessions`: Preact signal; `.value` is array of session entries
+- `activeSession`: signal; `.value.id` is current sessionId
+- `comms`: connection POOL (class `Qn`), proto: `get(sid)`, `open`,
   `close`. NOT the conn itself
 - Per-session entry has rich state (see below)
 
@@ -702,22 +702,22 @@ The webview-side session manager (class `Wn` in v2.1.126):
 Each item in `mgr.sessions.value` carries the full reactive state for
 one session:
 
-- `connection` — signal-wrapped conn (`class Jz1` with `getSession`,
+- `connection`: signal-wrapped conn (`class Jz1` with `getSession`,
   `sendRequest`)
-- `messages` — signal; `.value` is the array the React app renders
-- `assembler` — stream-event → message transformer
+- `messages`: signal; `.value` is the array the React app renders
+- `assembler`: stream-event to message transformer
   (`processStreamEvent` is its only proto method)
-- `busy`, `isLoading`, `pendingInput`, `error` — signals (boolean)
+- `busy`, `isLoading`, `pendingInput`, `error`: signals (boolean)
 - `sessionId`, `gitBranch`, `cwd`, `permissionMode`, `summary`,
-  `lastModifiedTime`, `fileSize`, `isExplicit`, `isRemote` — signals
-- `usageData` — signal `{totalTokens, totalCost, contextWindow,
+  `lastModifiedTime`, `fileSize`, `isExplicit`, `isRemote`: signals
+- `usageData`: signal `{totalTokens, totalCost, contextWindow,
   maxOutputTokens}`
-- `currentModelInfo`, `thinkingLevel`, `effortLevel`, `fastModeState`
-  — signals
+- `currentModelInfo`, `thinkingLevel`, `effortLevel`, `fastModeState`:
+  signals
 - `todos`, `permissionRequests`, `proactiveSuggestions`,
-  `settingsErrors` — signals (arrays)
+  `settingsErrors`: signals (arrays)
 
-### Preact signals everywhere — even fields that look like primitives
+### Preact signals everywhere, even fields that look like primitives
 
 All reactive state is `{value: T, peek(), subscribe(...)}`. To read:
 
@@ -727,26 +727,26 @@ mgr.sessions.peek()          // never subscribes
 ```
 
 Forgetting to deref gives you the signal object itself, which serializes
-to nonsense like `{$$typeof, type, props, ref}` — looks like a React
+to nonsense like `{$$typeof, type, props, ref}`: looks like a React
 element, isn't.
 
-**The equality trap.** Even fields that LOOK like primitives — `sessionId`,
-`gitBranch`, `cwd`, etc. — are signal-wrapped on each session entry. Strict
+**The equality trap.** Even fields that LOOK like primitives (`sessionId`,
+`gitBranch`, `cwd`, etc.) are signal-wrapped on each session entry. Strict
 equality against a string ALWAYS fails:
 
 ```js
 const s = mgr.sessions.value[0];
 typeof s.sessionId                              // "object", NOT "string"
 s.sessionId.constructor.name                    // "$3" (Preact signal)
-s.sessionId === "61974011-6e11-..."             // false — signal !== string
-String(s.sessionId) === "61974011-6e11-..."     // true — toString derefs
-s.sessionId.peek() === "61974011-6e11-..."      // true — explicit deref
+s.sessionId === "61974011-6e11-..."             // false: signal !== string
+String(s.sessionId) === "61974011-6e11-..."     // true: toString derefs
+s.sessionId.peek() === "61974011-6e11-..."      // true: explicit deref
 ```
 
 So `mgr.sessions.value.find(s => s.sessionId === sid)` always returns
 `undefined` even when sid IS in the list. Use `.find(s => s.sessionId.peek() === sid)`
 or `.find(s => String(s.sessionId) === sid)`. Index access (`arr[0]`)
-works because no comparison is involved — but if you find yourself
+works because no comparison is involved; but if you find yourself
 "working around" `.find` returning undefined, the actual fix is to
 deref the signal in the predicate.
 
@@ -765,7 +765,7 @@ Two singleton-like structures hold the per-window session state in
 Mutators include `updateSessionState`, `setActivePanel`,
 `broadcastSessionStates`.
 
-- `this.sessionStates: Map<sessionId, {sessionId, state, title}>` —
+- `this.sessionStates: Map<sessionId, {sessionId, state, title}>`:
   the title cache. **Patch F's target.** `updateSessionState(V, K, B)`
   is the mutator (`V`=sessionId, `K`=state, `B`=title); the
   `/*pfg-v1.4*/` signature is just upstream of it. Pencil rename in
@@ -773,24 +773,24 @@ Mutators include `updateSessionState`, `setActivePanel`,
   `sessionPanels[sid].title` but the `sessionStates` entry's title
   wasn't refreshed, so on session-switch the broadcast resent the stale
   title and the sidebar flipped back.
-- `this.sessionPanels: Map<sessionId, WebviewPanel>` — VS Code
+- `this.sessionPanels: Map<sessionId, WebviewPanel>`: VS Code
   WebviewPanel objects, one per open chat panel. `panel.title` is
   mutated alongside `sessionStates` on rename.
-- `this.activeSessionId: string` — currently focused session.
-- `this.allComms: Set<Comm>` — all live comm instances; iterated for
+- `this.activeSessionId: string`: currently focused session.
+- `this.allComms: Set<Comm>`: all live comm instances; iterated for
   broadcasts.
-- `this.webviews: Map` — comm → webview lookup.
+- `this.webviews: Map`: comm to webview lookup.
 
 ### Session-content manager
 
 Populated by `Wz4` (the loader path).
 
-- `this.sessionMessages: Map<sessionId, Set<uuid>>` — uuid set per
+- `this.sessionMessages: Map<sessionId, Set<uuid>>`: uuid set per
   session. Presence in this Map is the "session is loaded" check.
-- `this.messages: Map<uuid, msg>` — flat uuid → message map across all
+- `this.messages: Map<uuid, msg>`: flat uuid to message map across all
   loaded sessions.
-- `this.summaries: Map<uuid, summary>` — compact summaries.
-- `this.customTitles: Map<sessionId, string>` — title from
+- `this.summaries: Map<uuid, summary>`: compact summaries.
+- `this.customTitles: Map<sessionId, string>`: title from
   `custom-title` JSONL entries (Patch A writes these).
 - `this.fileHistorySnapshots: Map<messageId, snapshot>`.
 - `this.loadedSessions: Set<sessionId>`.
@@ -817,7 +817,7 @@ globalThis.__mgr.broadcastSessionStates();                       // re-send
 ```
 
 (There's no need to "clear a cache" to force a fresh `Wz4` invocation
-on `get_session_request` — empirically verified, every RPC invokes
+on `get_session_request`: empirically verified, every RPC invokes
 `Wz4` directly through the `Qo` indirection. No intermediate cache
 exists between `getSession` and `Wz4`.)
 
@@ -826,14 +826,14 @@ exists between `getSession` and `Wz4`.)
 ## Field shapes across the layers
 
 Different layers carry different shapes. Mismatched-key lookups return
-`undefined` silently — common waste pattern.
+`undefined` silently; common waste pattern.
 
 | Layer | Convention | Sample fields |
 |---|---|---|
 | Message TYPES (everywhere) | snake_case | `get_session_request`, `compact_boundary`, `tool_use`, `tool_result` |
 | JSONL on disk | camelCase, **rich** | `parentUuid`, `logicalParentUuid`, `sessionId`, `compactMetadata`, `isMeta`, `isSidechain`, `cwd`, `gitBranch`, … |
 | `Yz4` parse / `Wz4` internals / V passed to Ez4 | camelCase, rich | parse pass-through |
-| `bz4` transformer (last step in `dl`) | snake_case, **lossy** | only emits `{type, uuid, session_id, message, parent_tool_use_id:null, timestamp}` — drops `parentUuid`, `logicalParentUuid`, `compactMetadata`, etc. |
+| `bz4` transformer (last step in `dl`) | snake_case, **lossy** | only emits `{type, uuid, session_id, message, parent_tool_use_id:null, timestamp}`; drops `parentUuid`, `logicalParentUuid`, `compactMetadata`, etc. |
 | Wire response (`get_session_response.messages`) | snake_case, lossy | same as bz4 output |
 | Assembler output `s.messages.peek()` (what React renders) | camelCase, **re-shaped** | `type, content, uuid, timestamp, parentToolUseId, betaMessageId, isSynthetic, compactMetadata, compactSummary` |
 | claude subprocess stream events | snake_case | mirrors Anthropic API |
@@ -865,7 +865,7 @@ function bz4(V){
 - BP at `Ez4` / `Wz4` → locals are camelCase, full JSONL shape (rich).
 - BP just AFTER `dl` returns → snake_case, lossy. Wire shape.
 - `__mgr.sessions.value[N].messages.peek()` from the webview → camelCase,
-  ASSEMBLER shape. `sessionId` and `session_id` are BOTH absent —
+  ASSEMBLER shape. `sessionId` and `session_id` are BOTH absent;
   session is implicit (the messages array hangs off the session entry).
 - JSONL on disk via `require('fs').readFileSync` → camelCase, full
   JSONL shape (raw).
@@ -873,12 +873,12 @@ function bz4(V){
 Common gotchas:
 
 - Looking for `sessionId` or `session_id` on
-  `__mgr...messages.peek()[N]` — neither is there. Owner-of-array, not
+  `__mgr...messages.peek()[N]`: neither is there. Owner-of-array, not
   field-on-element.
-- Looking for `parentUuid` / `logicalParentUuid` on the React side —
+- Looking for `parentUuid` / `logicalParentUuid` on the React side:
   gone. The assembler discards them. To debug compaction-chain
   stitching, you MUST read at Ez4 (or earlier), not at the React side.
-- Looking for `parent_tool_use_id` on the React side — renamed to
+- Looking for `parent_tool_use_id` on the React side: renamed to
   `parentToolUseId` by the assembler.
 
 ---
@@ -901,7 +901,7 @@ component's onClick handlers; the message goes through normal channels.
 ```js
 // In the inner active-frame's main world (use eval_in_inner_frame.mjs)
 const btn = document.querySelector('[aria-label="Rename"]');
-btn?.click();   // simple synthetic — works for most React onClick
+btn?.click();   // simple synthetic; works for most React onClick
 // or fuller fidelity:
 btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
 ```
@@ -920,7 +920,7 @@ pipeline. Reaches Workbench commands like `workbench.action.reloadWindow`,
 
 ```js
 // Run against a top-level workbench page (NOT a webview iframe).
-// Modifiers bitfield: Alt=1, Ctrl=2, Meta=4, Shift=8 — OR them.
+// Modifiers bitfield: Alt=1, Ctrl=2, Meta=4, Shift=8; OR them.
 // Ctrl+Shift+P opens command palette:
 await call('Input.dispatchKeyEvent', { type: 'rawKeyDown', modifiers: 10,
   key: 'P', code: 'KeyP', keyCode: 80, windowsVirtualKeyCode: 80 });
@@ -930,7 +930,7 @@ await call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 10,
 ```
 
 Verified: opens the command palette ("Type the name of a command to
-run.") and ESC closes it. Note: only works on real workbench pages —
+run.") and ESC closes it. Note: only works on real workbench pages;
 the Antigravity Launchpad page has no command palette.
 
 ### 4. Direct method calls on the manager singleton
@@ -943,7 +943,7 @@ globalThis.__mgr.broadcastSessionStates();                       // re-send to a
 ```
 
 Useful for fine-grained state tweaks. (To force a fresh load you don't
-need to clear any cache — `get_session_request` already invokes `Wz4`
+need to clear any cache; `get_session_request` already invokes `Wz4`
 every call, verified empirically.)
 
 ### 5. The nuclear option
@@ -981,7 +981,7 @@ ps -eo pid,ppid,cmd | grep 'claude --resume'
 - stdio between exthost ↔ subprocess uses JSON-stream protocol
   (`--output-format stream-json --input-format stream-json`).
 - The subprocess does the LIVE chat (API streaming, tool use). Reading
-  the JSONL file for *display* in the panel is exthost-side via `Wz4` —
+  the JSONL file for *display* in the panel is exthost-side via `Wz4`;
   the subprocess isn't involved in sidebar-list or fork-rewind UI
   rendering.
 - Killing the subprocess: behavior unclear. Don't.
@@ -1008,11 +1008,11 @@ Verified empirically across multiple modes:
 - **CJS export**: patched `il4` (= `extension.exports.openTabs`) to set
   `globalThis.__patched_il4 = Date.now()`. Same-connection
   `getScriptSource` showed the marker present. Called
-  `extension.exports.openTabs()` via Runtime.evaluate — `tabsCount`
+  `extension.exports.openTabs()` via Runtime.evaluate: `tabsCount`
   returned correctly (function ran), but the marker stayed `undefined`.
 - **Module-internal name resolution**: patched `Ez4` (called by name
   from `dl` inside the same IIFE) to set `globalThis.__ez4_marker++`.
-  Triggered Wz4 via webview RPC (we know this calls Ez4 — separately
+  Triggered Wz4 via webview RPC (we know this calls Ez4, separately
   verified by BP). Marker stayed at 0.
 - **`allowTopFrameEditing: true` doesn't help.** Re-tested both modes
   with the flag set; same result. The flag governs editing the
@@ -1060,7 +1060,7 @@ for everything that ran.
 ### `scriptId` is per CDP connection
 
 A `scriptId` you got from a prior CDP connection is invalid in a new
-connection — even though the underlying script is the same. Re-fetch
+connection, even though the underlying script is the same. Re-fetch
 every time. Caching `sid="368"` and reusing it after a new connection
 silently sets BPs against a non-existent script and they never fire.
 
@@ -1068,7 +1068,7 @@ silently sets BPs against a non-existent script and they never fire.
 
 A BP without a condition pauses the exthost on hit. If the exthost is
 yours (mine = target) you freeze yourself. If it's a target exthost,
-you freeze user activity in that window — tabs, sidebar, everything.
+you freeze user activity in that window: tabs, sidebar, everything.
 
 Use side-effect-condition BPs that return `false` (Recipe 1) for
 data capture. Reserve pure-pause BPs for cases where you're attaching
@@ -1085,7 +1085,7 @@ a logger the bundle exposes (e.g. `Yc.log`).
 
 Creates a sandbox with NO access to the page's globals or React state.
 If you eval and see no `__reactContainer$` keys, no `acquireVsCodeApi`,
-no React app — you're in an isolated world. Pick the **main-world**
+no React app: you're in an isolated world. Pick the **main-world**
 context: origin matches the page, name is empty (the inner-frame helper
 script enforces this).
 
@@ -1099,7 +1099,7 @@ synchronous `require('fs')` form via `includeCommandLineAPI: true`.
 
 `/json/list` shows the OUTER iframe. The actual React app is in a
 nested `<iframe id="active-frame">`. The inner frame's URL also ends
-in `index.html` (not `fake.html` as the outer's `src` suggests) —
+in `index.html` (not `fake.html` as the outer's `src` suggests);
 trust the frame `name`, not the URL.
 
 ### Top-level `return` rejected in `Runtime.evaluate`
@@ -1114,7 +1114,7 @@ Wrap the script in an IIFE: `(function(){ ...; return ...; })()`.
 
 `signal.value` and `signal.peek()` return the unwrapped value. The
 signal object itself (a Preact internal) serializes to
-`{$$typeof, type, props, ref, ...}` — looks like a React element, isn't.
+`{$$typeof, type, props, ref, ...}`: looks like a React element, isn't.
 Always deref before serializing.
 
 ### `extension.exports` is sparse
@@ -1127,7 +1127,7 @@ BP-stash trick.
 
 `Developer: Reload Window` (or `Restart Extension Host`) restarts
 the per-window exthost; ephemeral ports reshuffle. `9229` itself
-can change hands — if the original first-spawned window closes and
+can change hands: if the original first-spawned window closes and
 another spawns, the new one captures `9229`. Re-identify `mine` and
 `target` after any window-state change.
 
@@ -1137,7 +1137,7 @@ If `ps -ef | grep inspect-extensions` returns ONE port (`9229`),
 that does NOT mean there's only one exthost. Each window gets its
 OWN exthost, but **only the first one to spawn captures the sticky
 `--inspect-extensions=9229` flag**. Subsequent exthosts get
-`--inspect=127.0.0.1:<ephemeral>` (e.g. `11277`, `45647`) — same
+`--inspect=127.0.0.1:<ephemeral>` (e.g. `11277`, `45647`); same
 process type (`utility-sub-type=node.mojom.NodeService`), different
 flag form.
 
@@ -1152,7 +1152,7 @@ Canonical enumeration:
 # All Antigravity exthost processes (one per window)
 ps -ef --no-headers | awk '$3==<antigravity_main_pid> && /node.mojom.NodeService/'
 
-# Their inspect ports — note the TWO forms
+# Their inspect ports; note the TWO forms
 for pid in $(ps -ef --no-headers | awk '/node.mojom.NodeService/ {print $2}'); do
   cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | \
     grep -oE -- '--inspect[a-zA-Z=:-]*[0-9.:]+' | head -1
@@ -1177,7 +1177,7 @@ or the slot is otherwise free). So a window that previously used
 Each `Developer: Reload Window` rebuilds the renderer's iframe
 targets from scratch. The CDP target IDs you cached from
 `/json/list` (e.g., `WS=ws://127.0.0.1:9222/devtools/page/<old-id>`)
-are dead the moment the window reloads — connecting to them just
+are dead the moment the window reloads; connecting to them just
 hangs.
 
 After every reload, **re-discover** the chat-panel iframe by walking
@@ -1192,7 +1192,7 @@ for t in json.load(sys.stdin):
 "
 ```
 
-The same applies to inner active-frame discovery — its frameId
+The same applies to inner active-frame discovery: its frameId
 inside the parent iframe also changes. The discovery walker
 inside `eval_in_inner_frame.mjs` re-fetches each call so it's
 naturally robust; bash scripts that cache the outer iframe ID
@@ -1208,7 +1208,7 @@ with no chat panel iframe yet.
 `fs.readFileSync('.../extension.js')` from an exthost CDP eval
 returns the file's CURRENT on-disk content. That's useful for
 checking what's *available*, but it does NOT tell you what code is
-actually *running* in the exthost — Node modules are loaded once
+actually *running* in the exthost: Node modules are loaded once
 at process start (or `require()`-time) and cached.
 
 To check what code is *actually loaded* (the in-memory module
@@ -1235,7 +1235,7 @@ JS
 ```
 
 Use this when you need to confirm "did my disk-edit actually get
-loaded by THIS exthost?" — particularly relevant when (a) you have
+loaded by THIS exthost?", particularly relevant when (a) you have
 multiple per-window exthosts and aren't sure which one serves the
 panel you're looking at, or (b) you ran disk-edit + Reload Window
 and want to verify the fresh exthost actually picked up the new
@@ -1243,7 +1243,7 @@ code (vs. some unexpected caching).
 
 Concrete failure mode this catches: I once spent ~15 minutes
 believing v1.5 K was running because `readFileSync` showed the new
-signature on disk and v1.5 markers in the source — but the exthost
+signature on disk and v1.5 markers in the source, but the exthost
 serving the chat panel I was probing had v1.4 in memory (cached
 from before my disk edit). `Debugger.getScriptSource` immediately
 disambiguates.
@@ -1252,7 +1252,7 @@ disambiguates.
 
 Using `Runtime.evaluate` to call `location.reload()` inside a
 vscode-webview's inner active-frame does NOT cleanly reload the
-webview — the iframe ends up navigating to
+webview; the iframe ends up navigating to
 `chrome-error://chromewebdata/` with an empty body. The webview
 content (React app, scripts, body) is GONE and doesn't recover until
 the window is reloaded. This is because vscode-webview's outer CSP
@@ -1275,7 +1275,7 @@ case study below uses it.
 ```
 
 CDP only allows `Page.reload` on top-level pages. The webview iframe
-inherits its lifecycle from its parent workbench page — reload that
+inherits its lifecycle from its parent workbench page; reload that
 instead (or use the refresh playbook's mechanism 3/5).
 
 ### Focus-lost-to-broken-iframe blocks command-palette typing
@@ -1292,13 +1292,13 @@ Cause: an iframe in the workbench (often a broken
 `location.reload()`) has captured focus. `document.activeElement`
 returns `IFRAME` instead of the palette `INPUT`, so the char events
 go to the iframe (where they're discarded). JS-side `i.focus()` on
-the palette input fails to take focus back — the iframe re-grabs it
+the palette input fails to take focus back; the iframe re-grabs it
 synchronously after the JS focus call returns.
 
 Recovery requires fixing the iframe state: close+reopen the offending
 panel via UI, or `Developer: Reload Window`. In a healthy workbench
 (no chrome-error iframes), command palette typing via
-`Input.dispatchKeyEvent` works fine — verified end-to-end.
+`Input.dispatchKeyEvent` works fine, verified end-to-end.
 
 Always verify the `document.activeElement` after opening the palette:
 
@@ -1317,8 +1317,8 @@ it to a fresh copy of `.bak` and confirming the result is byte-identical
 to the live patched file. **This proves the splice is deterministic; it
 does not prove the splice is correct.**
 
-If `.bak` itself isn't pristine — e.g., the patch was iteratively
-developed in place and `.bak` was captured *between* iterations — the
+If `.bak` itself isn't pristine (e.g., the patch was iteratively
+developed in place and `.bak` was captured *between* iterations), the
 splice synthesis only captures the diff between *the latest .bak state*
 and *the current live state*, missing transformations that were
 introduced by an earlier patch iteration and are now equally present
@@ -1341,7 +1341,7 @@ createElement(...)` statement and never executed.
 
 Mitigations:
 - **Treat `.bak` as the pristine pre-patch baseline, always.** Never
-  overwrite it once it exists — for end-users and maintainers alike.
+  overwrite it once it exists, for end-users and maintainers alike.
   This invariant makes `build-prebuilt.py`'s `live - .bak` diff
   always capture the full pristine→patched transformation, not an
   incremental hop.
@@ -1387,7 +1387,7 @@ sidebar list). But its JSONL file still exists on disk and the
 chain walker still loads it on demand.
 
 The hide-state lives in vscode's globalState, NOT workspaceState.
-Path varies by IDE — pick whichever you're patching:
+Path varies by IDE; pick whichever you're patching:
 
 | IDE         | globalState path                                              |
 |-------------|---------------------------------------------------------------|
@@ -1397,7 +1397,7 @@ Path varies by IDE — pick whichever you're patching:
 | VSCodium    | `~/.config/VSCodium/User/globalStorage/state.vscdb`           |
 
 ```sh
-# Auto-find via glob (picks first match — fine for single-IDE setups)
+# Auto-find via glob (picks first match, fine for single-IDE setups)
 GS_DB=$(ls ~/.config/*/User/globalStorage/state.vscdb 2>/dev/null | head -1)
 python3 -c "
 import sqlite3, json, sys
@@ -1435,7 +1435,7 @@ conn.outstandingRequests.clear();
 After clearing, fresh `sendRequest` calls work normally.
 
 Prevention: kill cleanly with `pkill -f eval_in_inner_frame.mjs`
-before retrying — finalize-on-exit cancels the request.
+before retrying; finalize-on-exit cancels the request.
 Alternatively wrap `eval_in_inner_frame.mjs` invocations in
 `timeout <N>` to bound their lifetime.
 
@@ -1466,7 +1466,7 @@ you intended (e.g. "Developer: Reload Window..."), not a filename.
 ### Body click before Ctrl+Shift+P when iframe focus is suspect
 
 If a webview iframe is focus-trapped (especially a broken
-chrome-error one — see earlier gotcha), `Ctrl+Shift+P` may open the
+chrome-error one; see earlier gotcha), `Ctrl+Shift+P` may open the
 palette but typing won't reach the input (focus stays on the
 iframe). Body-area mouse click first to take focus from the iframe:
 
@@ -1485,14 +1485,14 @@ and needs explicit recovery (close the panel via UI, or
 For testing K's edge cases (v1.5+ ambiguity warning + reconstruction-
 failed marker), the JSONL filesystem is the test fixture:
 
-**Test #1 — induce sibling-backfill non-uniqueness** (verifies the
+**Test #1, induce sibling-backfill non-uniqueness** (verifies the
 `AMBIGUOUS RECONSTRUCTION` warning fires on the bookend + relevant
 seam markers):
 
 ```sh
 PROJ=~/.claude/projects/-<workspace>
 # Pick a session you know is the K1-backfill source for the target.
-# Clone it to a new uuid filename — same content, structurally
+# Clone it to a new uuid filename; same content, structurally
 # qualifies for backfill, makes count > 1.
 cp $PROJ/<source-sid>.jsonl $PROJ/<source-sid>-clone-aaaa-bbbb-cccccccccccc.jsonl
 # Reload Window via palette → re-fetch chain walker for target session
@@ -1500,7 +1500,7 @@ cp $PROJ/<source-sid>.jsonl $PROJ/<source-sid>-clone-aaaa-bbbb-cccccccccccc.json
 # Cleanup: rm the clone
 ```
 
-**Test #5 — induce reconstruction failure** (verifies the
+**Test #5, induce reconstruction failure** (verifies the
 `pfgk-broken-` marker variant fires with critical styling):
 
 ```sh
@@ -1558,9 +1558,9 @@ its own preconditions (needs an in-file predecessor in `_parsed`
 to anchor the seam to). For a session whose chain begins with a
 phantom-lpu compaction boundary at index 0 of `_parsed` after J's
 prepend (i.e., the boundary is at the very start), K2 has nothing
-to anchor to and `continue`s — `_kFired` stays false. The bookend/
+to anchor to and `continue`s; `_kFired` stays false. The bookend/
 broken/bridge block is then skipped entirely and the rendered chain
-shows **zero markers despite having phantom-lpu data loss** — silent
+shows **zero markers despite having phantom-lpu data loss**: silent
 failure, exactly the bug the broken marker was supposed to prevent.
 
 Fix: introduce a separate `_kAttempted` flag set whenever K detects
@@ -1577,12 +1577,12 @@ detection flag is what user-facing fallback markers gate on.
 ### Marker informativeness: surface concrete data, not prose
 
 When designing user-facing diagnostic markers (bookend, seam, bridge,
-broken — or any analogous synthesized message), include the concrete
+broken, or any analogous synthesized message), include the concrete
 data the marker is acting on. Generic prose ("a compaction event
 happened here") is far less useful than the specific identifiers
 involved:
 
-- **Phantom uuid** that was unresolvable (full uuid, not truncated —
+- **Phantom uuid** that was unresolvable (full uuid, not truncated;
   users may grep for it across files).
 - **Sibling filename** that K1 backfilled from (so user can correlate
   with their own session list / fork structure).
@@ -1591,7 +1591,7 @@ involved:
 - **Counts** (number of qualifying siblings, msgs prepended,
   phantoms attempted vs backfilled).
 - **Wall-clock timing** of K stages (parse / J prepend / K1 / K2-3-
-  bookend) — surfaces perf hotspots and helps the user judge whether
+  bookend): surfaces perf hotspots and helps the user judge whether
   slow chain rendering is K's fault or downstream React's.
 
 Don't truncate uuids in marker text just for display compactness;
@@ -1659,9 +1659,9 @@ structural cause empirically.
 
 User opens two chat panels in the same Antigravity window:
 
-- Session **A** (`0727164e-...`) — Patch K's seam ghost renders
+- Session **A** (`0727164e-...`): Patch K's seam ghost renders
   correctly in the panel.
-- Session **B** (`61974011-...`) — Patch K's seam ghost is absent
+- Session **B** (`61974011-...`): Patch K's seam ghost is absent
   from the panel.
 
 Both sessions have the same patches loaded (signature `/*pfg-v1.4*/`
@@ -1677,7 +1677,7 @@ node /tmp/cdp-eval.mjs "$WS_TARGET" '(function(){
   return JSON.stringify({sig: ["/*pfg-v1.4*/"].filter(t=>s.includes(t)),
                          hasK: s.includes("Orphaned compaction pointer")});
 })()'
-// {"sig":["/*pfg-v1.4*/"], "hasK":true} — patches are live
+// {"sig":["/*pfg-v1.4*/"], "hasK":true}: patches are live
 ```
 
 ### Step 2: simulate Ez4 on the broken session's JSONL outside the running extension
@@ -1691,7 +1691,7 @@ against Session B's JSONL on disk:
 ```
 
 Result: simulator reports K should produce 1 seam ghost in Session B.
-So K is firing logically — but the rendered messages don't contain
+So K is firing logically, but the rendered messages don't contain
 it. Discrepancy is downstream of K.
 
 ### Step 3: BP at Ez4 entry and capture all locals
@@ -1758,12 +1758,12 @@ wait
 
 ### Diagnosis (empirically confirmed)
 
-- `pfgkInV: ["pfgk-seam-32ff69a5"]` — the seam IS in the input. K
+- `pfgkInV: ["pfgk-seam-32ff69a5"]`: the seam IS in the input. K
   inserted it correctly.
 - `U` has 4 leaf-walk tips, INCLUDING `pfgk-seam-32` at idx 2375.
-- `Zuuid: 9fc43c52-903` at idx **5059** — Ez4 picks Z by `max(B.get(t.uuid))`;
+- `Zuuid: 9fc43c52-903` at idx **5059**: Ez4 picks Z by `max(B.get(t.uuid))`;
   the chain-B leaf at 5059 wins over the seam at 2375.
-- `pfgkInH: []` — the rendered chain (walked back from Z at 5059)
+- `pfgkInH: []`: the rendered chain (walked back from Z at 5059)
   never crosses the seam. Seam is unreachable.
 
 The bug isn't in K's insertion. It's in Ez4's single-leaf max-by-index
@@ -1782,7 +1782,7 @@ orphan entirely.
 
 Once the empirical diagnosis was nailed, the fix was straightforward:
 detect the unreachable scenario at K-time (signal: a seam was planted
-but no bookend was — bookend fails to fire when the chain root is the
+but no bookend was; bookend fails to fire when the chain root is the
 sibling-file content Patch J prepended), and synthesize a **third
 ghost type**, `pfgk-orphannotice-…`, on the LIVE chain. Insert it
 between the cross-file-resolved boundary and that boundary's first
@@ -1813,7 +1813,7 @@ Each recipe in this doc was used:
 Without the BP-with-side-effect-condition recipe this would have been
 hard to confirm empirically; `setScriptSource` injection of the same
 trace failed silently, per the gotcha. The mechanic generalises beyond
-Patch K — it's the answer for any "rendered messages don't match
+Patch K. It's the answer for any "rendered messages don't match
 on-disk JSONL" question.
 
 ---
@@ -1846,7 +1846,7 @@ node /tmp/cdp-eval.mjs "$WS" '(function(){
   return JSON.stringify({sigs: ["/*pfg-v1.4*/"].filter(t=>s.includes(t)),
                          hasK: s.includes("_kFired"), hasBridge: s.includes("pfgk-bridge-")});
 })()'
-// {"sigs":["/*pfg-v1.4*/"], "hasK":true, "hasBridge":true} — extension.js patch is live.
+// {"sigs":["/*pfg-v1.4*/"], "hasK":true, "hasBridge":true}: extension.js patch is live.
 ```
 
 ### Step 2: probe the rendered DOM in the chat panel
@@ -1866,7 +1866,7 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" 'JSON.stringify({
 ```
 
 The K message text is in the DOM (`PATCH K · Conversation origin...`)
-but `pfgkAlert: 0` — the wrap div isn't being rendered. The K bookend
+but `pfgkAlert: 0`: the wrap div isn't being rendered. The K bookend
 is showing as a plain user message bubble.
 
 ### Step 3: walk DOM up from the K text node to identify where the wrap *should* be
@@ -1883,7 +1883,7 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" '(function(){
 })()'
 ```
 
-Result shows `SPAN → DIV.content_xGDvVg → DIV.contentWrapper_xGDvVg → DIV.userMessage_07S1Yg → ...` — the K message is inside a normal
+Result shows `SPAN → DIV.content_xGDvVg → DIV.contentWrapper_xGDvVg → DIV.userMessage_07S1Yg → ...`: the K message is inside a normal
 `userMessage` bubble, with NO `pfgkAlert` parent. The wrap React node
 that's supposed to wrap the user-message createElement isn't there.
 
@@ -1914,7 +1914,7 @@ The `2.1.126` prebuilt's K webview splice OLD anchor was
 `G,setInputError:q,onCreateNewSession:z})}if(Z.type==="assistant"...`
 (80 chars). The corresponding NEW string changed `})}` to
 `});<wrap code>; return _ws}`. For this to produce a wrapped result,
-the createElement call must NOT be preceded by `return ` — instead
+the createElement call must NOT be preceded by `return `; instead
 preceded by `let _ws=`.
 
 **In `2.1.126`**, the patch was developed iteratively (v1.2 → v1.3 → v1.4).
@@ -1924,11 +1924,11 @@ That transformation was equally present in `.bak` (post-iteration) and
 live (post-iteration), so `build-prebuilt.py`'s diff didn't capture it.
 The synthesized splice covered only the wrap-internal v1.3→v1.4 changes.
 Byte-stability passed because re-applying the splice to that `.bak`
-reproduces live exactly — but the .bak wasn't pristine.
+reproduces live exactly, but the .bak wasn't pristine.
 
 **In `2.1.132`** (fresh install, `.bak` IS pristine `return createElement(...)`),
 the splice's grep anchor matched, `node --check` passed, byte-stability
-passed — but the result was dead code.
+passed, but the result was dead code.
 
 ### Step 6: fix and re-synthesize
 
@@ -1946,9 +1946,9 @@ After applying, `build-prebuilt.py` synthesis now captures 4
 ### Step 7: reload via mechanism 3 and verify in DOM
 
 This is the recovery + verify path. The maintainer first improvised
-with `location.reload()` on the iframe (DON'T — see gotcha) which left
+with `location.reload()` on the iframe (DON'T; see gotcha) which left
 the iframe in `chrome-error://chromewebdata/`. Then `Page.reload` on
-the iframe target (DON'T — rejected as not top-level). Then command
+the iframe target (DON'T; rejected as not top-level). Then command
 palette typing failed because focus was held by the broken iframe.
 
 The recovery path that actually works:
@@ -1965,7 +1965,7 @@ await call('Input.dispatchMouseEvent', {type:'mouseReleased', x:5, y:5, button:'
 await call('Input.dispatchKeyEvent', {type:'rawKeyDown', modifiers:10, key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
 await call('Input.dispatchKeyEvent', {type:'keyUp', modifiers:10, key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
 
-// 4. CRITICAL: do NOT clear the input — clearing drops the ">" prefix and
+// 4. CRITICAL: do NOT clear the input. Clearing drops the ">" prefix and
 //    puts the palette into file-picker mode, where Enter opens a file
 //    instead of running a command. Type APPEND-style.
 
@@ -1992,7 +1992,7 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT_NEW" 'JSON.stringify({
   seam: document.querySelectorAll("[data-pfgk-role=\"seam\"]").length,
   bridge: document.querySelectorAll("[data-pfgk-role=\"bridge\"]").length
 })'
-// {"pfgkAlert":4,"bookend":1,"seam":2,"bridge":1} — fix verified end-to-end.
+// {"pfgkAlert":4,"bookend":1,"seam":2,"bridge":1}: fix verified end-to-end.
 ```
 
 ### What this case study demonstrates
@@ -2000,7 +2000,7 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT_NEW" 'JSON.stringify({
 - **Byte-stability ≠ correctness**. The check validates determinism
   against the .bak you have, not behavioral correctness against a
   pristine .bak. (Gotcha.)
-- **`.bak` is the pristine pre-patch baseline — never overwrite it.**
+- **`.bak` is the pristine pre-patch baseline; never overwrite it.**
   Per-patch checkpoints are `.patchX.bak` (= settled state of patch
   X), named after the patch they contain rather than the next patch
   in line. This invariant makes the diff-based prebuilt synthesis

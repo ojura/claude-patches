@@ -11,7 +11,7 @@ corresponding upstream issue on
 this repo is where the *workaround* lives until upstream fixes ship.
 
 The patchset signature `/*pfg-vN*/` stands for **Persistent Forking
-Glitches** — backronymed from the original `patch-fg` script (Patches
+Glitches**, backronymed from the original `patch-fg` script (Patches
 F + G); the rest just kept getting added.
 
 ## What's patched
@@ -25,15 +25,15 @@ F + G); the rest just kept getting added.
 | **E** | Title resolver puts `firstPrompt` ahead of `lastPrompt` | Session title drifts to "whatever the user most recently typed" | [#32150](https://github.com/anthropics/claude-code/issues/32150) |
 | **F** | Session rename propagation through `sessionStates` Map | Pencil rename flips back to old title on session switch | [#53942](https://github.com/anthropics/claude-code/issues/53942) |
 | **G** | Forked session enters sidebar list immediately after fork | New fork doesn't appear in sidebar until first message is sent | [#53942 (follow-up)](https://github.com/anthropics/claude-code/issues/53942) |
-| **H** | Bypass the 5 MB precompact-skip optimization in the loader | Sessions > 5 MB only show post-most-recent-compactSummary content; pre-boundary scrollback / fork picker / rewind invisible | [#55700](https://github.com/anthropics/claude-code/issues/55700) |
+| **H** | Bypass the 5 MB precompact-skip optimization in the loader | Sessions > 5 MB only show post-most-recent-compactSummary content; scrollback, fork picker, and rewind don't show anything before the most recent compact boundary | [#55700](https://github.com/anthropics/claude-code/issues/55700) |
 | **I** | Neutralize the webview's 500-message render cap | Sessions with > 600 messages silently truncate to last 500 in the chat panel; no UI feedback | [#55701](https://github.com/anthropics/claude-code/issues/55701) |
 | **J** | Resolve cross-file `logicalParentUuid` at session load (load sibling JSONLs to bridge fork boundaries) | Forks of compacted sessions can't scroll back into the source session's history; chain walker stops at the cross-file stitch | [#48937 (cross-file)](https://github.com/anthropics/claude-code/issues/48937) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
-| **K** | `lost+found`-style read-side recovery for sessions with dangling `logicalParentUuid` — synthesize visible seam + bookend ghosts that reattach the orphaned in-file predecessor | Sessions where the compactor's lpu was never persisted (write-side bug at `compact.ts:598`) silently truncate the chain at the boundary; user thinks pre-compact work was lost | [#55818](https://github.com/anthropics/claude-code/issues/55818) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
+| **K** | `lost+found`-style read-side recovery for sessions with dangling `logicalParentUuid`: add visible markers in the chat that recover lost earlier messages from the same file | Sessions where the compactor's lpu was never persisted (write-side bug at `compact.ts:598`) silently truncate the chain at the boundary; user thinks pre-compact work was lost | [#55818](https://github.com/anthropics/claude-code/issues/55818) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
 
 See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 (why, locate, patch, verify, test). For *how* to introspect the running
-extension via CDP — set conditional breakpoints, walk the React fiber
-tree, dispatch RPCs from outside, etc. — see
+extension via CDP (set conditional breakpoints, walk the React fiber
+tree, dispatch RPCs from outside, etc.), see
 [`docs/debugging.md`](docs/debugging.md). The Patch K case study at the
 end of that doc walks through using all the recipes end-to-end.
 
@@ -45,10 +45,10 @@ claude-patches/
 │   ├── SKILL.md             # Anthropic-style skill instructions for Claude Code,
 │   │                        # used by the patch-claude skill at ~/.claude/skills/
 │   └── apply-patch-fg.py    # version-tolerant apply script for Patches F and G;
-│                            # discovers bundle-globals (storage class, fs/path/
-│                            # projectRoot resolver) by structural anchors. Used
-│                            # as a fallback when no prebuilt exists for the
-│                            # current extension version.
+│                            # finds the globals it needs in the bundle (storage
+│                            # class, fs/path/projectRoot resolver) by code shape,
+│                            # not by name. Used as a fallback when no prebuilt
+│                            # exists for the current extension version.
 ├── prebuilt/
 │   ├── <VER>/
 │   │   └── apply.py         # version-pinned, self-contained apply script
@@ -65,9 +65,9 @@ claude-patches/
 ├── docs/
 │   ├── patches.md           # detailed per-patch documentation
 │   └── debugging.md         # CDP introspection reference for the bundled
-│                            # extension — port roles, BP-with-condition,
+│                            # extension: port roles, BP-with-condition,
 │                            # fiber walk, RPC dispatch, gotchas, case study
-├── util/                    # maintainer tools — see MAINTAINER.md
+├── util/                    # maintainer tools; see MAINTAINER.md
 ├── MAINTAINER.md            # how to synthesize and push a new prebuilt
 └── README.md                # this file
 ```
@@ -90,7 +90,7 @@ applies the patches, end to end. The skill:
 - **Self-updates** on each invocation (fast-forwards your local clone
   from `origin/main`; aborts cleanly if you have uncommitted local
   changes or non-FF state, instead of silently merging).
-- **Auto-detects which extension install to patch** — when invoked
+- **Auto-detects which extension install to patch**: when invoked
   from inside an IDE-hosted Claude Code session, `CLAUDE_CODE_EXECPATH`
   points directly at the running install (works regardless of which
   IDE: VS Code, Antigravity, Cursor, VSCodium, etc.). Falls back to
@@ -107,7 +107,7 @@ and you're done.
 
 The symlink layout means `git pull` in `~/claude-patches` updates the
 skill in-place. Multi-machine: clone the repo on each box and symlink
-identically — the self-update step keeps them all in sync.
+identically. The self-update step keeps them all in sync.
 
 ### Manual application (no Claude Code installed)
 
@@ -167,7 +167,7 @@ patches A–K locally first, then
 `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>` synthesizes
 and byte-stability-validates a prebuilt apply script from the diff.
 
-End-users never need `util/` — the prebuilt `apply.py` is
+End-users never need `util/`: the prebuilt `apply.py` is
 self-contained (Python stdlib only) and curl-installable:
 
 ```sh

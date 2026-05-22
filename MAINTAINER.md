@@ -38,7 +38,7 @@ patched live extension dir          maintainer tool             new prebuilt
    extension dir has the patched `extension.js`, `webview/index.js`,
    `webview/index.css` plus pristine `*.bak` backups of each.
 
-   Verify the patches actually work — reload VSCode, do a sidebar
+   Verify the patches actually work: reload VSCode, do a sidebar
    pencil rename, switch sessions, fork a session, open a session
    with a known dangling-lpu boundary (Patch K should render the seam
    + bookend ghosts). The prebuilt will be byte-identical to whatever
@@ -82,7 +82,7 @@ patched live extension dir          maintainer tool             new prebuilt
 - `prebuilt/<VER>/apply.py` is ~24KB at v1.5 (was ~22KB at v1.4,
   ~17KB pre-K). Trends upward as patches accumulate. If it's huge
   (>50KB) something drifted (probably a non-deterministic field
-  like a timestamp or random UUID got captured into a splice —
+  like a timestamp or random UUID got captured into a splice;
   those should never be in diff regions).
 - The splice count is roughly 14 in `extension.js`, 3–4 in
   `webview/index.js`, 1 in `webview/index.css` (~18–19 total at v1.4).
@@ -91,13 +91,13 @@ patched live extension dir          maintainer tool             new prebuilt
   in the new minified output (observed: 19 in 2.1.126, 18 in 2.1.132,
   no functional difference). A *large* count change (e.g. 14 → 7 in
   `extension.js`) means the bundle restructured or the patches applied
-  wrong — investigate before pushing. The byte-stability check is the
+  wrong; investigate before pushing. The byte-stability check is the
   authoritative correctness signal.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
   say `Already patched (signature <SIG> present). Nothing to do.`
   where `<SIG>` matches the output of `python3 version.py`. If it
-  tries to apply, your live install isn't patched correctly — back
+  tries to apply, your live install isn't patched correctly. Back
   out before pushing.
 
 ## Bumping the patchset version
@@ -126,7 +126,7 @@ that working state while migrating the on-disk signature.
    `prebuilt/archive/vOLD/<VER>/apply.py`. This is critical: a stale
    prebuilt left in `prebuilt/<VER>/` will be fetched by the skill,
    detect its own old signature as "Already patched", and exit with a
-   false-positive `PATCHES_APPLIED` — the user never gets the new
+   false-positive `PATCHES_APPLIED`, and the user never gets the new
    patches. Archive layout: `prebuilt/archive/v1.6/2.1.139/apply.py`.
 
 4. **Synthesize the new prebuilt(s).** For every extension version you
@@ -134,13 +134,13 @@ that working state while migrating the on-disk signature.
    This captures the new signature into `prebuilt/<VER>/apply.py` and
    byte-validates against the live patched files. If you can't
    synthesize for a version you don't have installed, just archive it
-   (Step 3) — the skill will fall through to manual application for
+   (Step 3). The skill will fall through to manual application for
    those users until someone publishes a prebuilt.
 
 5. **Add a CHANGELOG entry.** `CHANGELOG.md` is a per-version
    historical log. Newest first; describe what changed and why.
    Critically, `CHANGELOG.md` is *deliberately excluded* from the
-   sync allowlist (Step 6) — its `pfg-vN` mentions must stay frozen
+   sync allowlist (Step 6): its `pfg-vN` mentions must stay frozen
    to the version they describe.
 
 6. **Stage everything**: `git add -A`. Doing this *before* sync makes
@@ -150,7 +150,7 @@ that working state while migrating the on-disk signature.
    `python3 util/sync-version-mentions.py`. Rewrites `pfg-vX[.Y]`
    mentions in `README.md` (the only file in `SYNC_TARGETS`).
    Everything else either resolves the version dynamically
-   (SKILL.md, MAINTAINER.md, the Python consumers — all reach into
+   (SKILL.md, MAINTAINER.md, and the Python consumers all reach into
    `version.py`) or is deliberately frozen (`CHANGELOG.md`,
    `docs/debugging.md`, `prebuilt/archive/*`). The script exists for
    the one file where a literal version genuinely belongs in the
@@ -170,7 +170,7 @@ that working state while migrating the on-disk signature.
 End-users running the new prebuilt against an older-version-patched
 extension will get: *"Stale patchset (file has vX, current is vY);
 restoring … from .bak"*. The `.bak` from their original run is the
-pre-patch baseline — reusable as the restore point indefinitely
+pre-patch baseline, reusable as the restore point indefinitely
 (until the extension itself updates).
 
 This is why the comprehensive prebuilt covers A–K in one script: a
@@ -201,10 +201,10 @@ Consumers:
   dynamically: bash blocks invoke `python3 "$REPO_ROOT/version.py"`
   inline; prose uses abstract language ("the patchset signature").
   SKILL.md is the *holder* of the SSOT line, and MAINTAINER.md has
-  the same audience-and-currency profile (internal, always read at
-  HEAD), so neither benefits from a hardcoded version. Net effect:
+  the same audience and is always read at HEAD, so neither benefits
+  from a hardcoded version. Net effect:
   both are authoritative top-to-bottom and *deliberately not* in
-  `SYNC_TARGETS` — only `README.md` is, because that's the public-
+  `SYNC_TARGETS`. Only `README.md` is, because that's the public-
   facing file where a literal version earns its keep.
 
 Drift mode that motivated this design: bumping required editing three
@@ -212,7 +212,7 @@ places (apply-patch-fg.py constant, build-prebuilt.py template SIGNATURE,
 build-prebuilt.py template docstring), plus chasing scattered `pfg-vN`
 mentions in README/docs. Forgetting one of those left the prebuilt's
 idempotency check looking for an old signature while the splices applied
-new content — silent confusion. Now there's one line to edit.
+new content, causing silent confusion. Now there's one line to edit.
 
 ### Why sync runs separately from build-prebuilt
 
@@ -230,8 +230,8 @@ radius as its own visible delta.
 ## Why the byte-stability check matters
 
 The prebuilt's `(old, new)` pairs are derived from the diff. If the
-diff captures something non-deterministic — a timestamp, a UUID, a
-locale-dependent format — the synthesized script's `old` won't match
+diff captures something non-deterministic (a timestamp, a UUID, a
+locale-dependent format), the synthesized script's `old` won't match
 on someone else's clean install. The byte-stability check catches
 this: if the synthesized script doesn't reproduce the live patched
 file, something captured into the diff that shouldn't have.
@@ -245,8 +245,8 @@ Byte-stability proves the splice is **deterministic against the .bak
 you have**. It does not prove the splice produces correct *behavior*
 when applied to a different .bak (e.g., a fresh extension install).
 
-If `.bak` isn't pristine — typically because you iteratively developed
-the patch in place and never re-baked from a fresh install — the
+If `.bak` isn't pristine (typically because you iteratively developed
+the patch in place and never re-baked from a fresh install), the
 synthesis only captures the **last incremental hop**, not the full
 pristine→post-patch transformation. Earlier transformations are
 present in both `.bak` and live, so the diff doesn't see them.
@@ -278,7 +278,7 @@ transformation, never an incremental hop. Maintain it strictly:
   contain.** When patch X is finalized, snapshot the live file as
   `<file>.patchX.bak`. That name self-documents what's in the
   snapshot ("the settled state of patch X"). Use `.patchY.bak` after
-  Y is finalized, and so on. Don't use `.pre-patchY.bak` — it only
+  Y is finalized, and so on. Don't use `.pre-patchY.bak`; it only
   says what comes next, forcing the reader to know the patch
   ordering to figure out what's actually in there.
 - During iteration of patch Y, work directly on live (which is
@@ -295,7 +295,7 @@ transformation, never an incremental hop. Maintain it strictly:
   the rendered K marker, not just `node --check`).
 
 (`apply-patch-fg.py` uses `<file>.pre-patchFG.bak` as a working
-checkpoint — that's a script-internal artifact rather than a
+checkpoint; that's a script-internal artifact rather than a
 maintainer-curated checkpoint, and the script reads/writes it
 itself, so the existing name is grandfathered.)
 
@@ -318,7 +318,7 @@ d = json.load(sys.stdin)
 # Look for an iframe whose parent page title matches the target window
 for t in d:
     if t.get("type") == "iframe":
-        # Filter further by URL/parent — see docs/debugging.md
+        # Filter further by URL/parent; see docs/debugging.md
         ...')
 
 # DOM probe inside the inner active-frame
@@ -332,7 +332,7 @@ node /tmp/eval_in_inner_frame.mjs "$WS" 'JSON.stringify({
 ```
 
 For a session known to have phantom-lpu boundaries the result should
-be `{pfgkAlert: ≥1, bookend: 1, seam: ≥1, bridge: ≥0}` — non-zero
+be `{pfgkAlert: ≥1, bookend: 1, seam: ≥1, bridge: ≥0}`; non-zero
 wrap counts confirm the wrap React node is actually rendering, not
 just the K message text.
 
@@ -343,7 +343,7 @@ the splice produced dead code. See [`docs/debugging.md`'s
 for the empirical diagnosis walkthrough.
 
 The full CDP toolkit + recipes live in
-[`docs/debugging.md`](docs/debugging.md) — read the
+[`docs/debugging.md`](docs/debugging.md). Read the
 "⚠️ Read this BEFORE improvising" banner there before reaching for
 ad-hoc reload mechanisms; several common ones (`location.reload()`,
 `Page.reload` on iframes) are documented gotchas that break the
@@ -353,19 +353,19 @@ install state.
 
 If user-visible verification reveals an already-published prebuilt
 is broken (and a fixed re-synthesis isn't going to happen for that
-extension version — e.g., it's been superseded by a newer one):
+extension version, e.g., it's been superseded by a newer one):
 
 1. **Move it to `prebuilt/archive/broken/v<patchset>/<VER>/`**
    rather than deleting. The patchset version is the outer dir
    because the same bundle version can have a broken prebuilt for
-   one patchset and a working prebuilt for another future fix —
+   one patchset and a working prebuilt for another future fix, and
    we want both archived without collision. Example:
    `prebuilt/archive/broken/v1.4/2.1.126/apply.py`. Keeps the
    historical record so future investigators can see exactly what
    shipped.
 2. **Document the diagnosis** in
    [`prebuilt/archive/broken/README.md`](prebuilt/archive/broken/README.md)'s
-   per-version notes section — what the bug was, why it shipped
+   per-version notes section: what the bug was, why it shipped
    (what synthesis pitfall), what supersedes it, what the
    workaround is.
 3. **End-users running the broken prebuilt's old URL** will get a
@@ -378,7 +378,7 @@ The current contents of `prebuilt/archive/broken/` document the
 
 ## util/ scripts: what they don't do
 
-- They don't validate that your patches are *correct* — only that
+- They don't validate that your patches are *correct*, only that
   they're *byte-stable* against the .bak in the install dir. If you
   applied Patch D wrong (only one of two walkers patched), the
   prebuilt will be byte-stable but functionally broken. Test the live
@@ -387,7 +387,7 @@ The current contents of `prebuilt/archive/broken/` document the
   each target. If your backups are named `.pre-patchA.bak` or live in
   another directory, copy them to `extension.js.bak` etc. before
   running.
-- They don't infer the version from the bundle contents — only from
+- They don't infer the version from the bundle contents, only from
   the directory name (`anthropic.claude-code-<VER>-linux-x64`). If
   upstream ever changes that naming convention, update
   `util/build-prebuilt.py` to extract the version differently.

@@ -10,10 +10,10 @@ description: Reapply Juraj's twelve local patches to all anthropic.claude-code I
 Twelve patches live out-of-tree and need to be reapplied every time a bundled
 `anthropic.claude-code-*` extension updates. The minified code
 changes variable names between releases, so do NOT blindly search-and-replace
-literal strings from prior versions — locate the pattern structurally, then
+literal strings from prior versions. Locate the pattern structurally, then
 edit.
 
-## Step 0 — boot: self-update, locate install, try the prebuilt
+## Step 0: boot, self-update, locate install, try the prebuilt
 
 This single bash block does three things in one round-trip:
 
@@ -28,7 +28,7 @@ This single bash block does three things in one round-trip:
    deduplicates by realpath, and patches each one.
 3. **Fetch the prebuilt for each version** and run it. Prebuilts are
    self-validating (detect the patchset signature, idempotent,
-   byte-stable verified at synthesis time) — so this step either
+   byte-stable verified at synthesis time), so this step either
    applies the patches cleanly OR no-ops because they're already
    applied.
 
@@ -36,7 +36,7 @@ This single bash block does three things in one round-trip:
 set -u
 
 # --- Step 0a: self-update via fast-forward, if symlinked-clone setup ---
-# Discover by repo origin URL, not by skill directory name — the user is
+# Discover by repo origin URL, not by skill directory name. The user is
 # free to install the skill under any name (~/.claude/skills/patch-claude,
 # patch-antigravity, foo, ...). We scan all entries under ~/.claude/skills/
 # and pick whichever one resolves into a clone of ojura/claude-patches.
@@ -58,7 +58,7 @@ if [ -n "$REPO_ROOT" ]; then
   echo "Self-update: fetching $REPO_ROOT..."
   # Fetch via the configured remote first. If that fails (common in
   # headless/sandboxed shells where ssh-askpass is unavailable) and the
-  # remote is github/gitlab SSH, fall back to HTTPS — public-repo reads
+  # remote is github/gitlab SSH, fall back to HTTPS. Public-repo reads
   # don't need auth. Stays generic: works for any fork, no hardcoded
   # owner/repo.
   if ! git -C "$REPO_ROOT" fetch --quiet origin 2>/dev/null; then
@@ -75,10 +75,10 @@ if [ -n "$REPO_ROOT" ]; then
       echo "  configured fetch failed; retrying via $https_url"
       if ! git -C "$REPO_ROOT" fetch --quiet "$https_url" \
             main:refs/remotes/origin/main 2>&1; then
-        echo "  WARNING: HTTPS fallback also failed — origin/main is stale."
+        echo "  WARNING: HTTPS fallback also failed. origin/main is stale."
       fi
     else
-      echo "  WARNING: fetch failed and remote isn't a recognized github/gitlab SSH URL — origin/main may be stale."
+      echo "  WARNING: fetch failed and remote isn't a recognized github/gitlab SSH URL. origin/main may be stale."
     fi
   fi
   HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -163,7 +163,7 @@ for _ext in "${EXTS[@]}"; do echo "  $_ext"; done
 # Prefer the local clone's copy (already pulled by Step 0a) over curl.
 # curl from raw.githubusercontent.com is blocked by Claude Code's
 # auto-mode classifier ("code execution from external source"), so
-# the local path isn't just faster — it's the only one that works
+# the local path isn't just faster, it's the only one that works
 # in auto-approve mode.
 _manual_count=0
 _applied=0
@@ -190,13 +190,13 @@ for EXT in "${EXTS[@]}"; do
     # Stale-prebuilt guard: if local clone exists, compare the prebuilt's
     # embedded signature to version.py. A stale prebuilt (e.g. pfg-v1.6
     # when current is pfg-v1.7) would detect its own old signature as
-    # "Already patched" and exit — a false positive that silently skips
+    # "Already patched" and exit: a false positive that silently skips
     # the newer patches. Treat stale as "no prebuilt".
     if [ -n "$REPO_ROOT" ]; then
       CURRENT_SIG="$(python3 "$REPO_ROOT/version.py" 2>/dev/null)"
       PREBUILT_SIG="$(grep -oE '/\*pfg-v[0-9.]+\*/' "$PREBUILT" | head -1)"
       if [ -n "$CURRENT_SIG" ] && [ "$PREBUILT_SIG" != "$CURRENT_SIG" ]; then
-        echo "Prebuilt is stale ($PREBUILT_SIG vs current $CURRENT_SIG) — treating as no prebuilt."
+        echo "Prebuilt is stale ($PREBUILT_SIG vs current $CURRENT_SIG); treating as no prebuilt."
         PREBUILT=
       fi
     fi
@@ -205,7 +205,7 @@ for EXT in "${EXTS[@]}"; do
     python3 "$PREBUILT" "$EXT"
     _applied=$((_applied + 1))
   else
-    echo "No prebuilt for $VER — needs manual application."
+    echo "No prebuilt for $VER. Needs manual application."
     _manual_count=$((_manual_count + 1))
     if [ -z "$_first_manual" ]; then _first_manual="$EXT"; fi
   fi
@@ -220,7 +220,7 @@ else
   # Set EXT/VER for the first manual-needed install so Steps 2-14 proceed.
   EXT="$_first_manual"
   VER="$(_ver_from_dir "$EXT")"
-  echo "No prebuilt for ${_manual_count} install(s) — falling through to manual application."
+  echo "No prebuilt for ${_manual_count} install(s); falling through to manual application."
   echo "Starting with: $EXT (version $VER)"
 fi
 ```
@@ -230,7 +230,7 @@ fi
 - `RESTART_SKILL` → stop and re-invoke the skill (the local clone got
   fast-forwarded; SKILL.md on disk is now newer than what you read).
 - `PATCHES_APPLIED` → skill is complete. Tell the user to reload their IDE(s).
-  Do NOT run any verification greps — they target manual-path splices
+  Do NOT run any verification greps: they target manual-path splices
   with placeholder param names and will give false negatives on
   prebuilt-applied code. The patchset signature embedded in
   `extension.js` is the authoritative check, and the prebuilt verifies
@@ -243,14 +243,14 @@ fi
   maintainer section** to synthesize an updated prebuilt: restore from
   `.bak`, apply ALL patches (A–L) manually per Steps 3–14 below +
   apply-patch-fg.py, then run `build-prebuilt.py`, commit, and push.
-  Do NOT ask the user for permission — synthesize-and-push is part of
+  Do NOT ask the user for permission: synthesize-and-push is part of
   the skill's defined maintainer workflow.
 - `ABORT: ...` → stop and surface the message to the user; don't try
   to "fix" the abort condition automatically.
 - `No prebuilt for $VER` → apply the patches manually as follows:
     1. **Patches A–E**: follow Steps 3–7 (per-splice manual application).
     2. **Patches F and G**: do NOT splice manually. Run
-       `skill/apply-patch-fg.py` — it locates anchors via regex (so it
+       `skill/apply-patch-fg.py`. It locates anchors via regex (so it
        handles variable-name drift across releases automatically) and
        embeds the patchset signature comment (current value:
        `python3 "$REPO_ROOT/version.py"`) that the prebuilt relies on
@@ -260,7 +260,7 @@ fi
        application). Both are short, single-anchor splices.
     4. **Patches J + K (combined)**: follow Step 13. The v1.4 K splice
        replaces the loader's body wholesale and incorporates J's
-       cross-file fixed-point loop, so apply them together — do NOT
+       cross-file fixed-point loop, so apply them together; do NOT
        run Step 12 separately. Step 12 is preserved as the structural
        reference for J in isolation. Step 13 also covers the
        webview/index.js render wrap that makes K's seam/bookend/bridge
@@ -273,11 +273,11 @@ fi
     6. If the F+G script reports anchors not matching uniquely, the
        bundle structure has shifted enough to break its regexes.
        End-user fallback: apply F+G manually from Step 8 and Step 9,
-       then **stop** — do not attempt the maintainer steps below.
+       then **stop**; do not attempt the maintainer steps below.
        Tell the user a maintainer will need to update the script
        and publish a prebuilt for this version.
 
-### Maintainer-only — synthesize and publish a prebuilt
+### Maintainer-only: synthesize and publish a prebuilt
 
 The steps below assume push access to the upstream `claude-patches`
 repo. If you don't have that, skip this section: you have patches
@@ -299,10 +299,10 @@ different correct actions:
    namespaced by patchset version: e.g.
    `prebuilt/archive/broken/v1.4/2.1.126/`). If any patchset's broken
    archive has this bundle version, the prior published prebuilt was
-   found buggy — see `prebuilt/archive/broken/README.md` for
+   found buggy. See `prebuilt/archive/broken/README.md` for
    per-version diagnoses.
    Action: do NOT re-synthesize from your live install if its `.bak`
-   was the source of the original broken prebuilt — you'll just
+   was the source of the original broken prebuilt; you'll just
    reproduce the bug. `build-prebuilt.py` has a guardrail that
    refuses to publish a byte-identical-to-archived-broken prebuilt,
    but it's a backstop, not a substitute for understanding why the
@@ -317,7 +317,7 @@ To check which case you're in:
 
 ```sh
 ls "$REPO_ROOT"/prebuilt/archive/broken/*/$VER/ 2>/dev/null && \
-    echo "WARNING: this bundle version has a known-broken prebuilt under some patchset — read the archive README before publishing"
+    echo "WARNING: this bundle version has a known-broken prebuilt under some patchset; read the archive README before publishing"
 ls "$REPO_ROOT/prebuilt/archive/v1/$VER/"     2>/dev/null && \
     echo "Note: superseded older-patchset-version prebuilt exists; this is fine"
 ```
@@ -332,14 +332,14 @@ git -C "$REPO_ROOT" push --dry-run origin main 2>&1 | head -1
 ```
 
 A successful dry-run (`Everything up-to-date` or a list of refs that
-would advance) means you can publish. An auth error means you can't —
+would advance) means you can publish. An auth error means you can't;
 stop here.
 
 If `apply-patch-fg.py` succeeded as-is (preferred path):
 
 1. Verify the signature is in live:
    `grep -cF "$(python3 "$REPO_ROOT/version.py")" "$EXT/extension.js"`
-   — must be `1`.
+   must be `1`.
 2. Run `build-prebuilt.py`, commit, push.
 
 If `apply-patch-fg.py`'s regexes failed on this version:
@@ -347,7 +347,7 @@ If `apply-patch-fg.py`'s regexes failed on this version:
 1. Update the regex anchors in `skill/apply-patch-fg.py` to cover
    the new shape.
 2. Restore `extension.js` from `.bak` (or `.pre-patchFG.bak` if
-   present) and re-run the script — verify it now applies cleanly
+   present) and re-run the script; verify it now applies cleanly
    AND embeds the signature.
 3. Commit the script change in the same push as the prebuilt.
 
@@ -355,7 +355,7 @@ If `apply-patch-fg.py`'s regexes failed on this version:
 # Precondition: signature must already be in live (apply-patch-fg.py ran)
 SIG="$(python3 "$REPO_ROOT/version.py")"
 grep -qF "$SIG" "$EXT/extension.js" || \
-    { echo "ABORT: signature $SIG missing — run apply-patch-fg.py first"; exit 1; }
+    { echo "ABORT: signature $SIG missing; run apply-patch-fg.py first"; exit 1; }
 
 git clone https://github.com/ojura/claude-patches /tmp/claude-patches
 cd /tmp/claude-patches
@@ -369,16 +369,16 @@ git push
 extracts the splice pairs, and writes a self-contained apply script
 that validates byte-stable against the live patched files before being
 saved. Because it diffs live-vs-`.bak`, anything in live (including
-the signature) becomes part of the prebuilt — so the signature must
+the signature) becomes part of the prebuilt, so the signature must
 already be present in live at synthesis time.
 
 ---
 
 The remaining steps below are only relevant if Step 0 reported "no
-prebuilt" — manual per-patch application against the located `$EXT`
+prebuilt": manual per-patch application against the located `$EXT`
 install.
 
-## Step 2 — back up the three target files
+## Step 2: back up the three target files
 
 ```
 cp $EXT/extension.js           $EXT/extension.js.bak
@@ -389,13 +389,13 @@ cp $EXT/webview/index.css      $EXT/webview/index.css.bak
 Skip the backup if a `.bak` already exists (don't overwrite a prior backup
 with already-patched content).
 
-## Step 3 — Patch A: fork session writes a `custom-title` entry IF the head 64KB is otherwise unparseable
+## Step 3: Patch A: fork session writes a `custom-title` entry IF the head 64KB is otherwise unparseable
 
 ### Why
 
 `forkSession` creates a new JSONL but emits no metadata entry. When the
 session was previously compacted, the fork JSONL starts with
-`isCompactSummary: true` followed by long tool results — the session metadata
+`isCompactSummary: true` followed by long tool results, and the session metadata
 parser (`Pp` / `Jq4`) can't find a valid prompt in the 64KB head buffer,
 returns `null`, and the fork is filtered out of `listSessions`. The webview
 then falls back to a blank session.
@@ -405,12 +405,12 @@ then falls back to a blank session.
 - Use `custom-title` rather than `last-prompt` for the metadata channel.
   Resolver order is `customTitle || aiTitle || lastPrompt || summary || firstPrompt(head)`.
   Writing `last-prompt` would make the fork discoverable but also poison
-  the title channel (lastPrompt wins over firstPrompt — the unrelated
+  the title channel (lastPrompt wins over firstPrompt, the unrelated
   #32150 / #49996 bug). `custom-title` puts the rescue in the right channel:
   highest precedence, stable, overridable by user `/rename`.
 - Only write the entry when actually needed. If the fork chain has a valid
   first user prompt within head 64KB, the parser's `firstPrompt` extractor
-  works on its own — no metadata write required, and the fork's title is
+  works on its own; no metadata write required, and the fork's title is
   the source's original first prompt without further intervention.
 
 ### Locate
@@ -439,21 +439,21 @@ async forkSession(K,V){
 
 Identify the six variables by *role*, not by name:
 
-- `<SESSION_ID>` — the argument to `this.loadedSessions.add(...)` in the
+- `<SESSION_ID>`: the argument to `this.loadedSessions.add(...)` in the
   return statement.
-- `<FILE_PATH>` — first argument to the earliest `<FS>.promises.appendFile(..., M)`
+- `<FILE_PATH>`: first argument to the earliest `<FS>.promises.appendFile(..., M)`
   in this function (the one that writes the JSONL body).
-- `<SRC_PATH>` — the local that holds the **source** JSONL path. Look for
-  `<X> = <pathJoin>(<dir>, \`${<sourceSessionIdParam>}.jsonl\`)` — typically
+- `<SRC_PATH>`: the local that holds the **source** JSONL path. Look for
+  `<X> = <pathJoin>(<dir>, \`${<sourceSessionIdParam>}.jsonl\`)`, typically
   one assignment up from where the existing `for(let M of await <loader>(<X>))`
   iterates the source file for file-history-snapshots.
-- `<MESSAGES>` — the array whose `.uuid`s are put into
+- `<MESSAGES>`: the array whose `.uuid`s are put into
   `this.sessionMessages.set(<SESSION_ID>, new Set(...))`.
-- `<FS>` — whatever module object `.promises.appendFile` is called on
+- `<FS>`: whatever module object `.promises.appendFile` is called on
   (`w1`, `M1`, etc).
 - The splice point is the exact substring
-  `this.summaries.set(<LEAF_UUID>,<SUMMARY>);return this.loadedSessions.add(<SESSION_ID>),<SESSION_ID>}}`
-  — insert the block between the first `;` and `return`.
+  `this.summaries.set(<LEAF_UUID>,<SUMMARY>);return this.loadedSessions.add(<SESSION_ID>),<SESSION_ID>}}`.
+  Insert the block between the first `;` and `return`.
 
 ### Patch (with placeholders)
 
@@ -471,14 +471,14 @@ the current version. Use `python3` or the Edit tool.
 
 The injected logic does three passes and one decision:
 
-1. **Read source title** — slurps `<SRC_PATH>` and scans line-by-line for
+1. **Read source title**: slurps `<SRC_PATH>` and scans line-by-line for
    `custom-title` / `ai-title` entries; remembers the most recent of each.
-2. **Walk fork messages forward** — finds the first valid user prompt
+2. **Walk fork messages forward**: finds the first valid user prompt
    (skipping `isCompactSummary` / `isMeta` / tool-result-only content) and
    tracks the byte offset of that prompt's full JSONL line.
 3. **Decide what to write**:
    - If source has explicit title → inherit it as the fork's `customTitle`
-     (regardless of head 64KB parseability — keeps fork in sync with source's
+     (regardless of head 64KB parseability; keeps fork in sync with source's
      displayed name, including post-`/rename`).
    - Else if head 64KB parser would resolve a valid prompt → don't write
      anything (firstPrompt extractor handles it).
@@ -495,10 +495,10 @@ The injected logic does three passes and one decision:
 # itself is in the source as a single block).
 grep -c 'type:"custom-title",customTitle:_titleToWrite,sessionId:' $EXT/extension.js
 ```
-Expect `1` (the literal injection is present once in source — the `if`
+Expect `1` (the literal injection is present once in source; the `if`
 guard around it determines whether it runs at fork time).
 
-## Step 4 — Patch B: sticky message header → linear scroll
+## Step 4: Patch B: sticky message header → linear scroll
 
 ### Why
 
@@ -520,14 +520,14 @@ grep -oE 'stickyHeader_[A-Za-z0-9]+' $EXT/webview/index.css | sort -u
 
 Then apply two replacements (via python; the file is too large for Read):
 
-1. Main rule — strip `position:sticky`, both `background-image` gradients,
+1. Main rule: strip `position:sticky`, both `background-image` gradients,
    `z-index:2`, and `top:0`; replace with `position:relative;z-index:auto`:
 
    ```
    .message_<S>.stickyHeader_<S>{--sticky-bg:var(--app-primary-background);position:relative;z-index:auto;align-items:stretch;padding-top:14px;padding-bottom:12px}
    ```
 
-2. Expanded-variant rule — `z-index:3` → `z-index:auto`:
+2. Expanded-variant rule: `z-index:3` → `z-index:auto`:
 
    ```
    .message_<S>.stickyHeader_<S>:has([aria-expanded=true]){z-index:auto}
@@ -542,7 +542,7 @@ grep -oE '\.message_<S>\.stickyHeader_<S>[^}]*\}' $EXT/webview/index.css
 The first two rules should contain `position:relative` / `z-index:auto` and
 no `sticky` or `background-image:linear-gradient`.
 
-## Step 5 — Patch C: disable broken `isSlashCommand` detection
+## Step 5: Patch C: disable broken `isSlashCommand` detection
 
 ### Why
 
@@ -551,7 +551,7 @@ The webview infers "this user message is a slash command" via
 with a Unix path (e.g. compiler output pasted as a prompt). The
 slash-command render path drops the `userMessageContainer` wrapper and loses
 the fork/rewind action button. In-band signalling from message text is
-wrong in principle — kill it.
+wrong in principle; kill it.
 
 ### Locate and patch
 
@@ -578,23 +578,23 @@ grep -oE '[A-Za-z_$]+=![01];return\{type:"text",text:[A-Za-z_$]+,isSlashCommand:
 Should show the patched line; the original `.startsWith("/")` form must no
 longer exist in that context.
 
-## Step 6 — Patch D: chain walker bridges compaction boundaries via logicalParentUuid
+## Step 6: Patch D: chain walker bridges compaction boundaries via logicalParentUuid
 
 ### Why
 
 The compact stitch (`type:"system", subtype:"compact_boundary"`) is written
 with `parentUuid:null` and the actual pre-compact predecessor stored in
 `logicalParentUuid`. The chain-walking code in `extension.js` follows
-`parentUuid` only — so any path that reads back the conversation (rewind UI,
+`parentUuid` only, so any path that reads back the conversation (rewind UI,
 fork-action discoverability, `--resume` render) sees only post-last-compaction
 messages. The pre-compact transcript is on disk but invisible.
 
-Architecture (verified against the leaked source — `buildConversationChain` at
+Architecture (verified against the leaked source: `buildConversationChain` at
 `src/utils/sessionStorage.ts:2069`, `getMessagesAfterCompactBoundary` at
 `src/utils/messages.ts:4643`): the API path is bounded independently of
-parentUuid topology by `getMessagesAfterCompactBoundary`, which scans for the
+the parentUuid chain shape by `getMessagesAfterCompactBoundary`, which scans for the
 boundary marker. So making the chain walker follow `logicalParentUuid` is
-safe — it doesn't blow up the API context, only restores UI/fork visibility.
+safe; it doesn't blow up the API context, only restores UI/fork visibility.
 
 This is the read-side fix proposed in [#48937](https://github.com/anthropics/claude-code/issues/48937).
 Filed with empirical verification; not yet upstream.
@@ -611,7 +611,7 @@ grep -oE '[A-Za-z_$]{1,3}\.parentUuid\?[A-Za-z_$]{1,3}\.get\([A-Za-z_$]{1,3}\.pa
 You should see two walkers, each with form `<X>=<X>.parentUuid?<MAP>.get(<X>.parentUuid):void 0`,
 where `<X>` differs (typically two single-letter variable names) and `<MAP>` is the
 same shared messages map (typically `K`). Do NOT patch `getTranscript` (a method
-on the session class) — it already has the `K=!1` opt-in fallback, used correctly
+on the session class); it already has the `K=!1` opt-in fallback, used correctly
 by `forkSession`. Only the inline walkers need bridging.
 
 ### Patch
@@ -646,10 +646,10 @@ Expect 2 patched walkers and 0 remaining old forms.
 
 After reload, open a session that has been auto-compacted. Pre-compact
 messages should be visible in scrollback and have fork-action buttons.
-Continuation of the source session should still work normally — the API
+Continuation of the source session should still work normally; the API
 slice is unaffected.
 
-## Step 7 — Patch E: title resolver puts `firstPrompt` ahead of `lastPrompt`
+## Step 7: Patch E: title resolver puts `firstPrompt` ahead of `lastPrompt`
 
 ### Why
 
@@ -658,7 +658,7 @@ The session-list metadata parser resolves a session's title via the chain:
     customTitle || aiTitle || lastPrompt || summary || firstPrompt(head)
 
 `lastPrompt` outranking `firstPrompt` causes title drift on every long-enough
-session — the title becomes "whatever the user most recently typed" instead
+session: the title becomes "whatever the user most recently typed" instead
 of "what the conversation is about." Filed as
 [#32150](https://github.com/anthropics/claude-code/issues/32150) (with
 @ojura's resolver-chain comment); the fix is to swap `firstPrompt` ahead of
@@ -705,7 +705,7 @@ grep -cE '\|\|[A-Za-z_$0-9]+\([^)]+\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A
 Both should be `>= 1` (site 1 + site 2). Old `lastPrompt`-then-`summary`
 ordering should not appear.
 
-## Steps 8 & 9 — Patches F and G: USE THE SCRIPT
+## Steps 8 & 9: Patches F and G: USE THE SCRIPT
 
 ```sh
 python3 "$REPO_ROOT/skill/apply-patch-fg.py" "$EXT/extension.js"
@@ -725,19 +725,19 @@ structure has shifted enough to break the regexes. Fall back to
 the manual splice descriptions in Step 8 (Patch F) and Step 9
 (Patch G) below to get the patches applied locally, then stop.
 Updating the script and synthesizing a refreshed prebuilt is a
-maintainer task — see the "Maintainer-only" subsection under
+maintainer task; see the "Maintainer-only" subsection under
 Step 0.
 
 After the script runs successfully, jump to Step 10 (Patch H).
 
 ---
 
-## Step 8 — Patch F: rename writes propagate through `sessionStates` Map (manual reference)
+## Step 8: Patch F: rename writes propagate through `sessionStates` Map (manual reference)
 
 ### Why
 
 Renaming a session via the sidebar pencil icon flips the new title back
-to the previous one within seconds — typically when the user switches
+to the previous one within seconds, typically when the user switches
 sessions or any other broadcast trigger fires.
 
 Root cause traced via CDP-instrumented signal-write spy. The sidebar's
@@ -750,7 +750,7 @@ payloads) is updated **only** by `update_session_state` messages forwarded
 through `q8.onSessionStateChanged`. The chat panel's per-session reactive
 in the webview happens to send those messages on `summary.value` change,
 so panel-side renames re-align the Map as a side effect. Sidebar-side
-renames (pencil icon) do not — the sidebar's `q8` is constructed in
+renames (pencil icon) do not. The sidebar's `q8` is constructed in
 `resolveSessionListView` with `void 0` and no `onSessionStateChanged`
 callback, so nothing ever pushes the new title into the Map. The next
 `broadcastSessionStates()` (focus change, busy-state flip on any session,
@@ -759,25 +759,25 @@ stale title.
 
 The fix has three coordinated splices:
 
-1. **`updateSessionState` preserves missing fields** — let callers update
+1. **`updateSessionState` preserves missing fields**: let callers update
    only the title (or only the state) without clobbering the other.
-2. **`q8.renameSession` invokes `onSessionStateChanged` after success** —
+2. **`q8.renameSession` invokes `onSessionStateChanged` after success**:
    pushes the new title into the manager's Map and triggers a broadcast.
-3. **Sidebar `q8` ctor wires `onSessionStateChanged`** — without this,
+3. **Sidebar `q8` ctor wires `onSessionStateChanged`**: without this,
    sidebar-driven renames still wouldn't propagate (the callback is the
    only escape hatch from `q8` to the manager's Map).
 
 ### Locate and patch
 
 All three sites are in `extension.js`. Match patterns are unique on the
-2.1.120 build; variable names will change between releases — locate by
-the structural anchors `sessionStates.set(V,{sessionId:V,state:K,title:B})`,
+2.1.120 build; variable names will change between releases. Locate by
+the literal patterns `sessionStates.set(V,{sessionId:V,state:K,title:B})`,
 `renameSession(V,K,B){return{type:"rename_session_response"`, and the
 unique `,void 0,()=>this.<broadcastUsageUpdate>())` tail of the
 `resolveSessionListView`-equivalent `q8` instantiation (the only `q8`
 ctor call that passes `void 0` for the panel-reference slot).
 
-#### Site 1 — `updateSessionState`
+#### Site 1: `updateSessionState`
 
 Old:
 ```
@@ -793,7 +793,7 @@ passing real values (including `""`) are unaffected; new callers can
 pass `undefined` to mean "leave as-is". The `??"idle"` fallback handles
 the not-yet-seen-before case.
 
-#### Site 2 — `q8.renameSession`
+#### Site 2: `q8.renameSession`
 
 Old:
 ```
@@ -804,17 +804,17 @@ New:
 async renameSession(V,K,B){let _r=await(await m1.load(this.cwd,this.logger)).renameSession(V,K,B);if(!_r)this.onSessionStateChanged?.(V,void 0,K);return{type:"rename_session_response",skipped:_r}}
 ```
 
-`_r` is `m1.renameSession`'s `skipped` flag — `true` means the storage
+`_r` is `m1.renameSession`'s `skipped` flag; `true` means the storage
 short-circuited (e.g. `aiTitle` skipped because `customTitle` already
 exists). Only invoke the callback when an actual write happened.
 Optional chaining covers the case where `onSessionStateChanged` is
 unwired on a particular `q8` instance (e.g. before Site 3 has been
-applied — the patch is internally robust to partial application).
+applied; the patch is internally robust to partial application).
 
-#### Site 3 — sidebar `q8` ctor
+#### Site 3: sidebar `q8` ctor
 
 The `,void 0,()=>this.<broadcastUsageUpdate>())` tail is unique on
-2.1.120 — the only `q8` instantiation passing `void 0` for the panel
+2.1.120: the only `q8` instantiation passing `void 0` for the panel
 slot is the one in `resolveSessionListView` (or the equivalent sidebar
 view resolver). Confirm uniqueness with `grep -c` before splicing.
 
@@ -834,7 +834,7 @@ manager. The panel's callback also does panel-mapping bookkeeping
 doesn't need any of that.
 
 Constructor parameter order is verified by reading the class body
-(`this.isFullEditor=I;this.onSessionStateChanged=F` — last two params
+(`this.isFullEditor=I;this.onSessionStateChanged=F`; last two params
 are isFullEditor then onSessionStateChanged in that order).
 
 ### Verify
@@ -855,11 +855,11 @@ different session and back. The new title should remain.
 
 For a CDP-instrumented test (faster iteration), patch the sidebar's
 `Vn.sessions.value[i].summary` signal `set` to log writes with stack
-traces, then trigger the rename and switch sessions — there should now
+traces, then trigger the rename and switch sessions. There should now
 be exactly one write (from `Vn.renameSession` itself), with no later
 write from `index.js:2044` carrying the old title.
 
-### Patch F.2 + F.3 — close two regressions revealed by panel-side stale summaries
+### Patch F.2 + F.3: close two regressions revealed by panel-side stale summaries
 
 After the three core splices land, two follow-up holes show up:
 
@@ -876,7 +876,7 @@ After the three core splices land, two follow-up holes show up:
    manager.updateSessionState writes that stale title into the Map and
    re-broadcasts. Sidebar's bridge sees the stale title and overwrites
    the just-renamed `summary.value`. Visible as: rename works, then
-   flips back on the next state event — even with Patch F's three
+   flips back on the next state event, even with Patch F's three
    splices applied.
 
 2. **Tab title doesn't update on cross-webview rename.** The chat
@@ -890,7 +890,7 @@ After the three core splices land, two follow-up holes show up:
 
 Both fixed by two more splices in `extension.js`:
 
-#### F.2 — drop title at the `update_session_state` boundary
+#### F.2: drop title at the `update_session_state` boundary
 
 The webview reactive sends a title field, but only the rename path
 should be authoritative for titles. Drop the title at the message
@@ -911,19 +911,19 @@ title into the Map.
 **Known cosmetic edge case.** Sidebar placeholders for sessions that
 exist in the broadcast Map but not in the sidebar's `Vn.sessions`
 (the `Q.filter(N => !O.has(N.sessionId))` set) lose their
-broadcast-supplied title — the placeholder filter
+broadcast-supplied title; the placeholder filter
 `N.title || N.state !== "idle"` only renders them when they have a
 non-idle state (which they will, otherwise nothing would have called
 `update_session_state` for them in the first place). In practice the
 sidebar's `Vn.sessions` includes everything on disk in the cwd, so
 this case is rare.
 
-#### F.3 — manager writes `panel.title` directly
+#### F.3: manager writes `panel.title` directly
 
 Combine into the F-site-1 splice (only one match for the original
 unpatched anchor; combine to keep the apply pass single-step):
 
-Old (still the original — applies cleanly even if F site 1 hasn't been
+Old (still the original; applies cleanly even if F site 1 hasn't been
 applied yet):
 ```
 updateSessionState(V,K,B){this.sessionStates.set(V,{sessionId:V,state:K,title:B}),this.broadcastSessionStates()}
@@ -951,16 +951,16 @@ grep -c ',!1,(H,D,O)=>{this.updateSessionState(H,D,O)})' $EXT/extension.js
 ```
 Each should be `1`.
 
-## Step 9 — Patch G: forked session appears in sidebar without sending a message (manual reference)
+## Step 9: Patch G: forked session appears in sidebar without sending a message (manual reference)
 
 ### Why
 
 Forking a session creates a new JSONL on disk via
 `m1.forkSession`, but the new session doesn't appear in the sidebar
-list until the user sends a message in it. Same architectural pattern
-as the rename bug: the sidebar's `Te1` component re-fetches the
+list until the user sends a message in it. Same shape as the rename
+bug: the sidebar's `Te1` component re-fetches the
 session list (`$.listSessions()`) only when its
-`G.length > 0` `useEffect` fires — and `G` is built from broadcast Map
+`G.length > 0` `useEffect` fires, and `G` is built from broadcast Map
 entries that aren't in `Vn.sessions`. The fork has no such Map entry
 until the new session's first state change (typically the user
 sending a message → busy state → `update_session_state` → Map entry →
@@ -973,13 +973,13 @@ what the sidebar will eventually load from JSONL (otherwise the
 sidebar's `sessionStates → summary.value` bridge overwrites the
 JSONL-derived title with the placeholder text). Patch A's fork-time
 `custom-title` injection inherits the source's `customTitle`/`aiTitle`,
-so we can read the source's metadata and use that — both will agree.
+so we can read the source's metadata and use that. Both will agree.
 
-### G.1 — panel ctor callback supports skip-bookkeeping flag
+### G.1: panel ctor callback supports skip-bookkeeping flag
 
 The panel callback wired in `setupPanel` does panel-mapping
 bookkeeping (`sessionPanels.set(forkSid, V); sessionPanels.delete(sourceSid) if it pointed at V`)
-that's wrong when the fork hasn't been activated yet — at fork-handler
+that's wrong when the fork hasn't been activated yet. At fork-handler
 time the panel `V` is still showing the source. Add a 4th arg to skip
 the bookkeeping:
 
@@ -992,7 +992,7 @@ New:
 (H,D,O,_sk)=>{this.updateSessionState(H,D,O);if(!_sk){for(let[z,L]of this.sessionPanels)if(L===V&&z!==H)this.sessionPanels.delete(z);if(this.sessionPanels.set(H,V),V.active)this.activeSessionId=H}}
 ```
 
-### G.2 — `fork_conversation` handler pushes Map entry with source's title
+### G.2: `fork_conversation` handler pushes Map entry with source's title
 
 Reads the source's JSONL line-by-line for the latest `custom-title` /
 `ai-title`, falls back to `"Forked conversation"` if no metadata.
@@ -1009,8 +1009,8 @@ New:
 case"fork_conversation":{let _m=await m1.load(this.cwd,this.logger),_src=V.request.forkedFromSession,_sid=await _m.forkSession(_src,V.request.resumeSessionAt);let _t="";try{let _lines=(await R1.promises.readFile(O1.join(d5(_m.projectRoot),`${_src}.jsonl`),"utf8")).split(`\n`),_c="",_a="";for(let _line of _lines){if(!_line)continue;try{let _M=JSON.parse(_line);if(_M.type==="custom-title"&&_M.customTitle)_c=_M.customTitle;if(_M.type==="ai-title"&&_M.aiTitle)_a=_M.aiTitle}catch(_){}}_t=_c||_a}catch(_){}if(!_t)_t="Forked conversation";this.onSessionStateChanged?.(_sid,"idle",_t,!0);return{type:"fork_conversation_response",sessionId:_sid}}
 ```
 
-`R1` (fs), `O1` (path), and `d5` (project-root resolver) are bundle
-globals already used by `m1.renameSession` etc. — visible in scope.
+`R1` (fs), `O1` (path), and `d5` (project-root resolver) are bundler-assigned
+names already used by `m1.renameSession` etc., visible in scope.
 
 ### Verify (G)
 
@@ -1027,16 +1027,16 @@ should appear in the sidebar immediately (no need to send a message
 first), with the source session's title (or "Forked conversation" if
 the source had no `custom-title` or `ai-title`).
 
-## Step 10 — Patch H: bypass the 5 MB precompact-skip optimization
+## Step 10: Patch H: bypass the 5 MB precompact-skip optimization
 
 ### Why
 
 The bundled session loader skips parsing pre-compact-boundary content for any JSONL > 5 MB
 ([leaked source `sessionStoragePortable.ts:480`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/utils/sessionStoragePortable.ts#L480) defines the `SKIP_PRECOMPACT_THRESHOLD = 5 * 1024 * 1024` constant; the gate lives in
 [`sessionStorage.ts:3536-3556`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/utils/sessionStorage.ts#L3536-L3556)).
-Pre-boundary content is *never parsed*, so the chain walker, fork picker, rewind UI, and
+Content before the boundary is *never parsed*, so the chain walker, fork picker, rewind UI, and
 chat-panel render all only see post-most-recent-`compact_boundary` messages on big files.
-Patch D's `parentUuid → logicalParentUuid` fallback can't help — the predecessor messages
+Patch D's `parentUuid → logicalParentUuid` fallback can't help: the predecessor messages
 aren't in the parsed array.
 
 There's an env-var kill switch (`CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP`) but requiring users
@@ -1088,15 +1088,15 @@ Expect `1`. The original `&&!M2(...)` form must no longer appear.
 
 After reload, open any session whose JSONL is > 5 MB. The chat panel should populate with
 the full in-file chain back to the most recent stitch with cross-file `logicalParentUuid`
-(which is then the genuine ceiling — addressed by Patch J). Cache_read on the next API turn
-should remain bounded — `getMessagesAfterCompactBoundary` does its own boundary slicing
+(which is then the genuine ceiling, addressed by Patch J). Cache_read on the next API turn
+should remain bounded; `getMessagesAfterCompactBoundary` does its own boundary slicing
 independent of what the loader returns.
 
-## Step 11 — Patch I: neutralize the webview's 500-message render cap
+## Step 11: Patch I: neutralize the webview's 500-message render cap
 
 ### Why
 
-The webview hardcodes a cap on how many messages can live in the React state — anything
+The webview hardcodes a cap on how many messages can live in the React state: anything
 beyond ~600 is silently truncated to the most recent 500. There's no UI feedback, no
 "load more" affordance. This negates the work of Patches D + H (and the upstream chain
 walker fixes in #46603 / #48937) once the chain walks back beyond 500 messages.
@@ -1142,11 +1142,11 @@ Expect `1` (with the function name observed during locate).
 ### Test
 
 After reload, open a session with > 500 chain-walkable messages. The full chain should
-render. Note: at 10K+ messages, initial render takes a few seconds — the bottleneck is
+render. Note: at 10K+ messages, initial render takes a few seconds; the bottleneck is
 React rendering, not the patch. If the UI lags unacceptably, partial mitigation: use
 `if($.length>10000)return $.slice(-10000); return $` instead of the pure identity.
 
-## Step 12 — Patch J: cross-file logicalParentUuid resolution at session load
+## Step 12: Patch J: cross-file logicalParentUuid resolution at session load
 
 > **For v1.4 K**, skip this step and apply the combined J+K splice
 > from Step 13 instead. The v1.4 prebuilt collapses J's fixed-point
@@ -1182,15 +1182,15 @@ async function Wz4(V,K){if(!uz(V))return[];let B=await qz4(V,K?.dir);if(!B)retur
 
 Identify by role (names will drift):
 
-- `<LOADER>` — the function name (e.g. `Wz4`)
-- `<EXIST>` — the existence check (e.g. `uz`)
-- `<FIND_FILE>` — finds path/size given session id (e.g. `qz4`)
-- `<READ_BUF>` — Patch H's read function (e.g. `Rz4`)
-- `<PARSE>` — JSONL → message array (e.g. `Yz4`)
-- `<DL>` — the chain-walk + filter pipeline (e.g. `dl`)
-- `<PATH>` — node `path` module under bundler-assigned name (e.g. `jK`)
-- `<FS_PROMISES>` — `fs.promises` under bundler-assigned name (e.g. `Y8`)
-- `<FS_RAW>` — `fs` module with `.readFile` used by `<READ_BUF>` (e.g. `ml`)
+- `<LOADER>`: the function name (e.g. `Wz4`)
+- `<EXIST>`: the existence check (e.g. `uz`)
+- `<FIND_FILE>`: finds path/size given session id (e.g. `qz4`)
+- `<READ_BUF>`: Patch H's read function (e.g. `Rz4`)
+- `<PARSE>`: JSONL → message array (e.g. `Yz4`)
+- `<DL>`: the chain-walk + filter pipeline (e.g. `dl`)
+- `<PATH>`: node `path` module under bundler-assigned name (e.g. `jK`)
+- `<FS_PROMISES>`: `fs.promises` under bundler-assigned name (e.g. `Y8`)
+- `<FS_RAW>`: `fs` module with `.readFile` used by `<READ_BUF>` (e.g. `ml`)
 
 Replace the function body. The new shape (using the 2.1.126 names; substitute as needed):
 
@@ -1233,12 +1233,12 @@ For diagnostic logging, the maintainer's `cdp_instrument.mjs`-style approach (de
 the project's NOTES) attaches via the `--inspect-extensions` port and logs each pass's
 `{dangling, files, prepend}` to a side-channel file.
 
-## Step 13 — Patch K: full conversation-tree recovery for dangling logicalParentUuid
+## Step 13: Patch K: full conversation-tree recovery for dangling logicalParentUuid
 
 ### Why
 
 Auto-compaction can write a `compact_boundary` whose `logicalParentUuid`
-references a uuid that was never persisted to disk — the upstream
+references a uuid that was never persisted to disk: the upstream
 write-side bug at `compact.ts:598` (the `findLast(m => m.type !==
 'progress')` filter is missing on the auto-compact path; same filter
 is present on the partial-compact path at L1014). After Patches D + J
@@ -1289,7 +1289,7 @@ Filed upstream as [#55818](https://github.com/anthropics/claude-code/issues/5581
 
 The two splices below (extension.js loader + webview/index.js render
 wrap) are intricate enough that maintaining them as ASCII in this
-doc has bitrotted in the past — v1.2 → v1.3 → v1.4 introduced
+doc has bitrotted in the past: v1.2 → v1.3 → v1.4 introduced
 backfill + bridges + relaxed bookend, and the doc lagged. The
 canonical, byte-stable shape lives in the latest published prebuilt:
 
@@ -1300,7 +1300,7 @@ echo "Reference: $LATEST_PREBUILT"
 ```
 
 Read its `SPLICES` literal and look for the entries containing
-`_kFired`, `pfgk-seam`, `_filesParsed` (extension.js loader splice —
+`_kFired`, `pfgk-seam`, `_filesParsed` (extension.js loader splice;
 combined with Patch J in v1.4) and `pfgkAlert` (webview render wrap).
 Both are single replace pairs `(old, new)`.
 
@@ -1311,31 +1311,31 @@ prebuilt's version. Translate them to the current target's names:
 
 **extension.js loader (combined J + K splice).** The `old` anchor in
 the prebuilt is the original loader function body
-(`return <CHAIN_WALKER>(<PARSE>(x),K)}` form — no J or K applied yet).
+(`return <CHAIN_WALKER>(<PARSE>(x),K)}` form, no J or K applied yet).
 Find the loader by its post-Patch-H signature
 (`function <LOADER>(V,K){if(!<EXIST>(V))return[];let B=await <FIND_FILE>(V,K?.dir);…return <CHAIN_WALKER>(<PARSE>(x),K)}`)
 and identify by role:
 
-- `<LOADER>` — the function name
-- `<EXIST>` — the existence check
-- `<FIND_FILE>` — finds path/size given session id
-- `<READ_BUF>` — Patch H's read function
-- `<PARSE>` — JSONL → message array
-- `<CHAIN_WALKER>` — chain-walk + filter pipeline
-- `<PATH>` — node `path` module under bundler-assigned name
-- `<FS_PROMISES>` — `fs.promises` under bundler-assigned name
-- `<FS_RAW>` — `fs` module with `.readFile` used by `<READ_BUF>`
+- `<LOADER>`: the function name
+- `<EXIST>`: the existence check
+- `<FIND_FILE>`: finds path/size given session id
+- `<READ_BUF>`: Patch H's read function
+- `<PARSE>`: JSONL → message array
+- `<CHAIN_WALKER>`: chain-walk + filter pipeline
+- `<PATH>`: node `path` module under bundler-assigned name
+- `<FS_PROMISES>`: `fs.promises` under bundler-assigned name
+- `<FS_RAW>`: `fs` module with `.readFile` used by `<READ_BUF>`
 
 Substitute these in the prebuilt's `new` string and apply. Confirm
 exactly one occurrence of the `old` anchor before replacing. (Warning:
 **don't apply Patch J as a separate splice if you're using v1.4 K**
-— the v1.4 prebuilt combines J + K into one splice that replaces the
+because the v1.4 prebuilt combines J + K into one splice that replaces the
 loader's original body wholesale. Skip Step 12 in this case.)
 
 **webview/index.js render wrap.** The user-message render branch
 contains `if(Z.type==="user")…return <REACT>.default.createElement(<USER_MSG_COMPONENT>,{…})`.
 Identify `<USER_MSG_COMPONENT>` (e.g. `XR0` in 2.1.126, `GR0` in
-2.1.132) — the component name is the only thing that drifts between
+2.1.132). The component name is the only thing that drifts between
 bundles; React var (`n1`), all signal/prop names, and CSS module
 names are stable. Substitute and apply.
 
@@ -1358,7 +1358,7 @@ node --check $EXT/extension.js && node --check $EXT/webview/index.js
 ```
 
 Each grep should be ≥ 1 (or, for `pfgk-bridge`, ≥ 1 if any boundary
-was cross-file resolved by Patch J — embedded literal regardless).
+was cross-file resolved by Patch J; embedded literal regardless).
 
 ### Test
 
@@ -1367,10 +1367,10 @@ Open a session known to have a dangling lpu (search for a
 `"uuid":"…"` line anywhere on disk). Reload VSCode. The chat panel
 should render the bookend at the top of the recovered span, seams
 at each phantom-lpu boundary, and bridges at each cross-file-resolved
-boundary — all as colored bubbles with a ⚠️ banner. Clicking any
+boundary, all as colored bubbles with a ⚠️ banner. Clicking any
 ghost cycles to the next.
 
-## Step 14 — Patch L: IDE-spawned CLI always passes `--thinking-display summarized`
+## Step 14: Patch L: IDE-spawned CLI always passes `--thinking-display summarized`
 
 ### Why
 
@@ -1527,7 +1527,7 @@ use`. If it does, revert the patch and use the `claudeProcessWrapper`
 shim approach from #49322 comments instead, which can scope the
 flag to top-level invocations only.
 
-## Step 15 — summary to the user
+## Step 15: summary to the user
 
 Report which version was patched and which files were touched, using
 markdown relative links. Remind the user to reload the VSCode window for the
@@ -1539,17 +1539,17 @@ variable renaming, prebuilt-fetch / install-locate / backup quirks,
 variable renames the F+G script auto-absorbed that future readers
 would benefit from knowing about, and any verify-grep or other doc
 bugs in this SKILL.md you noticed during application. Do this
-proactively — don't wait to be asked. Then propose follow-up:
+proactively; don't wait to be asked. Then propose follow-up:
 
 - If you have push access to `claude-patches` (the Step 0 dry-run probe
-  already established this — `Everything up-to-date` or a list of
+  already established this: `Everything up-to-date` or a list of
   advancing refs means yes), propose specific SKILL.md edits in the
   same response and apply on confirmation.
 - If you don't, propose opening an issue at
   https://github.com/ojura/claude-patches/issues with the version, the
   patch ID (A–K), and a minimal repro grep.
 
-If nothing drifted and nothing was wrong, say so explicitly — silence
+If nothing drifted and nothing was wrong, say so explicitly. Silence
 is ambiguous.
 
 ## Notes
@@ -1559,8 +1559,8 @@ is ambiguous.
   fails on them).
 - If any of the eleven patches cannot be located (pattern shape changed
   substantially), stop and report that one to the user rather than guessing
-  — these are patches against obfuscated code and a wrong splice could be
-  disruptive.
+  (these are patches against obfuscated code and a wrong splice could be
+  disruptive).
 - If a `.bak` from a prior version already exists, leave it. The current
   pre-patch state is still recoverable from the VSCode extension cache /
   reinstall.
