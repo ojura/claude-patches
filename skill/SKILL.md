@@ -165,8 +165,9 @@ for _ext in "${EXTS[@]}"; do echo "  $_ext"; done
 # auto-mode classifier ("code execution from external source"), so
 # the local path isn't just faster — it's the only one that works
 # in auto-approve mode.
-_manual_needed=()
+_manual_count=0
 _applied=0
+_first_manual=
 
 _ver_from_dir() {
   basename "$1" | sed 's/^anthropic.claude-code-//; s/-\(linux\|darwin\|win32\|alpine\)-\(x64\|arm64\)$//'
@@ -205,25 +206,22 @@ for EXT in "${EXTS[@]}"; do
     _applied=$((_applied + 1))
   else
     echo "No prebuilt for $VER — needs manual application."
-    _manual_needed+=("$EXT")
+    _manual_count=$((_manual_count + 1))
+    if [ -z "$_first_manual" ]; then _first_manual="$EXT"; fi
   fi
 done
 
 echo ""
-echo "=== Summary: ${_applied} applied, ${#_manual_needed[@]} need manual ==="
-if [ ${#_manual_needed[@]} -eq 0 ]; then
+echo "=== Summary: ${_applied} applied, ${_manual_count} need manual ==="
+if [ "$_manual_count" -eq 0 ]; then
   echo "PATCHES_APPLIED: all ${#EXTS[@]} install(s) patched; reload your IDE(s)."
   exit 0
 else
   # Set EXT/VER for the first manual-needed install so Steps 2-14 proceed.
-  EXT="${_manual_needed[0]}"
+  EXT="$_first_manual"
   VER="$(_ver_from_dir "$EXT")"
-  echo "No prebuilt for ${#_manual_needed[@]} install(s) — falling through to manual application."
+  echo "No prebuilt for ${_manual_count} install(s) — falling through to manual application."
   echo "Starting with: $EXT (version $VER)"
-  if [ ${#_manual_needed[@]} -gt 1 ]; then
-    echo "After completing manual application for this install, re-run the skill for the rest:"
-    for _m in "${_manual_needed[@]:1}"; do echo "  $_m"; done
-  fi
 fi
 ```
 
