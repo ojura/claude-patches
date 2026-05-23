@@ -574,6 +574,28 @@ def synthetic_tests():
     _check("36-byte form extract_js works", bh.extract_js(fx36) == b"X();")
     _check("36-byte form no-op byte-identical", bh.repack_unchanged(fx36) == fx36)
 
+    # --- (0,0) field grow is refused (no offset to splice into) ---
+    # The helper module's bytecode field is (0,0); growing it would splice at
+    # blob position 0 (the zero-prefix region) and silently shift downstream
+    # fields. The handler must refuse with a clear error.
+    mods00 = [
+        _module("/$bunfs/root/src/entrypoints/cli.js",
+                "console.log('(Claude Code)');", bytecode=b"\xd4zFT" + b"\x00" * 40),
+        _module("/$bunfs/root/helper.js", "module.exports={};"),  # bytecode is (0,0)
+    ]
+    fx00 = build_bun_elf(mods00)
+    img00 = bh.BunImage(fx00)
+    helper = [m for m in img00.modules if not bh.BunImage.is_entrypoint_name(m["name_str"])][0]
+    # Confirm the field really is (0, 0) before we test growing it.
+    _check("(0,0) test fixture has empty bytecode field on helper module",
+           helper["bytecode"] == (0, 0), f"got {helper['bytecode']}")
+    raised = False
+    try:
+        bh._apply_blob_edits(img00, {(helper["index"], "bytecode"): b"new bytecode data"})
+    except bh.BunFormatError as exc:
+        raised = "cannot grow empty (0,0) field" in str(exc)
+    _check("growing a (0,0) field raises BunFormatError", raised)
+
     # --- entry_point_id is preferred over name heuristic ---
     # Build a fixture where module 0 is NOT an entrypoint and module 2 IS one,
     # with entry_point_id = 2. The handler must pick module 2 by index.

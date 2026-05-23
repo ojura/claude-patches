@@ -480,6 +480,15 @@ def _apply_blob_edits(img, edits):
     edit_list = []
     for (mi, field), new_bytes in edits.items():
         off, length = img.modules[mi][field]
+        # Empty (0, 0) is bun's tombstone for an absent field. Growing it would
+        # splice the new bytes at blob position 0 (which holds the zero-prefix
+        # region), trampling the prefix and silently shifting EVERY downstream
+        # field. Refuse rather than guess where a missing field should live.
+        # Shrinking a (0, 0) to empty is a no-op and is allowed.
+        if off == 0 and length == 0 and len(new_bytes) > 0:
+            raise BunFormatError(
+                f"cannot grow empty (0,0) field module[{mi}].{field}: no offset "
+                f"is recorded for where the field should live")
         edit_list.append((off, length, mi, field, new_bytes))
     edit_list.sort(key=lambda e: e[0])
 
