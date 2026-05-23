@@ -247,6 +247,12 @@ class BunImage:
          self.compile_argv_off, self.compile_argv_len, self.flags) = struct.unpack_from(
             "<QIIIIII", self.blob, self.offsets_off)
 
+        # Bounds-check the module table and compile-argv range BEFORE any reads.
+        # A crafted (modules_off, modules_len) could otherwise let struct.error
+        # leak out of _read_modules; fail closed with BunFormatError instead.
+        self._require_range("module table", self.modules_off, self.modules_len)
+        self._require_range("compile-exec-argv", self.compile_argv_off, self.compile_argv_len)
+
         self.module_struct_size = _detect_module_struct_size(self.modules_len)
         if self.modules_len % self.module_struct_size != 0:
             raise BunFormatError("module table length not a multiple of the record size")
@@ -269,6 +275,22 @@ class BunImage:
         if 4 + as_u32 == len(sec):
             return 4
         raise BunFormatError("could not determine .bun section length header form")
+
+    def _require_range(self, label, offset, length):
+        """Validate that [offset, offset+length) sits inside the bun blob.
+
+        Treats negative offsets/lengths and addition overflow as out-of-range.
+        Empty fields (offset 0, length 0) are always allowed; bun uses (0, 0) as
+        a tombstone for empty fields and the parser must accept them.
+        """
+        if offset == 0 and length == 0:
+            return
+        if offset < 0 or length < 0:
+            raise BunFormatError(f"{label} has negative offset/length")
+        end = offset + length
+        if end < offset or end > len(self.blob):
+            raise BunFormatError(
+                f"{label} range [{offset}, {end}) is outside the bun blob (size {len(self.blob)})")
 
     def _read_modules(self):
         ms = self.module_struct_size
@@ -297,6 +319,13 @@ class BunImage:
                 tail = 32
             enc, ldr, fmt, side = struct.unpack_from("<BBBB", table, base + tail)
             rec.update(encoding=enc, loader=ldr, module_format=fmt, side=side)
+            # Bound-check every field range against the blob. A crafted record
+            # with garbage offsets must raise BunFormatError, not let an out-of-
+            # range slice produce a silently truncated name_str or contents.
+            for field in ("name", "contents", "sourcemap", "bytecode",
+                          "moduleInfo", "bytecodeOriginPath"):
+                f_off, f_len = rec[field]
+                self._require_range(f"module[{i}].{field}", f_off, f_len)
             name_off, name_len = rec["name"]
             rec["name_str"] = self.blob[name_off:name_off + name_len].decode("utf-8", "replace")
             mods.append(rec)
@@ -323,6 +352,9 @@ class BunImage:
 
     def read_field(self, rec, field):
         off, length = rec[field]
+        # Records produced by _read_modules are already range-checked; this is a
+        # defensive guard for callers that hand in synthesized records.
+        self._require_range(f"module[{rec.get('index', '?')}].{field}", off, length)
         return self.blob[off:off + length]
 
     def extract_js(self):

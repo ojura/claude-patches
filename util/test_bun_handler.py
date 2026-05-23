@@ -689,6 +689,51 @@ def synthetic_tests():
     _struct.pack_into("<Q", fx_badlen, bun_bl["foff"], 0xDEADBEEF)
     _check("inconsistent length header rejected", not bh.can_handle(bytes(fx_badlen)))
 
+    # --- bounds checks: a crafted modules_len that overruns the blob must raise
+    #     BunFormatError, NOT let struct.error escape ---
+    fx_mlen = bytearray(build_bun_elf(mods))
+    img_mlen = bh.BunImage(bytes(fx_mlen))
+    # offsets struct's modules_len field sits inside the bun blob; locate its
+    # absolute file offset and overwrite it with a huge value (52 * 100000).
+    bun_sec = bh.Elf64(bytes(fx_mlen)).section(".bun")
+    abs_offsets_off = bun_sec["foff"] + img_mlen.section_header_size + img_mlen.offsets_off
+    _struct.pack_into("<I", fx_mlen, abs_offsets_off + 12, 52 * 100000)
+    raised_kind = None
+    try:
+        bh.BunImage(bytes(fx_mlen))
+    except bh.BunFormatError:
+        raised_kind = "BunFormatError"
+    except _struct.error:
+        raised_kind = "struct.error (LEAKED)"
+    except Exception as exc:  # noqa: BLE001
+        raised_kind = f"{type(exc).__name__} (unexpected)"
+    _check("crafted modules_len overrun raises BunFormatError", raised_kind == "BunFormatError",
+           f"got {raised_kind}")
+    _check("crafted modules_len overrun: can_handle returns False cleanly",
+           not bh.can_handle(bytes(fx_mlen)))
+
+    # Same shape for a per-record field overrun: leave modules_len valid but
+    # corrupt one module record's `contents` length so it points past the blob.
+    fx_field = bytearray(build_bun_elf(mods))
+    img_f = bh.BunImage(bytes(fx_field))
+    bun_sec_f = bh.Elf64(bytes(fx_field)).section(".bun")
+    abs_table_off = bun_sec_f["foff"] + img_f.section_header_size + img_f.modules_off
+    # record 0's contents field sits at offset 8 inside the record; write a huge length
+    _struct.pack_into("<I", fx_field, abs_table_off + 8 + 4, 0x7FFFFFFF)
+    raised_kind = None
+    try:
+        bh.BunImage(bytes(fx_field))
+    except bh.BunFormatError:
+        raised_kind = "BunFormatError"
+    except _struct.error:
+        raised_kind = "struct.error (LEAKED)"
+    except Exception as exc:  # noqa: BLE001
+        raised_kind = f"{type(exc).__name__} (unexpected)"
+    _check("crafted field-range overrun raises BunFormatError", raised_kind == "BunFormatError",
+           f"got {raised_kind}")
+    _check("crafted field-range overrun: can_handle returns False cleanly",
+           not bh.can_handle(bytes(fx_field)))
+
     ok = all(SYNTH_RESULTS)
     print(f"SYNTHETIC TESTS {'PASS' if ok else 'FAIL'} ({sum(SYNTH_RESULTS)}/{len(SYNTH_RESULTS)} checks)")
     return ok
