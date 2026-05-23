@@ -573,6 +573,21 @@ def synthetic_tests():
     _check("36-byte form extract_js works", bh.extract_js(fx36) == b"X();")
     _check("36-byte form no-op byte-identical", bh.repack_unchanged(fx36) == fx36)
 
+    # --- 36-vs-52 disambiguation under length ambiguity ---
+    # 13 modules at 36 bytes/record = 468 bytes; 468 also divides 52 (= 9 * 52),
+    # so the length alone is ambiguous. The handler must pick 36 by checking
+    # record-0's name field rather than silently defaulting to 52.
+    mods36_amb = [_module("/$bunfs/root/src/entrypoints/cli.js", "X();", ms=36)]
+    for n in range(12):
+        mods36_amb.append(_module(f"/$bunfs/root/mod{n}.js", f"m{n}();", ms=36))
+    fx36_amb = build_bun_elf(mods36_amb, module_struct_size=36, section_header_size=8)
+    img36_amb = bh.BunImage(fx36_amb)
+    _check("ambiguous-length 36-byte form picked correctly",
+           img36_amb.module_struct_size == 36, f"got {img36_amb.module_struct_size}")
+    # And its entrypoint still resolves cleanly.
+    _check("ambiguous-length 36-byte entrypoint resolves",
+           img36_amb.entrypoint_module()["name_str"].endswith("cli.js"))
+
     # --- u32 section-header form ---
     fx_u32 = build_bun_elf(mods, module_struct_size=52, section_header_size=4)
     img_u32 = bh.BunImage(fx_u32)
