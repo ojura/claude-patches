@@ -231,13 +231,18 @@ class BunImage:
 
         if len(self.blob) < 32 + len(BUN_TRAILER):
             raise BunFormatError("bun blob too small to hold offsets and trailer")
-        if self.blob[-len(BUN_TRAILER):] != BUN_TRAILER:
-            # Some builds add one trailing pad byte after the trailer; tolerate it.
-            if self.blob[-len(BUN_TRAILER) - 1:-1] != BUN_TRAILER:
-                raise BunFormatError("bun trailer bytes not found at end of blob")
+        # The trailer is normally the last bytes of the blob. Some builds append a
+        # single pad byte after it; locate the trailer so the offsets struct (which
+        # sits immediately before the trailer) is found correctly in both cases.
+        if self.blob[-len(BUN_TRAILER):] == BUN_TRAILER:
+            trailer_end = len(self.blob)
+        elif self.blob[-len(BUN_TRAILER) - 1:-1] == BUN_TRAILER:
+            trailer_end = len(self.blob) - 1
+        else:
+            raise BunFormatError("bun trailer bytes not found at end of blob")
 
         # The 32-byte offsets struct sits immediately before the trailer.
-        self.offsets_off = len(self.blob) - len(BUN_TRAILER) - 32
+        self.offsets_off = trailer_end - len(BUN_TRAILER) - 32
         (self.byte_count, self.modules_off, self.modules_len, self.entry_point_id,
          self.compile_argv_off, self.compile_argv_len, self.flags) = struct.unpack_from(
             "<QIIIIII", self.blob, self.offsets_off)
