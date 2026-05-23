@@ -712,18 +712,58 @@ def synthetic_tests():
 
     # --- 36-vs-52 disambiguation under length ambiguity ---
     # 13 modules at 36 bytes/record = 468 bytes; 468 also divides 52 (= 9 * 52),
-    # so the length alone is ambiguous. The handler must pick 36 by checking
-    # record-0's name field rather than silently defaulting to 52.
+    # so the length alone is ambiguous. record-0's name field sits at offset
+    # 0..8 of the record in both forms, so the name plausibility check returns
+    # the SAME boolean for both interpretations and cannot disambiguate. Any
+    # signature on the trailing bytes (bytes 32..40) is byte-indistinguishable
+    # between a real 36-byte record (small enums) and a real 52-byte record
+    # with an empty moduleInfo range. Per the fail-closed posture, the
+    # disambiguator must refuse with BunFormatError rather than commit to a
+    # potentially wrong guess that would corrupt non-entrypoint modules on
+    # length-changing edits.
     mods36_amb = [_module("/$bunfs/root/src/entrypoints/cli.js", "X();", ms=36)]
     for n in range(12):
         mods36_amb.append(_module(f"/$bunfs/root/mod{n}.js", f"m{n}();", ms=36))
     fx36_amb = build_bun_elf(mods36_amb, module_struct_size=36, section_header_size=8)
-    img36_amb = bh.BunImage(fx36_amb)
-    _check("ambiguous-length 36-byte form picked correctly",
-           img36_amb.module_struct_size == 36, f"got {img36_amb.module_struct_size}")
-    # And its entrypoint still resolves cleanly.
-    _check("ambiguous-length 36-byte entrypoint resolves",
-           img36_amb.entrypoint_module()["name_str"].endswith("cli.js"))
+    raised = None
+    try:
+        bh.BunImage(fx36_amb)
+    except bh.BunFormatError as exc:
+        raised = "ambiguous module table layout" in str(exc)
+    _check("ambiguous length (13*36 == 9*52) refuses with BunFormatError",
+           raised is True, f"got raised={raised}")
+
+    # Same shape from the OTHER side: a valid 52-byte form whose record-0 has
+    # an empty moduleInfo (offset>0, length==0) reads bytes 32..36 as a small
+    # value followed by zero padding, indistinguishable from a 36-byte record
+    # at record-0 alone. modules_len=468 again divides both 36 and 52, and the
+    # name field decodes cleanly under both interpretations, so the
+    # disambiguator must refuse here too.
+    def _build_52_with_empty_moduleinfo_blob():
+        """Return a fixture whose record-0 (52-byte form) has moduleInfo=(N,0),
+        sitting in a 9-module table that is length-ambiguous with the 36-byte
+        form. Hand-write the blob layout to control record-0's bytes precisely.
+        """
+        # 9 modules, 52 bytes each = 468 bytes (also divisible by 36).
+        mods52 = [
+            _module("/$bunfs/root/src/entrypoints/cli.js",
+                    "console.log('(Claude Code)');",
+                    bytecode=b"\xd4zFT" + b"\x00" * 40),
+        ]
+        for n in range(8):
+            mods52.append(_module(f"/$bunfs/root/m{n}.js", f"e{n}();"))
+        return build_bun_elf(mods52, module_struct_size=52, section_header_size=8)
+
+    fx52_amb = _build_52_with_empty_moduleinfo_blob()
+    # Sanity: confirm modules_len would be ambiguous.
+    img_check = bh.Elf64(fx52_amb).section(".bun")
+    raised = None
+    try:
+        bh.BunImage(fx52_amb)
+    except bh.BunFormatError as exc:
+        raised = "ambiguous module table layout" in str(exc)
+    _check("ambiguous length (9*52 == 13*36, empty moduleInfo) refuses",
+           raised is True, f"got raised={raised}")
 
     # --- u32 section-header form ---
     fx_u32 = build_bun_elf(mods, module_struct_size=52, section_header_size=4)

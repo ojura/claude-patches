@@ -311,20 +311,19 @@ class BunImage:
         if ok52 and not ok36:
             return 52
         if ok36 and ok52:
-            # Both pass the cheap name check. Disambiguate further by inspecting
-            # the trailing byte fields: at the 36-byte interpretation, bytes
-            # 32..36 are (encoding, loader, moduleFormat, side); at the 52-byte
-            # interpretation, bytes 32..40 are the moduleInfo range. Real bun
-            # modules use small enums for the trailing byte fields (encoding
-            # 0..3, loader 0..16ish, moduleFormat 0..3, side 0..1). The 52-byte
-            # form's moduleInfo at the same position is a u32-pair that, when
-            # interpreted as four bytes, typically has non-small values.
-            enc, ldr, fmt, side = struct.unpack_from(
-                "<BBBB", self.blob, self.modules_off + 32)
-            small_36 = enc <= 3 and ldr <= 16 and fmt <= 3 and side <= 1
-            if small_36:
-                return 36
-            return 52
+            # Both interpretations pass the name plausibility check. Earlier
+            # versions tried a cheap byte-field signature on record-0's bytes
+            # 32..36 to commit to 36 when those bytes looked like the small
+            # enums (encoding, loader, moduleFormat, side); but a valid
+            # 52-byte form with an empty moduleInfo range (offset > 0, length
+            # == 0) reads bytes 32..36 as (low_byte_of_offset, 0, 0, 0) which
+            # ALSO satisfies the "looks small" predicate. The two layouts are
+            # byte-indistinguishable at record-0 alone in that case, so any
+            # commit would risk silently corrupting non-entrypoint modules on
+            # a length-changing edit. Fail closed and let the caller resolve
+            # via a different signal (e.g. format detection from the binary
+            # version, or splitting modules across multiple records).
+            raise BunFormatError("ambiguous module table layout")
         raise BunFormatError("ambiguous module table layout")
 
     def _looks_like_overlay(self):
