@@ -369,15 +369,21 @@ def _module(name, contents, bytecode=b"", ms=52):
 
 
 def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
-                  trailing_pad=True, trailing_section=None):
+                  trailing_pad=True, trailing_section=None,
+                  trailing_pt_load=None):
     """Assemble a minimal valid bun-on-ELF64 binary (little-endian).
 
     trailing_section: optional dict {flags, sht, vaddr, size} placed in the file
     AFTER .bun, used to test the growth guards. If its SHF_ALLOC flag is set the
     repack guard must refuse to grow .bun.
 
-    Returns the binary bytes. Layout is compact but consistent: one LOAD segment
-    spanning everything, .bun aligned, section header table at EOF.
+    trailing_pt_load: optional dict {p_align, p_filesz, p_vaddr} adding a second
+    PT_LOAD segment whose file offset sits AFTER .bun. Used to test the unified
+    alignment gate: any nonzero .bun delta whose magnitude is not a multiple of
+    this segment's p_align must be refused.
+
+    Returns the binary bytes. Layout is compact but consistent: at least one
+    LOAD segment covering .bun, .bun aligned, section header table at EOF.
     """
     blob = _build_bun_blob(modules, module_struct_size, trailing_pad=trailing_pad)
     if section_header_size == 8:
@@ -401,7 +407,7 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
         trailing_name_off = names.index(b".trail\x00")
 
     n_sections = 3 + (1 if trailing_section is not None else 0)  # NULL, .bun, [.trail], .shstrtab
-    n_segments = 1
+    n_segments = 1 + (1 if trailing_pt_load is not None else 0)
 
     # File layout offsets.
     phoff = ehsize
@@ -420,6 +426,17 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
             cursor += trailing_size
         else:
             trailing_off = cursor  # NOBITS occupies no file space
+
+    tload_off = 0
+    tload_filesz = 0
+    tload_vaddr = 0
+    tload_align = 0
+    if trailing_pt_load is not None:
+        tload_filesz = trailing_pt_load.get("p_filesz", 64)
+        tload_vaddr = trailing_pt_load.get("p_vaddr", 0x600000)
+        tload_align = trailing_pt_load.get("p_align", 0x1000)
+        tload_off = cursor
+        cursor += tload_filesz
 
     shstr_off = cursor
     cursor += len(names)
@@ -448,7 +465,7 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     _struct.pack_into("<H", buf, 60, n_sections)
     _struct.pack_into("<H", buf, 62, n_sections - 1)  # e_shstrndx = last (.shstrtab)
 
-    # One LOAD segment covering the .bun payload (file and virtual sizes equal).
+    # First LOAD segment covers the .bun payload (file and virtual sizes equal).
     seg_vaddr = 0x400000
     seg_file_end = bun_off + len(bun_payload)
     po = phoff
@@ -461,8 +478,26 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     _struct.pack_into("<Q", buf, po + 40, seg_file_end)  # p_memsz
     _struct.pack_into("<Q", buf, po + 48, 0x1000)      # p_align
 
+    # Optional second LOAD segment placed AFTER .bun. We pick p_vaddr so that
+    # the loader invariant (p_offset - p_vaddr) % p_align == 0 holds initially:
+    # set p_vaddr to a value congruent to tload_off mod p_align.
+    if trailing_pt_load is not None:
+        po2 = phoff + phentsize
+        # ensure initial invariant: choose p_vaddr aligned so congruence holds
+        vaddr2 = tload_vaddr + ((tload_off - tload_vaddr) % tload_align)
+        _struct.pack_into("<I", buf, po2 + 0, _PT_LOAD)
+        _struct.pack_into("<I", buf, po2 + 4, 0x4)   # R only
+        _struct.pack_into("<Q", buf, po2 + 8, tload_off)
+        _struct.pack_into("<Q", buf, po2 + 16, vaddr2)
+        _struct.pack_into("<Q", buf, po2 + 24, vaddr2)
+        _struct.pack_into("<Q", buf, po2 + 32, tload_filesz)
+        _struct.pack_into("<Q", buf, po2 + 40, tload_filesz)
+        _struct.pack_into("<Q", buf, po2 + 48, tload_align)
+
     # Payloads.
     buf[bun_off:bun_off + len(bun_payload)] = bun_payload
+    if trailing_pt_load is not None:
+        buf[tload_off:tload_off + tload_filesz] = b"L" * tload_filesz
     if trailing_section is not None and trailing_section.get("sht", _SHT_PROGBITS) != _SHT_NOBITS:
         # fill with recognizable bytes
         buf[trailing_off:trailing_off + trailing_size] = b"T" * trailing_size
@@ -688,6 +723,68 @@ def synthetic_tests():
     bun_bl = elf_bl.section(".bun")
     _struct.pack_into("<Q", fx_badlen, bun_bl["foff"], 0xDEADBEEF)
     _check("inconsistent length header rejected", not bh.can_handle(bytes(fx_badlen)))
+
+    # --- unified PT_LOAD invariant gate: for any nonzero .bun delta, every
+    #     later PT_LOAD must keep `(p_offset - p_vaddr) mod p_align == 0`. The
+    #     guard fires symmetrically on grow AND shrink, and lets aligned deltas
+    #     and the no-op delta through. ---
+    def _try_resize(fx_bytes, contents_delta):
+        """Attempt a .bun resize by editing the entrypoint's contents by
+        `contents_delta` bytes. Returns (BunFormatError_message, output_size)."""
+        img_loc = bh.BunImage(fx_bytes)
+        ep_loc = img_loc.entrypoint_module()
+        js_loc = bh.extract_js(fx_bytes)
+        new_js = js_loc + b"P" * contents_delta if contents_delta > 0 else js_loc[:contents_delta]
+        try:
+            out = bh.repack_with_js(fx_bytes, new_js)
+            return None, len(out)
+        except bh.BunFormatError as exc:
+            return str(exc), None
+
+    # Fixture A: trailing PT_LOAD with p_align=0x1000. Page-aligned delta passes;
+    # a 7-byte non-page-aligned grow must fire the invariant.
+    fx_load = build_bun_elf(mods, trailing_pt_load={"p_align": 0x1000, "p_filesz": 64})
+    err_grow7, _ = _try_resize(fx_load, +7)
+    _check("gate fires on non-page-aligned grow (delta=+7, p_align=0x1000)",
+           err_grow7 is not None and "PT_LOAD invariant" in err_grow7, repr(err_grow7))
+
+    err_shrink5, _ = _try_resize(fx_load, -5)
+    _check("gate fires on non-page-aligned shrink (delta=-5, p_align=0x1000)",
+           err_shrink5 is not None and "PT_LOAD invariant" in err_shrink5, repr(err_shrink5))
+
+    # No-op pipeline (delta == 0) still proceeds.
+    img_noop = bh.BunImage(fx_load)
+    out_noop = bh.repack_unchanged(fx_load)
+    _check("gate does not block delta == 0 (no-op identical)", out_noop == fx_load)
+
+    # An aligned delta with a later PT_LOAD passes the gate. Build a fixture with
+    # a small p_align (4) so a small delta (multiple of 4) is admissible without
+    # forcing 4 KB of edit padding.
+    fx_load_small = build_bun_elf(mods, trailing_pt_load={"p_align": 4, "p_filesz": 64})
+    err_grow4, sz_grow4 = _try_resize(fx_load_small, +4)
+    _check("gate admits aligned grow (delta=+4, p_align=4)",
+           err_grow4 is None and sz_grow4 is not None,
+           repr(err_grow4) if err_grow4 else f"size={sz_grow4}")
+
+    # Page-aligned grow/shrink with the realistic p_align=0x1000 must also pass.
+    # This locks the implementation against a too-conservative "reject any
+    # nonzero delta whenever a later PT_LOAD exists" reading of the gate.
+    # We need the entrypoint's contents to be large enough to shrink by 0x1000.
+    big_js = b"console.log('(Claude Code)');" + b"X" * 0x2000
+    big_mods = [
+        _module("/$bunfs/root/src/entrypoints/cli.js", big_js,
+                bytecode=b"\xd4zFT" + b"\x00" * 40),
+        _module("/$bunfs/root/helper.js", "module.exports={};"),
+    ]
+    fx_page = build_bun_elf(big_mods, trailing_pt_load={"p_align": 0x1000, "p_filesz": 64})
+    err_grow_page, sz_grow_page = _try_resize(fx_page, +0x1000)
+    _check("gate admits page-aligned grow (delta=+0x1000, p_align=0x1000)",
+           err_grow_page is None and sz_grow_page is not None,
+           repr(err_grow_page) if err_grow_page else f"size={sz_grow_page}")
+    err_shrink_page, sz_shrink_page = _try_resize(fx_page, -0x1000)
+    _check("gate admits page-aligned shrink (delta=-0x1000, p_align=0x1000)",
+           err_shrink_page is None and sz_shrink_page is not None,
+           repr(err_shrink_page) if err_shrink_page else f"size={sz_shrink_page}")
 
     # --- bounds checks: a crafted modules_len that overruns the blob must raise
     #     BunFormatError, NOT let struct.error escape ---

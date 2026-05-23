@@ -280,10 +280,14 @@ class BunImage:
         """Validate that [offset, offset+length) sits inside the bun blob.
 
         Treats negative offsets/lengths and addition overflow as out-of-range.
-        Empty fields (offset 0, length 0) are always allowed; bun uses (0, 0) as
-        a tombstone for empty fields and the parser must accept them.
+        Zero-length ranges are always allowed even when the offset is nonzero;
+        bun uses zero-length fields with placeholder offsets (e.g. compile-argv
+        often has offset > 0, length 0 pointing just past the data) and the
+        parser must accept them since no bytes are actually read.
         """
-        if offset == 0 and length == 0:
+        if length == 0:
+            if offset < 0:
+                raise BunFormatError(f"{label} has negative offset")
             return
         if offset < 0 or length < 0:
             raise BunFormatError(f"{label} has negative offset/length")
@@ -482,12 +486,19 @@ def _repack_section_elf(orig_bytes, wrapped):
       - the file offset of every segment that starts after `.bun`,
       - the containing LOAD segment's filesz and memsz.
 
-    Safety guards (fail closed): refuse to grow `.bun` if doing so would shift a
-    later allocated (SHF_ALLOC) section or a later/spanning loadable segment,
-    since that would change runtime mapping semantics. The native Claude layout
-    keeps only non-allocated metadata (`.comment`, `.symtab`, `.strtab`,
-    `.shstrtab`, notes) plus the section-header table after `.bun`, so a normal
-    patch passes these guards.
+    Safety guards (fail closed, symmetric for grow AND shrink):
+      - Load-bearing invariant: for every PT_LOAD segment whose file offset is
+        shifted by the resize, the new offset must still satisfy the loader's
+        congruence `(p_offset - p_vaddr) mod p_align == 0`. If it would not,
+        refuse. This rule covers any segment-remapping case we have not
+        implemented (we never adjust p_vaddr) and subsumes naive grow/shrink
+        special cases into one invariant.
+      - Defense in depth: also refuse to shift a later allocated (SHF_ALLOC)
+        section or a later/spanning loadable segment.
+
+    The native Claude layout keeps only non-allocated metadata (`.comment`,
+    `.symtab`, `.strtab`, `.shstrtab`, notes) plus the section-header table
+    after `.bun`, with no later PT_LOAD, so normal patches pass all guards.
     """
     elf = Elf64(orig_bytes)
     bs = elf.section(".bun")
@@ -516,9 +527,14 @@ def _repack_section_elf(orig_bytes, wrapped):
         if s["name"] != ".bun" and _section_has_payload(s) and s["foff"] >= bun_end
     ]
     shifted_alloc = [s for s in shifted if s["flags"] & ELF_SHF_ALLOC]
-    if growth > 0 and shifted_alloc:
+    # Defense in depth: refuse to shift later allocated sections at all. The
+    # load-bearing alignment check below subsumes this for properly-aligned
+    # shifts, but allocated section shifts are unusual enough that we keep the
+    # narrower refusal too. Symmetric for grow AND shrink, since either changes
+    # foff without vaddr and breaks foff =~ vaddr mod p_align for those sections.
+    if growth != 0 and shifted_alloc:
         raise BunFormatError(
-            "cannot grow .bun before later allocated sections: "
+            "cannot resize .bun before later allocated sections: "
             + ", ".join(s["name"] or f"<{s['index']}>" for s in shifted_alloc))
 
     containing = _find_containing_load_segment(elf, bs)
@@ -528,10 +544,35 @@ def _repack_section_elf(orig_bytes, wrapped):
         if seg["index"] != containing and seg["filesz"] > 0
         and seg["foff"] < bun_end < seg["foff"] + seg["filesz"]
     ]
-    if growth > 0 and spanning:
+    if growth != 0 and spanning:
         raise BunFormatError(
-            "cannot grow .bun inside unrelated segments: "
+            "cannot resize .bun inside unrelated segments: "
             + ", ".join(f"{seg['index']}:{seg['type']}" for seg in spanning))
+
+    # PT_LOAD invariant gate (load-bearing): for every PT_LOAD segment whose
+    # file offset is shifted by the resize, the new offset must still satisfy
+    # the loader's congruence `(p_offset - p_vaddr) mod p_align == 0`. This is
+    # the direct invariant that keeps the dynamic loader happy; phrasing the
+    # check this way (instead of "delta divides p_align") collapses grow,
+    # shrink, and any future case where we might also adjust p_vaddr into one
+    # rule. The defense-in-depth ALLOC-section and spanning-segment refusals
+    # above remain, but this is the fundamental check.
+    if growth != 0:
+        for seg in elf.segments:
+            if seg["type"] != ELF_PT_LOAD:
+                continue
+            if seg["foff"] < bun_end:
+                continue  # not shifted by the resize
+            align = seg["align"]
+            if align in (0, 1):
+                continue  # no alignment constraint
+            new_foff = seg["foff"] + growth
+            if (new_foff - seg["vaddr"]) % align != 0:
+                raise BunFormatError(
+                    f"resizing .bun by {growth} would break PT_LOAD invariant "
+                    f"(p_offset - p_vaddr) mod p_align == 0 for segment "
+                    f"{seg['index']} (p_align={align}); this segment-remapping "
+                    f"case is not implemented")
 
     # Splice the new payload in: [0, bun_off) + wrapped + [bun_end, EOF).
     new_bytes = bytearray(orig_bytes[:bun_off]) + bytearray(wrapped) + bytearray(orig_bytes[bun_end:])
