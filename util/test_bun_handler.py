@@ -286,7 +286,7 @@ _SHF_ALLOC = 0x2
 _TRAILER = b"\n---- Bun! ----\n"
 
 
-def _build_bun_blob(modules, module_struct_size, trailing_pad=True):
+def _build_bun_blob(modules, module_struct_size, trailing_pad=True, entry_point_id=0):
     """Build a bun data blob from a list of module dicts.
 
     Each module dict: {name: bytes, contents: bytes, sourcemap: bytes,
@@ -349,7 +349,7 @@ def _build_bun_blob(modules, module_struct_size, trailing_pad=True):
     _struct.pack_into("<Q", out, offsets_off, offsets_off)
     _struct.pack_into("<I", out, offsets_off + 8, modules_off)
     _struct.pack_into("<I", out, offsets_off + 12, modules_len)
-    _struct.pack_into("<I", out, offsets_off + 16, 0)  # entry point id
+    _struct.pack_into("<I", out, offsets_off + 16, entry_point_id)
     _struct.pack_into("<I", out, offsets_off + 20, compile_argv_off)
     _struct.pack_into("<I", out, offsets_off + 24, compile_argv_len)
     _struct.pack_into("<I", out, offsets_off + 28, 0xF)  # flags
@@ -370,7 +370,7 @@ def _module(name, contents, bytecode=b"", ms=52):
 
 def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
                   trailing_pad=True, trailing_section=None,
-                  trailing_pt_load=None):
+                  trailing_pt_load=None, entry_point_id=0):
     """Assemble a minimal valid bun-on-ELF64 binary (little-endian).
 
     trailing_section: optional dict {flags, sht, vaddr, size} placed in the file
@@ -385,7 +385,8 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     Returns the binary bytes. Layout is compact but consistent: at least one
     LOAD segment covering .bun, .bun aligned, section header table at EOF.
     """
-    blob = _build_bun_blob(modules, module_struct_size, trailing_pad=trailing_pad)
+    blob = _build_bun_blob(modules, module_struct_size, trailing_pad=trailing_pad,
+                           entry_point_id=entry_point_id)
     if section_header_size == 8:
         bun_payload = _struct.pack("<Q", len(blob)) + blob
     else:
@@ -572,6 +573,33 @@ def synthetic_tests():
            f"got {img36.module_struct_size}")
     _check("36-byte form extract_js works", bh.extract_js(fx36) == b"X();")
     _check("36-byte form no-op byte-identical", bh.repack_unchanged(fx36) == fx36)
+
+    # --- entry_point_id is preferred over name heuristic ---
+    # Build a fixture where module 0 is NOT an entrypoint and module 2 IS one,
+    # with entry_point_id = 2. The handler must pick module 2 by index.
+    mods_idx = [
+        _module("/$bunfs/root/aux.js", "a();"),
+        _module("/$bunfs/root/helper.js", "h();"),
+        _module("/$bunfs/root/src/entrypoints/cli.js",
+                "console.log('(Claude Code)');", bytecode=b"\xd4zFT" + b"\x00" * 40),
+    ]
+    fx_idx = build_bun_elf(mods_idx, entry_point_id=2)
+    img_idx = bh.BunImage(fx_idx)
+    _check("entry_point_id=2 picks module 2 (not name-search of module 0)",
+           img_idx.entrypoint_module()["index"] == 2,
+           f"got index {img_idx.entrypoint_module()['index']}")
+
+    # And a HARD FAIL when entry_point_id points at a module whose name does
+    # not match the entrypoint heuristic: silent fallback would patch the wrong
+    # module and still pass smoke tests.
+    fx_mismatch = build_bun_elf(mods_idx, entry_point_id=0)  # module 0 is "aux.js"
+    img_mm = bh.BunImage(fx_mismatch)
+    raised = False
+    try:
+        img_mm.entrypoint_module()
+    except bh.BunFormatError as exc:
+        raised = "disagree" in str(exc)
+    _check("entry_point_id pointing at non-entrypoint module hard-fails", raised)
 
     # --- 36-vs-52 disambiguation under length ambiguity ---
     # 13 modules at 36 bytes/record = 468 bytes; 468 also divides 52 (= 9 * 52),

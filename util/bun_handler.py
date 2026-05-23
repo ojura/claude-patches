@@ -418,6 +418,27 @@ class BunImage:
         )
 
     def entrypoint_module(self):
+        """Return the entrypoint module record.
+
+        Prefer the offsets-struct `entry_point_id` (the value bun itself uses to
+        dispatch at startup); if the module at that index also passes our name
+        heuristic, return it. If the indexed module's name does NOT look like an
+        entrypoint, refuse with BunFormatError rather than silently falling back
+        to a name search, since a silent fallback could patch the wrong module
+        and still pass superficial smoke tests. The fallback to a name search
+        is only used when entry_point_id is out of range (older builds that did
+        not record a useful index there).
+        """
+        if 0 <= self.entry_point_id < len(self.modules):
+            indexed = self.modules[self.entry_point_id]
+            if self.is_entrypoint_name(indexed["name_str"]):
+                return indexed
+            raise BunFormatError(
+                f"entry_point_id and name heuristic disagree: bun says module "
+                f"{self.entry_point_id} ({indexed['name_str']!r}) is the "
+                f"entrypoint, but its name does not match the heuristic. "
+                f"Refusing to silently patch a different module.")
+        # entry_point_id out of range: fall back to a name search.
         for m in self.modules:
             if self.is_entrypoint_name(m["name_str"]):
                 return m
