@@ -479,15 +479,25 @@ def _apply_blob_edits(img, edits):
     edit_list = []
     for (mi, field), new_bytes in edits.items():
         off, length = img.modules[mi][field]
-        # Empty (0, 0) is bun's tombstone for an absent field. Growing it would
-        # splice the new bytes at blob position 0 (which holds the zero-prefix
-        # region), trampling the prefix and silently shifting EVERY downstream
-        # field. Refuse rather than guess where a missing field should live.
-        # Shrinking a (0, 0) to empty is a no-op and is allowed.
-        if off == 0 and length == 0 and len(new_bytes) > 0:
+        # Zero-length fields come in two flavours, both refusing the same way
+        # for the same reason:
+        #   (0, 0)       bun's tombstone for an absent field.
+        #   (N>0, 0)     placeholder offset pointing past data (e.g. how the
+        #                real binary records compile-exec-argv).
+        # In either case the field reserves no bytes inside the blob, so a
+        # grow would have to splice the new bytes at `off` and shift every
+        # downstream region; the splice/remap path treats `off` as the start
+        # of a region we already own and trusts it not to overlap anything,
+        # which only holds when the field is non-empty. Refuse a non-empty
+        # replacement for any zero-length source field rather than corrupt
+        # downstream offsets. Shrinks of zero-length to empty are no-ops and
+        # remain allowed.
+        if length == 0 and len(new_bytes) > 0:
             raise BunFormatError(
-                f"cannot grow empty (0,0) field module[{mi}].{field}: no offset "
-                f"is recorded for where the field should live")
+                f"cannot grow zero-length field module[{mi}].{field} "
+                f"(offset={off}): the field reserves no bytes in the blob, "
+                f"so growing it would shift downstream regions without a "
+                f"matching offset remap")
         edit_list.append((off, length, mi, field, new_bytes))
     edit_list.sort(key=lambda e: e[0])
 

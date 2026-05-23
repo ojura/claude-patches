@@ -661,10 +661,11 @@ def synthetic_tests():
     _check("36-byte form extract_js works", bh.extract_js(fx36) == b"X();")
     _check("36-byte form no-op byte-identical", bh.repack_unchanged(fx36) == fx36)
 
-    # --- (0,0) field grow is refused (no offset to splice into) ---
-    # The helper module's bytecode field is (0,0); growing it would splice at
-    # blob position 0 (the zero-prefix region) and silently shift downstream
-    # fields. The handler must refuse with a clear error.
+    # --- zero-length field grow is refused regardless of offset ---
+    # Two flavours of zero-length field: (0, 0) tombstone and (N>0, 0)
+    # placeholder. Both reserve no bytes in the blob, so growing either would
+    # shift downstream regions without a matching offset remap. _apply_blob_edits
+    # must refuse both with the same BunFormatError shape.
     mods00 = [
         _module("/$bunfs/root/src/entrypoints/cli.js",
                 "console.log('(Claude Code)');", bytecode=b"\xd4zFT" + b"\x00" * 40),
@@ -680,8 +681,34 @@ def synthetic_tests():
     try:
         bh._apply_blob_edits(img00, {(helper["index"], "bytecode"): b"new bytecode data"})
     except bh.BunFormatError as exc:
-        raised = "cannot grow empty (0,0) field" in str(exc)
+        raised = "cannot grow zero-length field" in str(exc)
     _check("growing a (0,0) field raises BunFormatError", raised)
+
+    # --- (N>0, 0) placeholder grow is also refused ---
+    # Build a fresh fixture and hand-edit the helper module's bytecode field
+    # to (offset=8, length=0). offset 8 sits inside the blob's zero prefix
+    # (valid but reserves no bytes), so _require_range admits it during parse,
+    # and the only thing standing between us and a silent corruption is the
+    # zero-length grow guard.
+    fxN0 = bytearray(build_bun_elf(mods00))
+    bun_sec_N0 = bh.Elf64(bytes(fxN0)).section(".bun")
+    imgN0_pre = bh.BunImage(bytes(fxN0))
+    helperN0 = [m for m in imgN0_pre.modules if not bh.BunImage.is_entrypoint_name(m["name_str"])][0]
+    # Record layout: in the 52-byte struct the bytecode field sits at offset
+    # 24 inside the record. Compute the absolute file offset and overwrite.
+    table_abs = bun_sec_N0["foff"] + imgN0_pre.section_header_size + imgN0_pre.modules_off
+    helper_record_abs = table_abs + helperN0["index"] * imgN0_pre.module_struct_size
+    _struct.pack_into("<II", fxN0, helper_record_abs + 24, 8, 0)  # bytecode -> (8, 0)
+    imgN0 = bh.BunImage(bytes(fxN0))
+    helperN0_after = [m for m in imgN0.modules if not bh.BunImage.is_entrypoint_name(m["name_str"])][0]
+    _check("(N>0, 0) test fixture has bytecode field at (8, 0)",
+           helperN0_after["bytecode"] == (8, 0), f"got {helperN0_after['bytecode']}")
+    raised = False
+    try:
+        bh._apply_blob_edits(imgN0, {(helperN0_after["index"], "bytecode"): b"new bytecode data"})
+    except bh.BunFormatError as exc:
+        raised = "cannot grow zero-length field" in str(exc)
+    _check("growing a (N>0, 0) field raises BunFormatError", raised)
 
     # --- entry_point_id is preferred over name heuristic ---
     # Build a fixture where module 0 is NOT an entrypoint and module 2 IS one,
