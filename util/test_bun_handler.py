@@ -20,6 +20,12 @@ Real-binary gates (need a native binary; skipped cleanly without one):
   6. Multiple simultaneous edits through _apply_blob_edits (grow + a second
      module edit): the remap arithmetic is correct, the binary runs, shows the
      edit, and is deterministic.
+  7. CONTROL-FLOW source edit (Patch-M shape): dropping an operand from a `||`
+     conditional changes which branch executes, observable in --version. Locks
+     in that source control-flow edits do take effect with bytecode left
+     intact, so the architecture's "patch source in place, keep bytecode" path
+     is exercised by CI on every run rather than relying on chat-history
+     archaeology.
 
 Always-run gates (self-contained, no native binary needed):
   4. Format detection / guards: non-bun and truncated inputs rejected clearly.
@@ -160,6 +166,87 @@ def gate5_shrink(data):
     if not bun_handler.can_handle(out):
         return False, "shrunk binary no longer parses"
     return True, f"negative delta -100 round-trips; new size {len(out)}"
+
+
+def gate7_control_flow(data):
+    """Control-flow source edit on the real binary: dropping an operand from a
+    `||` conditional changes which branch executes, observable in --version.
+
+    This is the regression test for the bytecode-vs-source-execution question.
+    JSC bytecode reads from the live source buffer for this build, so a real
+    control-flow edit (NOT just a string-literal swap) takes effect with the
+    bytecode left intact. If a future bun runtime ever changes this and runs
+    bytecode authoritatively, this gate fails and the architecture's whole
+    premise (keep bytecode untouched, patch source in place) needs to be
+    revisited rather than discovered through a broken release.
+
+    Mechanism:
+      1. Inject a conditional `if(false||true)return"_MN_TRUE";` into jS's body.
+         The version template renders `${jS()}` so output gains "_MN_TRUE" iff
+         the injected source ran (sanity step, prevents a false GREEN when the
+         edit doesn't land at all).
+      2. Apply Patch-M shape: drop the `||true` operand from that conditional.
+         Output must change from "_MN_TRUE" to "_MN_BASE", proving the
+         control-flow edit altered which branch executes.
+    """
+    import tempfile
+    js = bun_handler.extract_js(data)
+    anchor = b'}.BUILD_REF_NAME){return""}'
+    if anchor not in js:
+        return None, "skip: jS body anchor not present in this build"
+    if js.count(anchor) != 1:
+        return None, f"skip: jS body anchor not unique (count={js.count(anchor)})"
+
+    # Step 1: inject the conditional. Sanity-checks that the edit lands and
+    # that some branch of the source actually executes.
+    sanity_form = b'}.BUILD_REF_NAME){if(false||true)return"_MN_TRUE";return"_MN_BASE"}'
+    js_sanity = js.replace(anchor, sanity_form)
+    out_sanity = bun_handler.repack_with_js(data, js_sanity)
+    with tempfile.NamedTemporaryFile(prefix="pfg-cf-sanity-", suffix=".bin",
+                                     delete=False) as tf:
+        tf.write(out_sanity); tmp_sanity = tf.name
+    try:
+        os.chmod(tmp_sanity, 0o755)
+        try:
+            r1 = subprocess.run([tmp_sanity, "--version"], capture_output=True,
+                                text=True, timeout=90)
+        except OSError as exc:
+            return None, f"skip: cannot exec produced binary ({exc})"
+        if r1.returncode != 0:
+            return False, f"sanity binary exited {r1.returncode}: {r1.stderr.strip()[:160]}"
+        if "_MN_TRUE" not in r1.stdout:
+            return False, (f"sanity step did not show _MN_TRUE; output: "
+                           f"{r1.stdout.strip()!r}. Either the jS body edit did "
+                           f"not land or bytecode is now overriding source.")
+    finally:
+        os.unlink(tmp_sanity)
+
+    # Step 2: Patch-M-shape operand drop. The same conditional with `||true`
+    # removed must take the OTHER branch.
+    patched_m_form = b'}.BUILD_REF_NAME){if(false)return"_MN_TRUE";return"_MN_BASE"}'
+    js_m = js.replace(anchor, patched_m_form)
+    out_m = bun_handler.repack_with_js(data, js_m)
+    with tempfile.NamedTemporaryFile(prefix="pfg-cf-m-", suffix=".bin",
+                                     delete=False) as tf:
+        tf.write(out_m); tmp_m = tf.name
+    try:
+        os.chmod(tmp_m, 0o755)
+        r2 = subprocess.run([tmp_m, "--version"], capture_output=True,
+                            text=True, timeout=90)
+        if r2.returncode != 0:
+            return False, f"Patch-M-shape binary exited {r2.returncode}: {r2.stderr.strip()[:160]}"
+        if "_MN_TRUE" in r2.stdout:
+            return False, (f"Patch-M-shape edit did not change branch; output "
+                           f"still shows _MN_TRUE: {r2.stdout.strip()!r}. "
+                           f"Bytecode appears to be driving control flow for "
+                           f"this site; the architecture's keep-bytecode-intact "
+                           f"premise no longer holds.")
+        if "_MN_BASE" not in r2.stdout:
+            return False, (f"Patch-M-shape edit produced unexpected output: "
+                           f"{r2.stdout.strip()!r}")
+        return True, "operand-drop changes branch: _MN_TRUE -> _MN_BASE"
+    finally:
+        os.unlink(tmp_m)
 
 
 def gate6_multi_edit(data):
@@ -934,7 +1021,8 @@ def main():
                       ("GATE 2 length-changing + runs + shows edit", gate2_length_change),
                       ("GATE 3 determinism", gate3_determinism),
                       ("GATE 5 shrinking edit (negative delta)", gate5_shrink),
-                      ("GATE 6 multi-edit remap + runs", gate6_multi_edit)]:
+                      ("GATE 6 multi-edit remap + runs", gate6_multi_edit),
+                      ("GATE 7 control-flow edit (Patch-M shape)", gate7_control_flow)]:
         ok, detail = fn(data)
         if ok is None:
             print(f"{label}: SKIP ({detail})")
