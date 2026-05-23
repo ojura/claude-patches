@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Standalone test harness for the splice tooling:
-  - util/extract-splices.py: region diffing + widening + expected_count emission
+  - util/extract_splices.py: region diffing + widening + expected_count emission
     + the loud collision report that replaces the old bare SystemExit.
   - the expected_count apply ALGORITHM (defined here as the canonical reference),
     proving default-1 reproduces today's `str.replace(old,new,1)` + `count==1`
@@ -13,17 +13,12 @@ prebuilt apply.py; that integration is a separate, later step.
 Run: python3 util/test_splices.py
 Exit code 0 on full pass, 1 otherwise.
 """
-import importlib.util
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-# extract-splices.py has a hyphen, so import it by file path.
-_spec = importlib.util.spec_from_file_location(
-    "extract_splices", os.path.join(HERE, "extract-splices.py"))
-extract_splices = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(extract_splices)
+sys.path.insert(0, HERE)
+import extract_splices  # noqa: E402  (sys.path insert must precede this)
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +35,7 @@ _spec.loader.exec_module(extract_splices)
 #   apply_splices_to_bytes wrapper. It decodes with errors='surrogateescape',
 #   runs the splice loop, then encodes back with errors='surrogateescape',
 #   restoring any non-UTF-8 bytes exactly. The extract side
-#   (util/extract-splices.py) emits old/new using the same option, so the
+#   (util/extract_splices.py) emits old/new using the same option, so the
 #   round-trip is byte-exact regardless of UTF-8 validity. The synthesized
 #   apply.py template must carry this option through unchanged.
 # ---------------------------------------------------------------------------

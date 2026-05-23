@@ -5,7 +5,7 @@ extension version.
 
 Given a patched extension directory (post-A-K) and its three pre-patch
 backups, this:
-  1. Diffs each file against its .bak via util/extract-splices.py
+  1. Diffs each file against its .bak via util/extract_splices.py
   2. Aggregates the splices into a single self-contained Python script
   3. Validates the script is byte-stable (running it on the pristine
      .bak files reproduces the patched files exactly)
@@ -43,7 +43,7 @@ from version import PATCHSET_VERSION, SIGNATURE  # SSOT extracted from skill/SKI
 
 def extract(file_path: str, bak_path: str):
     out = subprocess.check_output(
-        ["python3", os.path.join(HERE, "extract-splices.py"), file_path, bak_path],
+        ["python3", os.path.join(HERE, "extract_splices.py"), file_path, bak_path],
         text=True,
     )
     return json.loads(out)

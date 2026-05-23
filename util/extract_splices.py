@@ -4,7 +4,7 @@ Diff a patched bundle file against its pre-patch backup and emit splice records
 suitable for a prebuilt apply script.
 
 Usage:
-  python3 util/extract-splices.py /path/to/file /path/to/file.bak
+  python3 util/extract_splices.py /path/to/file /path/to/file.bak
 
 Algorithm:
   - Walk byte-by-byte to find all positions where the two files differ.
@@ -412,7 +412,7 @@ def _report_hard_collision(sa_s, sa_e, collision):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        sys.exit("usage: extract-splices.py <patched_file> <pre_patch_backup>")
+        sys.exit("usage: extract_splices.py <patched_file> <pre_patch_backup>")
     patched, unpatched = sys.argv[1], sys.argv[2]
     splices = extract(unpatched, patched)
     json.dump(splices, sys.stdout, indent=2)

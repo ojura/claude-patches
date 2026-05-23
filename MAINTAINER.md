@@ -57,7 +57,7 @@ patched live extension dir          maintainer tool             new prebuilt
 
    What the tool does:
 
-   - Calls `util/extract-splices.py` against each of the three target
+   - Calls `util/extract_splices.py` against each of the three target
      files, diffing patched vs `.bak` and emitting minimal-context
      splice pairs widened until each `old` is unique-1 in the
      unpatched bundle.
