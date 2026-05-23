@@ -262,6 +262,62 @@ def test_surrogateescape_roundtrip(tmp):
     check("non-UTF-8 bytes \\xfe\\xff present in output", b"\xfe\xff" in out_bytes)
 
 
+def test_collision_path_surrogateescape(tmp):
+    """The COLLISION path must also round-trip non-UTF-8 bytes.
+
+    test_surrogateescape_roundtrip covers the unique-anchor path. The collision
+    path (multi-site identical edits collapsed into one expected_count=N splice)
+    has its own decode/encode pair inside _resolve_collision; if that pair is
+    asymmetric, a multi-site collision whose anchor window includes non-UTF-8
+    bytes raises UnicodeEncodeError at extract time instead of emitting a
+    valid replace-all splice.
+    """
+    print("test: collision path survives non-UTF-8 in anchor window")
+    mc = extract_splices.MAX_CONTEXT
+    # Filler longer than 2*MAX_CONTEXT so widen-to-unique cannot escape.
+    filler = b"FILLER_BLOCK_" * (2 * mc // 13 + 10)
+    assert len(filler) > 2 * mc
+    site_pre = b'render(opts,{verbose:cfg.v,mode:"compact"});'
+    site_post = b'render(opts,{verbose:!0,mode:"compact"});'
+    # Place the non-UTF-8 bytes IMMEDIATELY adjacent to the changed span so any
+    # widening that captures the changed span also captures \xff\xfe. The
+    # count-based widening in _resolve_collision stops at the smallest window
+    # whose occurrence count equals K, which can be well under MAX_CONTEXT;
+    # putting the bytes inside MIN_CONTEXT (40 each side) guarantees they
+    # are inside the resolved anchor.
+    near_left = b"\xff\xfe NEAR_LEFT "
+    near_right = b" NEAR_RIGHT \xfe\xff"
+    unit = filler + near_left + site_pre + near_right + filler
+    boundary = b"\n/*BOUNDARY_A*/\n" + b"z" * 50 + b"\n/*BOUNDARY_B*/\n"
+    pre = b"//HEAD\n" + unit + boundary + unit + b"//FOOT\n"
+    post = pre.replace(site_pre, site_post)
+    assert post.count(site_post) == 2
+    assert b"\xff\xfe" in pre and b"\xfe\xff" in pre
+
+    pre_p, post_p = write_pair_bytes(tmp, pre, post)
+    raised = None
+    try:
+        splices = extract_splices.extract(pre_p, post_p)
+    except UnicodeEncodeError as exc:
+        raised = f"UnicodeEncodeError: {exc}"
+        splices = None
+    check("collision-path extract did not raise UnicodeEncodeError",
+          raised is None, raised or "")
+    if splices is None:
+        return
+    check("collision-path emits one splice", len(splices) == 1,
+          f"got {len(splices)}")
+    if splices:
+        check("collision-path splice has expected_count == 2",
+              splices[0].get("expected_count") == 2,
+              f"got {splices[0].get('expected_count')}")
+    # Round-trip through the bytes wrapper.
+    out_bytes = apply_splices_to_bytes(pre, splices)
+    check("collision-path round-trips byte-identically", out_bytes == post,
+          f"len out={len(out_bytes)} expected={len(post)}")
+    check("non-UTF-8 bytes survive collision-path apply", b"\xff\xfe" in out_bytes)
+
+
 def test_hard_collision_reports_not_silent(tmp):
     """When two identical-context sites need DIFFERENT edits, replace-all cannot
     represent it; the extractor must raise a loud SystemExit (collision report),
@@ -302,6 +358,7 @@ def main():
         test_clamped_edge_collision(tmp)
         test_expected_count_gate_rejects_wrong_count(tmp)
         test_surrogateescape_roundtrip(tmp)
+        test_collision_path_surrogateescape(tmp)
         test_hard_collision_reports_not_silent(tmp)
     ok = all(PASS)
     print(f"\nSUITE {'PASS' if ok else 'FAIL'} ({sum(PASS)}/{len(PASS)} checks)")

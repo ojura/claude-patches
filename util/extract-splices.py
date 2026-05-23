@@ -290,7 +290,12 @@ def extract(unpatched_path: str, patched_path: str):
             multi = _resolve_collision(a, b, sa_s, sa_e, sb_s, sb_e, collision)
             if multi is None:
                 _report_hard_collision(sa_s, sa_e, collision)
-            old_bytes = multi["old"].encode("utf-8")
+            # multi["old"] was decoded with surrogateescape inside
+            # _resolve_collision, so it may contain lone surrogate code points
+            # standing in for non-UTF-8 bytes. The matching encode option here
+            # restores those bytes exactly; a plain utf-8 encode would raise
+            # UnicodeEncodeError on any anchor window that included non-UTF-8.
+            old_bytes = multi["old"].encode("utf-8", errors="surrogateescape")
             inner_start = multi["_inner_start"]
             inner_end = multi["_inner_end"]
             # Mark the changed span inside every occurrence of the anchor.
