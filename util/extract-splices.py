@@ -19,6 +19,15 @@ Algorithm:
 Output format: a JSON list of dicts, each:
     {"offset": int, "old": str, "new": str, "expected_count": int}
 
+APPLY CONTRACT (surrogateescape symmetry):
+  Both `old` and `new` are produced by decoding the source bytes with
+  `errors='surrogateescape'`, so non-UTF-8 bytes in the bundle become lone
+  surrogate code points. The apply path MUST also use surrogateescape on both
+  the decode (when reading the target file) and the encode (when writing it
+  back), otherwise a splice carrying surrogate-escaped bytes will corrupt on
+  the round trip. The reference apply algorithm in util/test_splices.py and
+  any synthesized apply.py template must carry this option through.
+
 expected_count is the number of occurrences of `old` the apply step should
 replace, and how many it must find (a fail-closed gate). It is 1 for the common
 unique-anchor case, which is exactly the historical behavior (find one, replace
@@ -242,8 +251,8 @@ def _resolve_collision(a: bytes, b: bytes, sa_s, sa_e, sb_s, sb_e, collision):
         return None
     return {
         "offset": sa_s,
-        "old": old_bytes.decode("utf-8"),
-        "new": new_bytes.decode("utf-8"),
+        "old": old_bytes.decode("utf-8", errors="surrogateescape"),
+        "new": new_bytes.decode("utf-8", errors="surrogateescape"),
         "expected_count": count,
         # Internal (stripped before emission): where the changed span sits inside
         # `old`, so extract() can mark every covered occurrence.
@@ -306,12 +315,12 @@ def extract(unpatched_path: str, patched_path: str):
             anchor_lo, anchor_hi = widen_to_unique(a, sa_s, sa_e)
         except WidenCollision:
             continue  # already turned into a replace-all in the first pass
-        old = a[anchor_lo:anchor_hi].decode("utf-8")
+        old = a[anchor_lo:anchor_hi].decode("utf-8", errors="surrogateescape")
         new = (
             a[anchor_lo:sa_s]
             + b[sb_s:sb_e]
             + a[sa_e:anchor_hi]
-        ).decode("utf-8")
+        ).decode("utf-8", errors="surrogateescape")
         out.append({
             "offset": sa_s,
             "old": old,
@@ -333,13 +342,13 @@ def _verify_splices(a: bytes, b: bytes, splices):
     we refuse to emit a splice set that would not reproduce the target rather
     than shipping a silently broken prebuilt.
     """
-    try:
-        text = a.decode("utf-8")
-        target = b.decode("utf-8")
-    except UnicodeDecodeError:
-        # Splice old/new are decoded as utf-8 elsewhere, so non-utf-8 inputs are
-        # already unsupported; skip the simulation rather than crash here.
-        return
+    # surrogateescape lets us round-trip arbitrary bytes through a str: any
+    # non-UTF-8 byte becomes a lone-surrogate code point, and re-encoding with
+    # the same option restores the original bytes exactly. This pairing is the
+    # contract that the apply side must honor (see APPLY CONTRACT in the
+    # module docstring).
+    text = a.decode("utf-8", errors="surrogateescape")
+    target = b.decode("utf-8", errors="surrogateescape")
     for sp in splices:
         old = sp["old"]
         new = sp["new"]

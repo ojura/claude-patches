@@ -33,6 +33,16 @@ _spec.loader.exec_module(extract_splices)
 # Each splice is a dict: {"old": str, "new": str, "expected_count": int}.
 # Default expected_count is 1 == today's behavior:
 #     count must equal expected_count, then replace exactly that many.
+#
+# Surrogateescape symmetry contract:
+#   apply_splices itself operates on str. For arbitrary byte input (the real
+#   shape of bundle files, which may contain non-UTF-8 bytes), use the
+#   apply_splices_to_bytes wrapper. It decodes with errors='surrogateescape',
+#   runs the splice loop, then encodes back with errors='surrogateescape',
+#   restoring any non-UTF-8 bytes exactly. The extract side
+#   (util/extract-splices.py) emits old/new using the same option, so the
+#   round-trip is byte-exact regardless of UTF-8 validity. The synthesized
+#   apply.py template must carry this option through unchanged.
 # ---------------------------------------------------------------------------
 
 def apply_splices(text: str, splices) -> str:
@@ -51,6 +61,19 @@ def apply_splices(text: str, splices) -> str:
                 f"splice {i}: anchor count {count} != expected_count {expected}")
         text = text.replace(old, new, expected)
     return text
+
+
+def apply_splices_to_bytes(data: bytes, splices) -> bytes:
+    """Apply splices to raw bytes, preserving non-UTF-8 bytes exactly.
+
+    decode -> str-replace -> encode, both ends using errors='surrogateescape'
+    so arbitrary input bytes survive the round trip. This is the canonical
+    shape the synthesized apply.py will use; tests exercise it directly to
+    keep the contract honest.
+    """
+    text = data.decode("utf-8", errors="surrogateescape")
+    out = apply_splices(text, splices)
+    return out.encode("utf-8", errors="surrogateescape")
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +95,16 @@ def write_pair(tmpdir, pre, post):
         f.write(pre)
     with open(post_p, "w") as f:
         f.write(post)
+    return pre_p, post_p
+
+
+def write_pair_bytes(tmpdir, pre_b, post_b):
+    pre_p = os.path.join(tmpdir, "pre.bin")
+    post_p = os.path.join(tmpdir, "post.bin")
+    with open(pre_p, "wb") as f:
+        f.write(pre_b)
+    with open(post_p, "wb") as f:
+        f.write(post_b)
     return pre_p, post_p
 
 
@@ -202,6 +235,33 @@ def test_expected_count_gate_rejects_wrong_count(tmp):
     check("expected_count=3 replaces all three", out == "aYa Yb Yc", repr(out))
 
 
+def test_surrogateescape_roundtrip(tmp):
+    """A pre/post pair with non-UTF-8 bytes near the changed region must extract
+    cleanly and re-apply byte-identically through the surrogateescape contract.
+
+    Without symmetric surrogateescape on the decode + encode sides, any splice
+    carrying a non-UTF-8 byte would corrupt on the round trip.
+    """
+    print("test: non-UTF-8 bytes survive extract -> apply round trip")
+    # \xff\xfe is invalid UTF-8 and would raise on a strict decode. Place it on
+    # both sides of the changed region so any decode/encode asymmetry shows up.
+    prefix = b"prefix-context-block-A" * 4
+    suffix = b"suffix-context-block-B" * 4
+    pre = prefix + b"\xff\xfe" + b"render({v:cfg.v})" + b"\xfe\xff" + suffix
+    post = prefix + b"\xff\xfe" + b"render({v:!0})" + b"\xfe\xff" + suffix
+    pre_p, post_p = write_pair_bytes(tmp, pre, post)
+    splices = extract_splices.extract(pre_p, post_p)
+    check("non-UTF-8 pre/post extracts without raising", len(splices) >= 1,
+          f"got {len(splices)}")
+    # Round-trip through the bytes wrapper.
+    out_bytes = apply_splices_to_bytes(pre, splices)
+    check("apply_splices_to_bytes reproduces post exactly", out_bytes == post,
+          f"len out={len(out_bytes)} expected={len(post)}")
+    # And explicitly verify the non-UTF-8 bytes survived.
+    check("non-UTF-8 bytes \\xff\\xfe present in output", b"\xff\xfe" in out_bytes)
+    check("non-UTF-8 bytes \\xfe\\xff present in output", b"\xfe\xff" in out_bytes)
+
+
 def test_hard_collision_reports_not_silent(tmp):
     """When two identical-context sites need DIFFERENT edits, replace-all cannot
     represent it; the extractor must raise a loud SystemExit (collision report),
@@ -241,6 +301,7 @@ def main():
         test_multi_site_expected_count(tmp)
         test_clamped_edge_collision(tmp)
         test_expected_count_gate_rejects_wrong_count(tmp)
+        test_surrogateescape_roundtrip(tmp)
         test_hard_collision_reports_not_silent(tmp)
     ok = all(PASS)
     print(f"\nSUITE {'PASS' if ok else 'FAIL'} ({sum(PASS)}/{len(PASS)} checks)")
