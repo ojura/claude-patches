@@ -1084,15 +1084,34 @@ def main():
         print("\nSUITE FAIL")
         return 1
 
-    for label, fn in [("GATE 1 no-op byte-identical", gate1_noop),
-                      ("GATE 2 length-changing + runs + shows edit", gate2_length_change),
-                      ("GATE 3 determinism", gate3_determinism),
-                      ("GATE 5 shrinking edit (negative delta)", gate5_shrink),
-                      ("GATE 6 multi-edit remap + runs", gate6_multi_edit),
-                      ("GATE 7 control-flow edit (Patch-M shape)", gate7_control_flow)]:
+    # Strict-mode gate runner: CLAUDE_PFG_STRICT_GATES=gate7[,gateN...] promotes
+    # SKIP -> FAIL for the listed gate ids; CLAUDE_PFG_STRICT_GATES_WAIVE=gate7
+    # overrides strict mode for that gate (SKIP stays SKIP). Intended for CI
+    # release synthesis (per plan section 6 step 11b) so load-bearing gates
+    # (esp. gate 7's control-flow proof) cannot silently degrade when a future
+    # Anthropic bundle bump moves the anchor. Default with no env var is
+    # unchanged: skip-permissive for local dev.
+    strict_gates = set(g.strip() for g in os.environ.get(
+        "CLAUDE_PFG_STRICT_GATES", "").split(",") if g.strip())
+    waived_gates = set(g.strip() for g in os.environ.get(
+        "CLAUDE_PFG_STRICT_GATES_WAIVE", "").split(",") if g.strip())
+    for gate_id, label, fn in [
+        ("gate1", "GATE 1 no-op byte-identical", gate1_noop),
+        ("gate2", "GATE 2 length-changing + runs + shows edit", gate2_length_change),
+        ("gate3", "GATE 3 determinism", gate3_determinism),
+        ("gate5", "GATE 5 shrinking edit (negative delta)", gate5_shrink),
+        ("gate6", "GATE 6 multi-edit remap + runs", gate6_multi_edit),
+        ("gate7", "GATE 7 control-flow edit (Patch-M shape)", gate7_control_flow),
+    ]:
         ok, detail = fn(data)
         if ok is None:
-            print(f"{label}: SKIP ({detail})")
+            if gate_id in strict_gates and gate_id not in waived_gates:
+                print(f"{label}: FAIL (strict mode: {gate_id} required to PASS, "
+                      f"got SKIP; detail: {detail!r}; set "
+                      f"CLAUDE_PFG_STRICT_GATES_WAIVE={gate_id} to override)")
+                results.append(False)
+            else:
+                print(f"{label}: SKIP ({detail})")
         else:
             print(f"{label}: {'PASS' if ok else 'FAIL'} ({detail})")
             results.append(ok)
