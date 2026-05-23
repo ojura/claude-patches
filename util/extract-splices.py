@@ -192,26 +192,43 @@ def _resolve_collision(a: bytes, b: bytes, sa_s, sa_e, sb_s, sb_e, collision):
     uniform (different patched values), in which case the caller reports a hard
     collision that the simple model cannot represent.
     """
-    anchor = collision.anchor
     count = collision.count
     if count < 2:
         return None
-    # widen_to_unique's last iteration used symmetric MAX_CONTEXT padding around
-    # the changed span, clamped to the file. Reconstruct that window so we know
-    # where the changed span sits inside the anchor, then build the swapped form.
-    lo = max(0, sa_s - MAX_CONTEXT)
-    hi = min(len(a), sa_e + MAX_CONTEXT)
-    old_bytes = a[lo:hi]
-    inner_start = sa_s - lo
-    inner_end = sa_e - lo
-    if old_bytes != anchor:
-        # Window clamped at a file edge so it does not equal the handed anchor;
-        # fall back to the anchor and recompute the changed-span offset against
-        # its real position in `a`.
-        first = a.find(anchor)
-        inner_start = sa_s - first
-        inner_end = sa_e - first
-        old_bytes = anchor
+    # Derive a SITE-INDEPENDENT anchor for the replace-all. widen_to_unique's
+    # window was clamped to whichever region it was called on, so two colliding
+    # sites near opposite file edges would yield different clamped windows and
+    # fail to dedupe (one would be reprocessed as a stale expected_count=1
+    # splice). Instead, widen the changed span [sa_s, sa_e) symmetrically until
+    # the window occurs exactly `count` times in `a`; because all K colliding
+    # sites share the same identical run, this produces the SAME old at every
+    # site regardless of edge clamping. Cap at MAX_CONTEXT.
+    #
+    # The window can clamp at a file edge on one side. That is fine for a
+    # replace-all as long as the resulting old still occurs exactly `count`
+    # times and maps uniformly to new (both verified below); a clamped-but-still
+    # K-occurring window is a valid anchor because the K sites share that run.
+    old_bytes = None
+    inner_start = inner_end = None
+    pad = MIN_CONTEXT
+    while pad <= MAX_CONTEXT:
+        lo = max(0, sa_s - pad)
+        hi = min(len(a), sa_e + pad)
+        window = a[lo:hi]
+        occ = a.count(window)
+        if occ <= count:
+            # First pad at which the window stops occurring more than `count`
+            # times. occ < count cannot happen (the window contains this site),
+            # so occ == count here: a clean replace-all anchor.
+            old_bytes = window
+            inner_start = sa_s - lo
+            inner_end = sa_e - lo
+            break
+        pad += 20
+    if old_bytes is None:
+        # Could not pin the occurrence count down to `count` within MAX_CONTEXT;
+        # not representable as a uniform replace-all.
+        return None
     new_bytes = old_bytes[:inner_start] + b[sb_s:sb_e] + old_bytes[inner_end:]
 
     # Verify every occurrence of old_bytes in `a` becomes new_bytes in `b`.
@@ -228,6 +245,10 @@ def _resolve_collision(a: bytes, b: bytes, sa_s, sa_e, sb_s, sb_e, collision):
         "old": old_bytes.decode("utf-8"),
         "new": new_bytes.decode("utf-8"),
         "expected_count": count,
+        # Internal (stripped before emission): where the changed span sits inside
+        # `old`, so extract() can mark every covered occurrence.
+        "_inner_start": inner_start,
+        "_inner_end": inner_end,
     }
 
 
@@ -239,22 +260,52 @@ def extract(unpatched_path: str, patched_path: str):
     if a == b:
         return []
     regions = find_diff_regions(a, b)
+
+    # First pass: resolve colliding regions into replace-all splices and record
+    # which changed-span positions each one covers. A replace-all for an anchor
+    # that occurs K times in `a` covers the changed span inside ALL K occurrences,
+    # which correspond to K of the diff regions. Recording those covered spans
+    # lets the second pass skip the other regions of the same edit instead of
+    # emitting a stale per-site splice for a span the replace-all already handles
+    # (this is the mixed unique-plus-collision case that arises when one of the K
+    # sites happens to anchor uniquely on its own, e.g. when it sits next to a
+    # file edge or a unique boundary).
     out = []
     seen_replace_all = set()
+    covered_spans = set()
     for sa_s, sa_e, sb_s, sb_e in regions:
         try:
-            anchor_lo, anchor_hi = widen_to_unique(a, sa_s, sa_e)
+            widen_to_unique(a, sa_s, sa_e)
+            continue  # uniquely anchorable; handled in the second pass
         except WidenCollision as collision:
             multi = _resolve_collision(a, b, sa_s, sa_e, sb_s, sb_e, collision)
             if multi is None:
                 _report_hard_collision(sa_s, sa_e, collision)
-            # Multiple identical sites collapse to ONE replace-all splice; emit it
-            # once even though find_diff_regions reports each site separately.
+            old_bytes = multi["old"].encode("utf-8")
+            inner_start = multi["_inner_start"]
+            inner_end = multi["_inner_end"]
+            # Mark the changed span inside every occurrence of the anchor.
+            start = 0
+            while True:
+                pos = a.find(old_bytes, start)
+                if pos < 0:
+                    break
+                covered_spans.add((pos + inner_start, pos + inner_end))
+                start = pos + 1
             key = (multi["old"], multi["new"])
             if key not in seen_replace_all:
                 seen_replace_all.add(key)
-                out.append(multi)
+                out.append({k: v for k, v in multi.items() if not k.startswith("_")})
+
+    # Second pass: emit unique splices for every region not already covered by a
+    # replace-all from the first pass.
+    for sa_s, sa_e, sb_s, sb_e in regions:
+        if (sa_s, sa_e) in covered_spans:
             continue
+        try:
+            anchor_lo, anchor_hi = widen_to_unique(a, sa_s, sa_e)
+        except WidenCollision:
+            continue  # already turned into a replace-all in the first pass
         old = a[anchor_lo:anchor_hi].decode("utf-8")
         new = (
             a[anchor_lo:sa_s]
@@ -267,7 +318,57 @@ def extract(unpatched_path: str, patched_path: str):
             "new": new,
             "expected_count": 1,
         })
+    _verify_splices(a, b, out)
     return out
+
+
+def _verify_splices(a: bytes, b: bytes, splices):
+    """Fail-closed gate: simulate applying the emitted splices to the pre-patch
+    bytes `a` and require the result to equal the patched bytes `b` exactly.
+
+    This catches any case where region resolution produced an inconsistent splice
+    set, for example a replace-all that overlaps a separately-emitted unique
+    splice for the same edit. Such mixed cases do not arise for the real patches
+    (every changed region anchors uniquely), but if a future bundle creates one,
+    we refuse to emit a splice set that would not reproduce the target rather
+    than shipping a silently broken prebuilt.
+    """
+    try:
+        text = a.decode("utf-8")
+        target = b.decode("utf-8")
+    except UnicodeDecodeError:
+        # Splice old/new are decoded as utf-8 elsewhere, so non-utf-8 inputs are
+        # already unsupported; skip the simulation rather than crash here.
+        return
+    for sp in splices:
+        old = sp["old"]
+        new = sp["new"]
+        expected = sp.get("expected_count", 1)
+        count = text.count(old)
+        if count != expected:
+            raise SystemExit(
+                "\n".join([
+                    "",
+                    "SPLICE VERIFICATION FAILED (extractor self-check).",
+                    f"  a splice expects to replace {expected} occurrence(s) of its",
+                    f"  anchor, but the (progressively patched) text contains {count}.",
+                    "  The emitted splice set would not reproduce the patched file.",
+                    "  This usually means two changed regions for the same edit could",
+                    "  not be cleanly separated into independent anchors. Refusing to",
+                    "  emit a splice set that does not round-trip.",
+                    "",
+                ]))
+        text = text.replace(old, new, expected)
+    if text != target:
+        raise SystemExit(
+            "\n".join([
+                "",
+                "SPLICE VERIFICATION FAILED (extractor self-check).",
+                "  applying the emitted splices to the pre-patch file did not",
+                "  reproduce the patched file. Refusing to emit a splice set that",
+                "  does not round-trip byte-for-byte.",
+                "",
+            ]))
 
 
 def _report_hard_collision(sa_s, sa_e, collision):

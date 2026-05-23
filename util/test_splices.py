@@ -127,6 +127,62 @@ def test_multi_site_expected_count(tmp):
     check("reference apply reproduces patched output", out == post)
 
 
+def test_clamped_edge_collision(tmp):
+    """Regression: a collision whose MAX_CONTEXT window clamps at a file edge.
+
+    When colliding sites sit at offset 0 or run to EOF, one site can anchor
+    uniquely on its own (a unique boundary is close on its in-file side) while
+    the other(s) collide. The earlier code emitted a replace-all for the
+    collision AND a separate stale per-site splice for the uniquely-anchored
+    site of the SAME edit, producing a [expected_count=2, expected_count=1] set
+    whose second splice finds 0 occurrences after the first replaced all of
+    them. The two-pass resolver must instead collapse the whole edit into one
+    replace-all that round-trips.
+
+    Before the fix this test fails (extra stale splice, no round-trip); after it
+    passes. Three shapes: two adjacent identical blocks (changed span at offset
+    0), the changed span clamped at offset 0 with a unique tail, and clamped at
+    EOF.
+    """
+    print("test: clamped-edge collision collapses to one replace-all")
+    mc = extract_splices.MAX_CONTEXT
+    changed_pre = "set({v:cfg.v})"
+    changed_post = "set({v:!0})"
+
+    # Shape 1: two adjacent identical blocks; file starts at a block boundary so
+    # the first site's window clamps at offset 0 yet still occurs twice.
+    tail = "Q" * (2 * mc + 50)
+    block = changed_pre + tail
+    pre1 = block + block
+    post1 = pre1.replace(changed_pre, changed_post)
+    pre_p, post_p = write_pair(tmp, pre1, post1)
+    sp1 = extract_splices.extract(pre_p, post_p)
+    check("adjacent-blocks: single splice", len(sp1) == 1, f"got {len(sp1)}")
+    if sp1:
+        check("adjacent-blocks: expected_count == 2", sp1[0].get("expected_count") == 2,
+              f"got {sp1[0].get('expected_count')}")
+        check("adjacent-blocks: no internal keys leaked",
+              all(not k.startswith("_") for k in sp1[0]))
+    check("adjacent-blocks: round-trips", apply_splices(pre1, sp1) == post1)
+
+    # Shape 2: changed span near offset 0 (short left context) plus a second copy
+    # after a unique separator (which would let site 2 anchor uniquely alone).
+    pre2 = changed_pre + tail + "\nSEP_UNIQUE\n" + changed_pre + tail
+    post2 = pre2.replace(changed_pre, changed_post)
+    pre_p, post_p = write_pair(tmp, pre2, post2)
+    sp2 = extract_splices.extract(pre_p, post_p)
+    check("offset0+sep: round-trips", apply_splices(pre2, sp2) == post2)
+    check("offset0+sep: no stale 0-count splice",
+          all(pre2.count(s["old"]) == s.get("expected_count", 1) for s in sp2))
+
+    # Shape 3: a copy that runs to EOF (short right context).
+    pre3 = "PREAMBLE\n" + tail + changed_pre + "\nSEP_UNIQUE\n" + tail + changed_pre
+    post3 = pre3.replace(changed_pre, changed_post)
+    pre_p, post_p = write_pair(tmp, pre3, post3)
+    sp3 = extract_splices.extract(pre_p, post_p)
+    check("EOF: round-trips", apply_splices(pre3, sp3) == post3)
+
+
 def test_expected_count_gate_rejects_wrong_count(tmp):
     """The apply gate must refuse when the actual count != expected_count, rather
     than silently under/over-applying."""
@@ -183,6 +239,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_default_count_matches_today(tmp)
         test_multi_site_expected_count(tmp)
+        test_clamped_edge_collision(tmp)
         test_expected_count_gate_rejects_wrong_count(tmp)
         test_hard_collision_reports_not_silent(tmp)
     ok = all(PASS)
