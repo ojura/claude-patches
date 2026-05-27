@@ -72,3 +72,35 @@ below to document the diagnosis.
 - **Workaround if you must use 2.1.126**: apply patches manually via
   the SKILL.md per-step instructions; do not run this archived
   prebuilt.
+
+### v1.7 / 2.1.148
+
+- **Bug**: the J+K combined loader splice rewrites the Patch H
+  read-fn call `pE0` into bare `0`. The live loader becomes
+  `async function tE0(z,V){...let x=await 0(K.filePath,K.fileSize)...}`
+  with no surrounding try/catch, so it throws
+  `TypeError: 0 is not a function` the moment the loader runs, i.e.
+  on every session content load. The Patch H read fn itself
+  (`async function pE0(...)`) is patched correctly; only the
+  loader's *call* to it lost its name.
+- **Why it shipped**: when the J+K loader head was applied manually
+  to 2.1.148, the loader-head rewrite `let x=await <READ_BUF>(...)`
+  dropped the `pE` of `pE0`, leaving `await 0(...)`. Byte-stability
+  passed (the splice is deterministic against `.bak`) and
+  `node --check` passed (`0(...)` is a syntactically valid call
+  expression that only fails at runtime), so neither guard caught
+  it.
+- **Why nobody noticed**: Antigravity loads the highest-versioned
+  extension on disk, so once 2.1.152 landed the broken 2.1.148
+  loader went dormant and never executed.
+- **Detected**: 2026-05-27, while synthesizing the 2.1.152 prebuilt.
+  Translating the 2.1.148 J+K splice surfaced an OLD anchor of
+  `let x=await pE0(...)` against a NEW of `let x=await 0(...)`.
+- **Fixed in**: not fixed for 2.1.148 (no longer actively
+  distributed; superseded by 2.1.152). The 2.1.152 prebuilt
+  reconstructs the loader head correctly as
+  `let x=await pE0(N.filePath,N.fileSize)`, so the typo is not
+  carried forward.
+- **Workaround if you must use 2.1.148**: apply patches manually via
+  the SKILL.md per-step instructions; do not run this archived
+  prebuilt.
