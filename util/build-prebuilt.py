@@ -142,7 +142,7 @@ def main():
     with open(ext_js, "r") as f:
         head = f.read()
     has_current_sig = SIGNATURE in head
-    sig_match = re.search(r'/\*pfg-v(\d+(?:\.\d+)?)\*/', head)
+    sig_match = re.search(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', head)
     other_sig = sig_match.group(1) if sig_match and not has_current_sig else None
 
     if has_current_sig and not force:
