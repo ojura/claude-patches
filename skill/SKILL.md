@@ -487,6 +487,22 @@ The injected logic does three passes and one decision:
 
 `Buffer` is a Node global available in this context.
 
+### Watch the `\n` inside the backticks
+
+Each of the three template literals in the inserted block
+(`split(`\n`)`, the `Buffer.byteLength(...+`\n`,"utf8")`, and the
+`appendFile(..., ...+`\n`)`) contains the two-character escape
+backslash-n, not a literal newline. If you apply this patch via
+`python3`, write the splice's NEW string as a raw string (`r"..."`)
+or double-escape (`\\n`); otherwise Python eats the backslash and
+emits a real LF instead. The resulting JS is functionally identical
+(either form produces a newline in a template literal), but
+byte-diverges from the canonical splice, which costs you
+byte-stability against the published prebuilt. This is the one spot
+in the entire patchset where Steps 3-7 prose can be transcribed two
+ways that both parse and run, so the trap is real even for a careful
+reader.
+
 ### Verify
 
 ```
@@ -1346,6 +1362,100 @@ with `isMeta` truthy. We rejected setting it on the synthetic ghosts
 because that hides them. Compact summary messages render despite
 being functionally synthetic because they don't set `isMeta` (only
 `isCompactSummary`, which Sz4 doesn't check).
+
+### Critical: Patch K depends on Patch D being co-applied
+
+Canonical K's seam stage sets only `boundary.logicalParentUuid =
+seam_uuid` and never touches `parentUuid`. The chain walker reaches
+the seam only through the `parentUuid → logicalParentUuid` fallback
+that Patch D installs. Apply K without D and the seam ghost is
+unreachable from the walker and never renders, even though it sits in
+the parsed array. Treat K and D as a single behavioral unit. If you
+ever want to ship K standalone, the seam must also rewrite
+`parentUuid`, which the canonical does not.
+
+Verified empirically by an independent from-scratch reconstruction of
+K from the prose alone: working on a D-less pristine file, the
+reconstruction deduced this dependency and defensively wrote both
+fields, exposing the silent coupling.
+
+### Patch K's behavioral contract (not derivable from the prose above)
+
+The K block lives only in the prebuilt; the prose describes the four
+stages conceptually but withholds the contracts a from-scratch
+reconstruction needs to behave correctly. If you ever modify K (or
+synthesize an equivalent for a future patchset that touches the
+loader shape), the canonical guarantees the following:
+
+- **Four marker kinds, not three.** Beyond seam / bookend / bridge
+  there is a fourth marker emitted in the `!_bookendFired` branch:
+  `pfgk-broken-<root.uuid>`, with a ⛔ "INCOMPLETE TRANSCRIPT:
+  RECONSTRUCTION FAILED" payload listing sibling count, phantoms
+  backfilled, phantoms failed, and three enumerated possible causes.
+  Triggered when a user/assistant's `parentUuid` walk (capped five
+  hops) dead-ends at a phantom boundary K could not backfill.
+- **`message.content` is a plain string, not a block array.** The
+  ghosts' content is a multi-paragraph diagnostic essay assembled by
+  string concatenation. A block-array form
+  (`[{type:"text",text:...}]`) is the obvious JS shape, but the
+  canonical render-wrap and the bubble renderer expect the string
+  form.
+- **uuid prefix is the only discriminator.** The render-wrap keys
+  entirely off `Z.uuid.startsWith("pfgk-seam-")` etc.; there are no
+  marker fields on the ghost object. Adding `isPfgkGhost` /
+  `pfgkKind` / `logicalParentUuid: null` is harmless but dead
+  weight.
+- **Two flags, not one.** Canonical tracks `_kFired` (a seam was
+  planted) AND `_kAttempted` (a phantom boundary was seen, even
+  if no predecessor existed). The bookend / bridge / broken stages
+  gate on `_kAttempted`. Gating those on `_kFired` alone causes
+  the downstream stages to silently skip on edge cases where a
+  phantom is seen but no seam plants.
+- **Ambiguity propagation.** K1 backfill tracks `_ambigCount` per
+  phantom and an aggregate `_ambigPhLpus`. When >1 sibling
+  qualified, K prepends a `"⚠ AMBIGUOUS RECONSTRUCTION: ..."`
+  paragraph to the affected seam content and to the bookend
+  content, and embeds a `_k1Sources` provenance table
+  (per-phantom: source filename, prepended count, candidate count)
+  inside the bookend essay.
+- **Wall-clock instrumentation is surfaced to the user, not
+  logged.** Canonical records `_kT0` / `_kTparse` / `_kTjprepend`
+  / `_kTk1` and embeds a "K stitching wall-clock: parse Xms, J
+  cross-file prepend Yms, ..." line in the bookend and broken
+  essays. There is no side-channel logging.
+- **Bridge detection reads `_seen`, no separate set required.** A
+  boundary qualifies as a bridge if `!parentUuid &&
+  logicalParentUuid && _seen.has(lpu) &&
+  !String(lpu).startsWith("pfgk-")`: "in `_seen` but not a pfgk
+  ghost" reliably means "J pulled it in cross-file." The `!pfgk-`
+  guard prevents re-handling seams the earlier stage already
+  rewrote. Same-session guard (`_prev.sessionId ===
+  _m.sessionId`) skips cross-session predecessors.
+- **Bridges append, seams splice.** Canonical does
+  `_parsed.push(_bridge)` (append, relying on the chain walker to
+  re-thread by parentUuid) but `_parsed.splice(_i, 0, _seam)`
+  (in-place for seams).
+- **The webview render-wrap is part of K, not a separate concern.**
+  It renders `div.pfgkAlert.pfgk-<role>` with per-role colors
+  (seam `#ff9f1c`, bookend `#dc3545`, bridge `#ff6b1c`, broken
+  `#990000` plus glow), a `MARKER n OF m · CLICK FOR NEXT ↓` /
+  `CYCLE TO TOP ↺` header computed from `$.messages.peek()`, a
+  42-px emoji (⚠️ or ⛔), and a `data-pfgk-role` attribute used
+  by the cyclic-scroll `onClick`. It also **injects a `<style>`
+  block that un-collapses the bubbles**
+  (`.content_xGDvVg.collapsed_xGDvVg{max-height:none}` plus rules
+  hiding truncation and buttons). Without that style injection,
+  the long diagnostic essays render collapsed and most of the
+  content is hidden. Skip the render-wrap and the loader splice's
+  ghosts technically render, but as truncated plain user bubbles
+  with no navigation.
+
+Empirical basis: a from-scratch reconstruction of K against this
+prose (no prebuilt access) recovered the four stages, their
+ordering, the no-`isMeta` constraint, and the most-pre-content
+backfill heuristic, but invented every concrete contract above. The
+list is the minimum set you need to keep K behaviorally equivalent
+across future patchset bumps or independent reimplementations.
 
 ### Verify
 
