@@ -1426,6 +1426,32 @@ K from the prose alone: working on a D-less pristine file, the
 reconstruction deduced this dependency and defensively wrote both
 fields, exposing the silent coupling.
 
+### Critical: the loader-head read-fn call must keep its real name
+
+The J+K splice replaces the loader's body, but the head must preserve
+the exact call to `<READ_BUF>`:
+`let <buf>=await <READ_BUF>(<find>.filePath,<find>.fileSize)`. While
+translating variable names it is easy to mangle that call: drop a
+character and `await KE0(...)` becomes `await E0(...)`, or worse, the
+whole name collapses to `await 0(...)`. A bare `0(...)` (or any wrong
+name) is a syntactically valid call expression, so **`node --check`
+PASSES and byte-stability PASSES** (the splice is deterministic against
+its `.bak`), yet at runtime it throws `<x> is not a function` on every
+session load, and the loader has no try/catch to swallow it. This
+shipped once in a published prebuilt and went unnoticed because that
+bundle version was dormant (Antigravity loads the highest version on
+disk); see `prebuilt/archive/broken/` for the post-mortem.
+
+Guard it after applying (substitute the real names):
+
+```
+grep -c 'await <READ_BUF>(<find>.filePath,<find>.fileSize)' $EXT/extension.js  # expect 1
+grep -c 'await 0(' $EXT/extension.js                                           # expect 0
+```
+
+Neither guard nor `node --check` substitutes for reading the loader
+head once with your own eyes; it is the cheapest catch.
+
 ### Patch K's behavioral contract (not derivable from the prose above)
 
 The K block lives only in the prebuilt; the prose describes the four
@@ -1512,10 +1538,14 @@ grep -c 'pfgk-bookend' $EXT/extension.js
 grep -c 'pfgk-bridge' $EXT/extension.js
 grep -c 'pfgkAlert pfgk-' $EXT/webview/index.js
 node --check $EXT/extension.js && node --check $EXT/webview/index.js
+# loader head must still call the read fn by name (see Critical note above):
+grep -c 'await <READ_BUF>(<find>.filePath,<find>.fileSize)' $EXT/extension.js  # expect 1
+grep -c 'await 0(' $EXT/extension.js                                           # expect 0
 ```
 
 Each grep should be ≥ 1 (or, for `pfgk-bridge`, ≥ 1 if any boundary
-was cross-file resolved by Patch J; embedded literal regardless).
+was cross-file resolved by Patch J; embedded literal regardless),
+except the `await 0(` guard which must be 0.
 
 ### Test
 
