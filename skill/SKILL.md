@@ -1332,7 +1332,34 @@ echo "Reference: $LATEST_PREBUILT"
 Read its `SPLICES` literal and look for the entries containing
 `_kFired`, `pfgk-seam`, `_filesParsed` (extension.js loader splice;
 combined with Patch J in v1.4) and `pfgkAlert` (webview render wrap).
-Both are single replace pairs `(old, new)`.
+The loader is a single replace pair `(old, new)`; the render wrap is
+**two** pairs (the `return` -> `let _ws=` binding conversion and the
+pfgk wrap, see the render-wrap Critical note below).
+
+**Trust is not transitive across a synthesis.** The prebuilt is a
+translation of once-correct code, but a `build-prebuilt.py` run from a
+non-pristine `.bak` can silently drop a transformation that was present
+on both sides of its diff, so a later prebuilt copied verbatim ships a
+splice that is incomplete on a genuinely fresh install. This has
+happened twice (the loader-head read-fn call and the render-wrap
+binding conversion; see `prebuilt/archive/broken/`). Three habits keep
+it from happening a third time:
+
+1. **Verify reachability, not presence.** Anchor-matches-once, literal
+   present, `node --check` clean, and byte-stable are all *necessary
+   and insufficient*: dead/mis-bound code passes every one. Confirm the
+   inserted code actually executes (bound before use, not after a
+   `return`).
+2. **Triangulate against a known-good *installed* bundle**, not sibling
+   prebuilts. When a splice looks structurally off (references a
+   variable its own old/new never binds, etc.), find an
+   already-patched install of a nearby version on disk and read the
+   working shape there. Sibling prebuilts can share the same latent
+   defect; a live install that renders correctly cannot.
+3. **Diff the splice *count* against a known-good prior version.** A
+   region that drops from N splices to N-1 between versions (e.g. the
+   webview render wrap going 4 -> 3) is a red flag that a
+   transformation fell out of the diff.
 
 ### Apply
 
@@ -1376,12 +1403,18 @@ exactly one occurrence of the `old` anchor before replacing. (Warning:
 because the v1.4 prebuilt combines J + K into one splice that replaces the
 loader's original body wholesale. Skip Step 12 in this case.)
 
-**webview/index.js render wrap.** The user-message render branch
-contains `if(Z.type==="user")…return <REACT>.default.createElement(<USER_MSG_COMPONENT>,{…})`.
-Identify `<USER_MSG_COMPONENT>` (e.g. `XR0` in 2.1.126, `GR0` in
-2.1.132). The component name is the only thing that drifts between
-bundles; React var (`n1`), all signal/prop names, and CSS module
-names are stable. Substitute and apply.
+**webview/index.js render wrap.** This is **two** splices in the
+prebuilt's webview SPLICES, not one (a known-good render-wrap has
+*four* webview splices total: render-cap, isSlashCommand, and these
+two). The user-message render branch contains
+`if(Z.type==="user")…return <REACT>.default.createElement(<USER_MSG_COMPONENT>,{…})`.
+Identify `<USER_MSG_COMPONENT>` (it drifts every bundle; React var
+`<REACT>`, signal/prop names, and CSS module names are stable). Then
+apply both: (1) the binding conversion `return … createElement(<USER_MSG_COMPONENT>,…`
+-> `let _ws=… createElement(<USER_MSG_COMPONENT>,…`, and (2) the pfgk
+wrap that reassigns and returns `_ws`. Omitting (1) makes (2) dead
+code; see "Critical: the render-wrap needs the `return` -> `let _ws=`
+binding conversion" below before applying.
 
 ### Critical: don't set `isMeta:true` on the ghosts
 
@@ -1432,6 +1465,52 @@ grep -c 'await 0(' $EXT/extension.js                                           #
 
 Neither guard nor `node --check` substitutes for reading the loader
 head once with your own eyes; it is the cheapest catch.
+
+### Critical: the render-wrap needs the `return` -> `let _ws=` binding conversion
+
+The webview render-wrap is **two** coordinated edits, not one:
+
+1. **Binding conversion** at the user-message branch:
+   `return <REACT>.createElement(<USER_MSG_COMPONENT>,{...})` must become
+   `let _ws=<REACT>.createElement(<USER_MSG_COMPONENT>,{...})`.
+2. **The pfgk wrap** appended after it:
+   `;if(typeof Z.uuid==="string"){...;_ws=<REACT>.createElement("div",{className:"pfgkAlert ..."},...,_ws)}}return _ws}`.
+
+Edit 2 reassigns and finally returns `_ws`, so it only works if edit 1
+bound `_ws` in the first place. Skip the binding conversion and the
+branch still `return`s the bare user element on its first statement,
+making the whole pfgk block **unreachable dead code**. The ghosts the
+loader inserts then render as plain collapsed user bubbles: no color,
+no warning glyph, no click-navigation, and the un-collapse `<style>`
+never fires.
+
+This passes every cheap check: `grep -c 'pfgkAlert pfgk-'` is 1
+(the literal is present, just after a `return`), `node --check`
+passes (dead code is valid syntax), and byte-stability passes. Same
+presence-not-reachability blind spot as the loader-head gotcha above.
+
+**Root cause of the recurrence (this has regressed more than once):**
+the binding conversion vanishes from a prebuilt when that prebuilt is
+synthesized from a base whose `.bak` is **not pristine**, i.e. already
+`let _ws=`-patched. `build-prebuilt.py` diffs live against `.bak`; if
+both sides already say `let _ws=`, the conversion is identical on both
+and falls out of the captured splices, leaving only the pfgk-wrap
+splice. The next version then copies that incomplete render-wrap
+verbatim and ships dead code on genuinely pristine installs. **Always
+synthesize from a genuinely pristine `.bak`** (Step 2's backup, taken
+before any patching), and treat a render-wrap that has 3 webview
+splices where a known-good prior version had 4 as a red flag.
+
+Guard it after applying (substitute the real names):
+
+```
+# user element must be BOUND, not returned, before the pfgk block:
+grep -c 'let _ws=<REACT>.createElement(<USER_MSG_COMPONENT>,' $EXT/webview/index.js  # expect 1
+grep -c 'return <REACT>.createElement(<USER_MSG_COMPONENT>,'  $EXT/webview/index.js  # expect 0
+```
+
+Reachability, not presence, is the property you are verifying. See
+`prebuilt/archive/broken/` for the two times this shipped.
 
 ### Patch K's behavioral contract (not derivable from the prose above)
 
@@ -1522,11 +1601,15 @@ node --check $EXT/extension.js && node --check $EXT/webview/index.js
 # loader head must still call the read fn by name (see Critical note above):
 grep -c 'await <READ_BUF>(<find>.filePath,<find>.fileSize)' $EXT/extension.js  # expect 1
 grep -c 'await 0(' $EXT/extension.js                                           # expect 0
+# render-wrap must be REACHABLE: user element bound, not returned (see Critical note):
+grep -c 'let _ws=<REACT>.createElement(<USER_MSG_COMPONENT>,' $EXT/webview/index.js  # expect 1
+grep -c 'return <REACT>.createElement(<USER_MSG_COMPONENT>,'  $EXT/webview/index.js  # expect 0
 ```
 
 Each grep should be ≥ 1 (or, for `pfgk-bridge`, ≥ 1 if any boundary
 was cross-file resolved by Patch J; embedded literal regardless),
-except the `await 0(` guard which must be 0.
+except the two reachability guards (`await 0(` and the `return
+<REACT>.createElement(<USER_MSG_COMPONENT>,` form) which must be 0.
 
 ### Test
 
