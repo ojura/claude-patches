@@ -24,8 +24,11 @@ This single bash block does three things in one round-trip:
    hosted Claude Code CLI sets this directly to the running install)
    plus a fallback glob across `~/.<ide>/extensions/` for every IDE
    that pulls from Open VSX or the VS Code marketplace (VS Code,
-   Antigravity, Cursor, VSCodium, etc.). Collects all installs,
-   deduplicates by realpath, and patches each one.
+   Antigravity, Cursor, VSCodium, etc.). Antigravity's authoritative
+   extensions dir is `~/.antigravity-ide/`; the older `~/.antigravity/`
+   is deprecated (the `~/.*/extensions/` glob still catches a stale
+   install there if one lingers, and dedup-by-realpath handles overlap).
+   Collects all installs, deduplicates by realpath, and patches each one.
 3. **Fetch the prebuilt for each version** and run it. Prebuilts are
    self-validating (detect the patchset signature, idempotent,
    byte-stable verified at synthesis time), so this step either
@@ -1252,6 +1255,9 @@ Key behaviors:
 
 `jK` (path), `Y8` (fs.promises), `ml` (fs) are already in scope from `qz4`, `xU`, `Rz4`
 respectively. Substitute the actual bundler-assigned names if they differ in your version.
+Note the `ml` (fs) label reflects the older reference bundle above; current bundles' read
+function uses `require("fs/promises")` and the two fs roles may collapse to one symbol. See
+Step 13's `<FS_PROMISES>`/`<FS_RAW>` resolution caveat before substituting.
 
 ### Verify
 
@@ -1366,8 +1372,22 @@ and identify by role:
 - `<PARSE>`: JSONL → message array
 - `<CHAIN_WALKER>`: chain-walk + filter pipeline
 - `<PATH>`: node `path` module under bundler-assigned name
-- `<FS_PROMISES>`: `fs.promises` under bundler-assigned name
-- `<FS_RAW>`: `fs` module with `.readFile` used by `<READ_BUF>`
+- `<FS_PROMISES>`: the module `.readdir` is called on, under bundler-assigned name
+- `<FS_RAW>`: the module `<READ_BUF>` calls `.readFile` on
+
+Resolve `<FS_PROMISES>` and `<FS_RAW>` by the *method called on them* in the
+loader neighborhood (`.readdir`, and the `.readFile` inside `<READ_BUF>`), not
+by their `require` target, and do NOT assume they are two distinct symbols:
+
+- **`<FS_RAW>` is `require("fs/promises")`, not the callback-style `fs`
+  module.** Its `.readFile` returns an awaitable `Promise<Buffer>` (the block
+  does `await <FS_RAW>.readFile(...)`). Grepping for `require("fs")` to find it
+  comes up empty; grep for what `<READ_BUF>`'s `.readFile` is called on.
+- **`<FS_PROMISES>` and `<FS_RAW>` may be the SAME symbol.** The bundler
+  sometimes emits two separate `fs/promises` aliases (one carrying `.readdir`,
+  one carrying `.readFile`) and sometimes dedups them to one. Map both block
+  members onto whatever symbol(s) the current bundle uses; one name serving
+  both is correct, not a mistake.
 
 Substitute these in the prebuilt's `new` string and apply. Confirm
 exactly one occurrence of the `old` anchor before replacing. (Warning:
