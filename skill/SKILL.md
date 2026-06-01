@@ -1394,7 +1394,26 @@ see `prebuilt/archive/broken/`). Four habits keep it from recurring:
    re-derivation, which is why both shipped a drifted-variable bug.
    Don't trust a short "these are the risky ones" list; measure each
    splice's introduced identifiers (tokens in NEW not in OLD, minus its
-   own `_`-locals) and check every one against the target.
+   own `_`-locals) and check every one against the target. But split
+   them into two kinds with different failure modes, or you will
+   over-flag: **function-locals** (a buffer, a path/array var inside the
+   patched function) can resolve to the wrong ROLE, not just a different
+   name (the `x`-unbound and `D`-as-`Map` class above) so verify name AND
+   role against the target function; **top-level `require` aliases**
+   (path / fs / fs-promises) are NOT scoped that way. The application
+   code is one flat top-level scope: esbuild's `__commonJS`/`__esm`
+   closures wrap only the vendored npm modules in the file header, never
+   the patch targets, so every `var X=require(...)` is hoisted and in
+   scope throughout, and the bundle usually has several redundant
+   aliases for the same module. Re-derive which alias NAME exists (it
+   drifts across versions), but "this alias is in a different module / out
+   of scope" is a FALSE alarm for app code, and any matching top-level
+   alias works. (A reviewer once flagged the loader's `m1.dirname` as
+   out-of-scope by assuming per-module closures; measuring brace depth
+   put `DE0` and the `m1=require("path")` binding both at depth 0, same
+   scope.) To settle a scope question, measure brace nesting with a
+   regex-aware tokenizer: a naive brace counter goes negative on the
+   bundle's regex literals and will mislead you.
 3. **Triangulate against a known-good *installed* bundle**, not sibling
    prebuilts. When a splice looks structurally off (references a
    variable its own old/new never binds, etc.), find an
