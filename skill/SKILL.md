@@ -35,6 +35,28 @@ This single bash block does three things in one round-trip:
 ```sh
 set -u
 
+# --- Step 0 preflight: core toolchain must be resolvable ---
+# The harness may run this Bash call sandboxed with a restricted exec PATH
+# that omits /bin:/usr/bin. An in-script `export PATH` does NOT reliably
+# rescue command resolution under that sandbox (verified: prepending /bin
+# still left git/readlink unresolved). Without this guard the helpers below
+# silently no-op and Step 0b aborts with a misleading "could not locate any
+# installs". First normalize PATH (rescues a merely-incomplete non-login
+# shell), then verify with an exec-free builtin check.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+_pf_missing=
+for _pf in git basename readlink dirname sed grep curl python3; do
+  command -v "$_pf" >/dev/null 2>&1 || _pf_missing="$_pf_missing $_pf"
+done
+if [ -n "$_pf_missing" ]; then
+  echo "PREFLIGHT_FAIL: toolchain not resolvable:$_pf_missing"
+  echo "  PATH normalization did not help, so this Bash call is almost certainly"
+  echo "  running SANDBOXED with a restricted exec PATH. Re-run this skill with the"
+  echo "  Bash sandbox DISABLED (Claude Code: pass dangerouslyDisableSandbox on the"
+  echo "  call, or use an unsandboxed permission mode). No files were modified."
+  exit 1
+fi
+
 # --- Step 0a: self-update via fast-forward, if symlinked-clone setup ---
 # Discover by repo origin URL, not by skill directory name. The user is
 # free to install the skill under any name (~/.claude/skills/patch-claude,
@@ -227,6 +249,11 @@ fi
 
 **How to interpret the output**:
 
+- `PREFLIGHT_FAIL: ...` → the core toolchain (git/coreutils) isn't
+  resolvable in this Bash invocation and a PATH export didn't fix it: the
+  call is sandboxed. Re-run the Step 0 block (and every later step, which
+  also shells out to python3/node/grep) with the Bash sandbox disabled.
+  Nothing was modified.
 - `RESTART_SKILL` → stop and re-invoke the skill (the local clone got
   fast-forwarded; SKILL.md on disk is now newer than what you read).
 - `PATCHES_APPLIED` → skill is complete. Tell the user to reload their IDE(s).
