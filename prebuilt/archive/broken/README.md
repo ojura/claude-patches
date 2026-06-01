@@ -101,6 +101,58 @@ below to document the diagnosis.
   reconstructs the loader head correctly as
   `let x=await pE0(N.filePath,N.fileSize)`, so the typo is not
   carried forward.
+- **Second, independent bug in the same prebuilt**: 2.1.148 also
+  carries the dead-K-render-wrap regression described under
+  2.1.152 below (webview splices dropped from 4 to 3; the
+  `return -> let _ws=` binding conversion is missing, so the pfgk
+  wrap is unreachable). 2.1.148 is the origin of that regression;
+  2.1.152/2.1.158/2.1.159 inherited it by copying this render-wrap
+  verbatim.
 - **Workaround if you must use 2.1.148**: apply patches manually via
   the SKILL.md per-step instructions; do not run this archived
   prebuilt.
+
+### v1.7 / 2.1.152
+
+- **Bug**: dead K render-wrap. The webview render-wrap is missing the
+  `return <X>.createElement(<userComponent>,...)` ->
+  `let _ws=<X>.createElement(<userComponent>,...)` binding conversion,
+  so on a fresh (pristine) bundle the user element is `return`ed
+  immediately and the entire pfgk wrap block that follows
+  (`;if(typeof Z.uuid==="string"){...;_ws=createElement("div",{className:"pfgkAlert ..."},...,_ws)}}return _ws}`)
+  is unreachable dead code. The seam/bookend/bridge/broken ghosts the
+  loader inserts still render, but as plain collapsed user bubbles:
+  no color, no warning emoji, no click-to-navigate, and the
+  un-collapse `<style>` never fires, so the long diagnostic essays
+  stay truncated. This is a recurrence of the 2.1.126 bug (see v1.4
+  section), which had been fixed for 2.1.132 through 2.1.146.
+- **Why it shipped**: the 2.1.148 prebuilt synthesis collapsed the
+  webview render-wrap from 4 splices to 3, dropping the
+  binding-conversion splice (almost certainly synthesized from an
+  already-`let _ws=`-patched base, so the conversion was identical on
+  both sides of the diff and fell out, exactly the 2.1.126 mechanism).
+  2.1.152 was then built by copying 2.1.148's 3-splice render-wrap
+  verbatim, and 2.1.158/2.1.159 copied it from 2.1.152. Byte-stability
+  passed (deterministic), `node --check` passed (dead code is valid
+  syntax), and the `grep -c 'pfgkAlert pfgk-'` verification passed
+  because it checks *presence*, not *reachability*: the literal is in
+  the file, just after a `return`.
+- **Why nobody noticed**: same dormancy as the loader bug plus the
+  presence-not-reachability blind spot above.
+- **Detected**: 2026-06-01, by an independent instance patching 2.1.159
+  that triangulated against the installed 2.1.139 (correct `let _ws=`
+  shape) instead of trusting the 2.1.152 prebuilt, then confirmed by
+  re-synthesis showing 4 webview splices where the published ones had 3.
+- **Status**: retired, not re-synthesized. 2.1.152 is superseded by
+  2.1.158/2.1.159 (both fixed), and the local 2.1.152 install was
+  garbage-collected by Antigravity, so the cheap path (re-synthesize
+  from a live `.bak`) is gone. A corrected 2.1.152 prebuilt is still
+  reachable if anyone wants one: re-fetch the 2.1.152 bundle from Open
+  VSX / the VS Code marketplace, add the binding-conversion splice
+  (and confirm the loader head is intact), then re-validate. It just
+  was not worth doing for a superseded bundle. 2.1.158 and 2.1.159 are
+  fixed (re-synthesized with the 4th binding-conversion splice
+  restored, `bind_conv=YES`).
+- **Workaround if you must use 2.1.152**: apply patches manually via
+  the SKILL.md per-step instructions (the render-wrap step now documents
+  the required binding conversion); do not run this archived prebuilt.
