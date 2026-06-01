@@ -747,8 +747,10 @@ def repack_with_js(data, new_js):
 def repack_unchanged(data):
     """Run the full parse -> identity-edit -> rewrap -> ELF-rewrite pipeline with
     no content change. Used by the byte-stability self-test: the result must equal
-    the input exactly, which proves the format is fully understood (no field,
-    offset, or length is left unaccounted for).
+    the input exactly. That evidences the fields we parse and re-emit are
+    accounted for (any byte we mis-modeled in a region we rewrite would corrupt
+    the round-trip); it does not prove the format is fully understood, since a
+    field copied as an opaque span round-trips perfectly while staying unmodeled.
     """
     img = BunImage(data)
     ep = img.entrypoint_module()

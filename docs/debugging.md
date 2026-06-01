@@ -948,9 +948,11 @@ every call, verified empirically.)
 
 ### 5. The nuclear option
 
-Edit `extension.js` on disk + `Developer: Reload Window`. The ONLY way
-to truly hot-swap function implementations (since `setScriptSource`
-doesn't, per the gotcha). Slow (~5–15s for the reload). This is what
+Edit `extension.js` on disk + `Developer: Reload Window`. The reliable hot-swap: it
+survives JIT-cached / closure-bound call sites where `setScriptSource`
+does not (per the gotcha). A lighter in-process swap that rebinds
+future lookups instead of already-bound references (re-bind the export,
+clear `require.cache`, a `Proxy`) is not something I have ruled out. Slow (~5–15s for the reload). This is what
 the patch-claude skill uses.
 
 ### Picking which mechanism
