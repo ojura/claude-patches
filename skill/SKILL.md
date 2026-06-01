@@ -525,6 +525,24 @@ grep -c 'type:"custom-title",customTitle:_titleToWrite,sessionId:' $EXT/extensio
 Expect `1` (the literal injection is present once in source; the `if`
 guard around it determines whether it runs at fork time).
 
+The inserted block references several forkSession locals by their
+minified names (`<FS>`, `<SRC_PATH>`, `<MSG>`, `<FPATH>`, `<SID>`), and
+NONE of `<SRC_PATH>`/`<MSG>`/`<FPATH>`/`<FS>` is pinned by the OLD
+anchor (the anchor is only the `summaries.set/return` tail). So they
+are not validated by the match and must be re-derived against the
+target's forkSession, per habit 2 in Step 13. The trap that already
+shipped: `<SRC_PATH>` (the `${sourceId}.jsonl` path the rescue reads)
+was carried from a prior bundle as `D`, but in a later bundle `D` is a
+uuid-remap `Map` and the path is `q` (`readFile(D,...)` then throws and
+is swallowed by the try/catch, so source-title inheritance silently
+never runs). Confirm the read targets the actual source-path local:
+
+```
+# the variable inside readFile(<X>,"utf8") must be the one assigned
+# <pathJoin>(<dir>,`${<sourceId>}.jsonl`), not a Map or other local
+grep -oE 'readFile\([A-Za-z_$]+,"utf8"\)' $EXT/extension.js
+```
+
 ## Step 4: Patch B: sticky message header → linear scroll
 
 ### Why
@@ -1337,26 +1355,40 @@ The loader is a single replace pair `(old, new)`; the render wrap is
 pfgk wrap, see the render-wrap Critical note below).
 
 **Trust is not transitive across a synthesis.** The prebuilt is a
-translation of once-correct code, but a `build-prebuilt.py` run from a
-non-pristine `.bak` can silently drop a transformation that was present
-on both sides of its diff, so a later prebuilt copied verbatim ships a
-splice that is incomplete on a genuinely fresh install. This has
-happened twice (the loader-head read-fn call and the render-wrap
-binding conversion; see `prebuilt/archive/broken/`). Three habits keep
-it from happening a third time:
+translation of once-correct code against a *prior* bundle. A
+`build-prebuilt.py` run from a non-pristine `.bak` can drop a
+transformation that was present on both sides of its diff, and a NEW
+string copied from a prior version can carry that version's variable
+names into a bundle where those names mean something else. Both ship a
+splice that passes every cheap check yet is wrong on a fresh install.
+This has happened repeatedly (loader-head read-fn call, render-wrap
+binding conversion, loader parse-arg `BE0(x)`, Patch A `readFile(D)`;
+see `prebuilt/archive/broken/`). Four habits keep it from recurring:
 
 1. **Verify reachability, not presence.** Anchor-matches-once, literal
    present, `node --check` clean, and byte-stable are all *necessary
-   and insufficient*: dead/mis-bound code passes every one. Confirm the
-   inserted code actually executes (bound before use, not after a
+   and insufficient*: dead or mis-bound code passes every one. Confirm
+   the inserted code actually executes (bound before use, not after a
    `return`).
-2. **Triangulate against a known-good *installed* bundle**, not sibling
+2. **Re-derive every identifier the NEW introduces that is NOT in the
+   OLD anchor.** The anchor only validates the tokens it contains. Any
+   variable the NEW references beyond the anchor (and every variable in
+   a wholesale body rewrite like the J+K loader) is unvalidated by the
+   match: it may resolve to a binding of the WRONG role in the target
+   (a buffer named `x` in the source bundle is `B` here; a source-path
+   `D` is a `Map` here). For each such identifier, confirm against the
+   target bundle that it is bound AND has the right role (a path is a
+   path, a buffer is the one the read-fn just assigned). The two
+   large-block splices (Patch A rescue, J+K loader) are the only ones
+   that introduce non-anchor identifiers, so they carry all of this
+   risk; the small splices edit only within their anchor.
+3. **Triangulate against a known-good *installed* bundle**, not sibling
    prebuilts. When a splice looks structurally off (references a
    variable its own old/new never binds, etc.), find an
    already-patched install of a nearby version on disk and read the
    working shape there. Sibling prebuilts can share the same latent
    defect; a live install that renders correctly cannot.
-3. **Diff the splice *count* against a known-good prior version.** A
+4. **Diff the splice *count* against a known-good prior version.** A
    region that drops from N splices to N-1 between versions (e.g. the
    webview render wrap going 4 -> 3) is a red flag that a
    transformation fell out of the diff.
@@ -1440,27 +1472,41 @@ K from the prose alone: working on a D-less pristine file, the
 reconstruction deduced this dependency and defensively wrote both
 fields, exposing the silent coupling.
 
-### Critical: the loader-head read-fn call must keep its real name
+### Critical: the loader head has TWO drift-sensitive tokens
 
-The J+K splice replaces the loader's body, but the head must preserve
-the exact call to `<READ_BUF>`:
-`let <buf>=await <READ_BUF>(<find>.filePath,<find>.fileSize)`. While
-translating variable names it is easy to mangle that call: drop a
-character and `await KE0(...)` becomes `await E0(...)`, or worse, the
-whole name collapses to `await 0(...)`. A bare `0(...)` (or any wrong
-name) is a syntactically valid call expression, so **`node --check`
-PASSES and byte-stability PASSES** (the splice is deterministic against
-its `.bak`), yet at runtime it throws `<x> is not a function` on every
-session load, and the loader has no try/catch to swallow it. This
-shipped once in a published prebuilt and went unnoticed because that
-bundle version was dormant (Antigravity loads the highest version on
-disk); see `prebuilt/archive/broken/` for the post-mortem.
+The J+K splice replaces the loader's body wholesale, so it must
+reproduce the head exactly:
+`let <buf>=await <READ_BUF>(<find>.filePath,<find>.fileSize); ... let _parsed=<PARSE>(<buf>); ...`.
+Two distinct tokens here bite, and both pass `node --check` +
+byte-stability + presence-greps:
 
-Guard it after applying (substitute the real names):
+1. **The `<READ_BUF>` call name.** Mangle it during translation and
+   `await KE0(...)` becomes `await E0(...)` or, worst, `await 0(...)`.
+   A bare `0(...)` (or any wrong name) is a valid call expression that
+   throws `<x> is not a function` at runtime. (Shipped once.)
+2. **The buffer local that `<PARSE>` consumes.** The body must parse
+   the SAME local the head bound: `<PARSE>(<buf>)`. When the NEW string
+   is carried from a prior bundle, `<buf>` is easy to leave as the
+   prior bundle's name: e.g. the source bundle named it `x`, this
+   bundle names it `B`, and `BE0(x)` survives. `x` is then an unbound
+   free variable -> `ReferenceError: x is not defined` on every load.
+   (Shipped once: `BE0(x)` where the head bound `B`.)
+
+The loader has no try/catch, so either fault breaks every session load.
+Both went unnoticed partly because the affected bundle was dormant
+(Antigravity loads the highest version on disk); see
+`prebuilt/archive/broken/`. Note the worked example in Step 12 names
+the buffer `x` (`let x=await Rz4(...)`); that is exactly the name that
+must NOT survive into a bundle whose buffer local is something else.
+
+Guard it after applying (substitute the real names), and confirm the
+parse argument is the head's buffer local, not a leftover:
 
 ```
 grep -c 'await <READ_BUF>(<find>.filePath,<find>.fileSize)' $EXT/extension.js  # expect 1
-grep -c 'await 0(' $EXT/extension.js                                           # expect 0
+grep -c 'await 0('       $EXT/extension.js                                     # expect 0
+grep -c '_parsed=<PARSE>(<buf>)' $EXT/extension.js                             # expect 1 (<buf> = the head's local)
+# and: the only standalone single-letter free var in the loader body should be <buf>/<find>, nothing else
 ```
 
 Neither guard nor `node --check` substitutes for reading the loader
