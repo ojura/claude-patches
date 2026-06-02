@@ -14,6 +14,35 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` (that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`).
 
+## v1.8 (2026-06-02): more robust data-loss indication
+
+Refactors the recovery markers (Patch D walker, Patch K markers).
+Data-loss indication, meaning the renderer not reaching the
+conversation's origin message, is now robust: a single verdict computed
+from the walk outcome raises the `pfgk-broken-` "INCOMPLETE TRANSCRIPT"
+marker whenever the walk stops short of a real root. It previously could
+stop short without raising it.
+
+- **One post-walk verdict, three states**: origin reached via bridging →
+  `pfgk-bookend-` reconstructed; reached cleanly → no marker; not reached
+  → `pfgk-broken-` incomplete. Replaces the per-cause `pfgk-bookend-`/
+  `pfgk-broken-` loops that ran in the loader.
+- **broken marker now renders.** The webview role detector didn't match
+  `pfgk-broken-`, so the incomplete-transcript marker rendered as a plain
+  unstyled message. Fixed.
+- **In-file seam** planted at each compaction the walker crosses in-file
+  (previously only phantom boundaries were marked; the native
+  `compact_boundary` is a filtered system message and never renders).
+- **Walker cycle fix**: skip the upstream `compactMetadata.preservedMessages`
+  rewrite for in-file boundaries; with D's lpu fallback it cycled the
+  walk and truncated the transcript.
+- **Seam wording**: removed a completeness claim that is false when the
+  verdict is `broken`.
+
+Verified end-to-end over CDP against 10 sessions. `prebuilt/2.1.159`
+regenerated, byte-stable; `prebuilt/2.1.158` not regenerated (no local
+bundle) and stays at v1.7.
+
 ## v1.7 (2026-05-17): Patch L, force `--thinking-display summarized` on IDE-spawned CLI
 
 Restores thinking summaries in the VS Code / Antigravity chat panel

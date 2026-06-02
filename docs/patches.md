@@ -128,6 +128,21 @@ in `extension.js`. Both need the same bridge:
 Do **not** patch `getTranscript` (a method on the session class). It
 already has the `K=!1` opt-in fallback used by `forkSession`.
 
+### v1.8: cycle gate + data-loss verdict
+
+- **Rewrite-gate**: skip the upstream `compactMetadata.preservedMessages`
+  rewrite for any `compact_boundary` whose `logicalParentUuid` resolves
+  in-file (`if(D.logicalParentUuid&&V.has(D.logicalParentUuid))continue`).
+  That rewrite re-points the preserved window onto the post-boundary
+  summary; with the lpu fallback above also active, the boundary lpu
+  pointed into the rewritten window and the walk cycled, truncating the
+  transcript. Skipping it keeps the up-links so the walk reaches origin.
+- **Post-walk verdict**: key on the terminal node. Origin reached via
+  bridging gives `pfgk-bookend-` reconstructed; reached cleanly gives no
+  marker; not reached gives `pfgk-broken-` INCOMPLETE. The marker raises
+  whenever the walk stops short of a real root. Marker vocabulary and
+  rendering are Patch K's.
+
 **Upstream issue**: [#46603](https://github.com/anthropics/claude-code/issues/46603)
 
 ---
@@ -643,6 +658,22 @@ pathological cases (e.g., two separate conversations that happened
 to land in the same JSONL), the seam/bridge brackets could fudge
 unrelated content. The visible markers exist to make the
 recovery-vs-fabrication boundary legible to the user.
+
+### v1.8: verdict moved to the walker; in-file seams; render fix
+
+The bookend/broken verdict no longer runs as per-cause loops in the
+loader (step 4 above). It is a single 3-state verdict computed in the
+Patch D walker after the up-walk, keyed on whether the walk reached a
+real root. The loader's `pfgk-bookend-`/`pfgk-broken-` loops are removed;
+the seam (step 2) and bridge (step 3) loops stay.
+
+- **Seam now also marks in-file compactions.** Step 2 planted a seam only
+  for phantom boundaries; v1.8 also plants one at each `compact_boundary`
+  the walker crosses in-file (the native boundary is a filtered system
+  message and never renders, so the crossing was previously invisible).
+- **Render-wrap `pfgk-broken-` case.** The role detector matched
+  `pfgk-bookend`/`pfgk-seam-`/`pfgk-bridge-` but not `pfgk-broken-`, so
+  the broken marker rendered unstyled. Added the case.
 
 ### Locate
 

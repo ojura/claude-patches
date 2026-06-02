@@ -5,7 +5,7 @@ description: Reapply Juraj's twelve local patches to all anthropic.claude-code I
 
 # Reapply anthropic.claude-code extension patches
 
-**Patchset version**: `1.7`
+**Patchset version**: `1.8`
 
 Twelve patches live out-of-tree and need to be reapplied every time a bundled
 `anthropic.claude-code-*` extension updates. The minified code
