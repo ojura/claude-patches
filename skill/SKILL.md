@@ -1651,12 +1651,11 @@ loader shape), the canonical guarantees the following:
   re-thread by parentUuid) but `_parsed.splice(_i, 0, _seam)`
   (in-place for seams).
 - **The webview render-wrap is part of K, not a separate concern.**
-  It renders `div.pfgkAlert.pfgk-<role>` with per-role colors
-  (seam `#ff9f1c`, bookend `#dc3545`, bridge `#ff6b1c`, broken
-  `#990000` plus glow), a `MARKER n OF m · CLICK FOR NEXT ↓` /
-  `CYCLE TO TOP ↺` header computed from `$.messages.peek()`, a
-  42-px emoji (⚠️ or ⛔), and a `data-pfgk-role` attribute used
-  by the cyclic-scroll `onClick`. It also **injects a `<style>`
+  It renders `div.pfgkAlert.pfgk-<role>` with per-role tone tokens
+  (defined in `_PFTOK`; see `docs/patches.md` for the live palette), a
+  `MARKER n OF m` counter with `↓`/`↺` next-and-cycle navigation computed
+  from `$.messages.peek()`, a per-role glyph, and a `data-pfgk-role`
+  attribute used by the cyclic-scroll `onClick`. It also **injects a `<style>`
   block that un-collapses the bubbles**
   (`.content_xGDvVg.collapsed_xGDvVg{max-height:none}` plus rules
   hiding truncation and buttons). Without that style injection,
@@ -1880,7 +1879,7 @@ proactively; don't wait to be asked. Then propose follow-up:
   same response and apply on confirmation.
 - If you don't, propose opening an issue at
   https://github.com/ojura/claude-patches/issues with the version, the
-  patch ID (A–K), and a minimal repro grep.
+  patch ID, and a minimal repro grep.
 
 If nothing drifted and nothing was wrong, say so explicitly. Silence
 is ambiguous.
@@ -1890,7 +1889,7 @@ is ambiguous.
 - The CSS and JS files in `webview/` are minified onto a single line each;
   use `python3` for string replacement rather than the Edit tool (Read
   fails on them).
-- If any of the eleven patches cannot be located (pattern shape changed
+- If any of the patches cannot be located (pattern shape changed
   substantially), stop and report that one to the user rather than guessing
   (these are patches against obfuscated code and a wrong splice could be
   disruptive).

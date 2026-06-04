@@ -2,7 +2,7 @@
 """
 Prebuilt patch apply for the anthropic.claude-code VS Code extension 2.1.159.
 
-Patches A through K applied as literal string replacements verified
+All patches applied as literal string replacements verified
 byte-stable against the 2.1.159 bundle. Synthesized by
 util/build-prebuilt.py from the diff between the patched live extension
 and its pre-patch backups.
@@ -118,7 +118,7 @@ def main():
         else:
             print(f"Backup exists: {bak}")
 
-        with open(target, "r") as f:
+        with open(target, "r", encoding="utf-8", errors="surrogateescape") as f:
             s = f.read()
         for i, (old, new) in enumerate(file_splices):
             cnt = s.count(old)
@@ -140,7 +140,7 @@ def main():
                 )
             s = s.replace(old, new, 1)
             print(f"  {relpath} splice {i}: applied")
-        with open(target, "w") as f:
+        with open(target, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(s)
 
     # Syntax-check extension.js
@@ -156,7 +156,7 @@ def main():
     except FileNotFoundError:
         print("node not found on PATH, skipping syntax check.")
 
-    print(f"Patches A-K applied (prebuilt {VERSION}). Reload VSCode to activate.")
+    print(f"All patches applied (prebuilt {VERSION}). Reload VSCode to activate.")
 
 
 if __name__ == "__main__":

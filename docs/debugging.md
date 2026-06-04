@@ -406,11 +406,12 @@ Before BP work, verify patches are live (Reload Window or extension
 auto-update wipes them):
 
 ```sh
+EXT=$(ls -d ~/.*/extensions/anthropic.claude-code-*-linux-x64 | sort -V | tail -1)
 WS=$(curl -s http://127.0.0.1:<TARGET>/json | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])')
 node /tmp/cdp-eval.mjs "$WS" '(function(){
   var s = require("fs").readFileSync(
-    "/home/juraj/.antigravity/extensions/anthropic.claude-code-2.1.126-linux-x64/extension.js","utf-8");
-  return JSON.stringify({size: s.length, sig: ["/*pfg-v1*/","/*pfg-v1.1*/","/*pfg-v1.4*/"].filter(t=>s.includes(t))});
+    "'"$EXT"'/extension.js","utf-8");
+  return JSON.stringify({size: s.length, sig: (s.match(/\/\*pfg-v[\d.]+\*\//g)||[])});
 })()'
 ```
 

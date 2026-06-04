@@ -2,7 +2,7 @@
 
 ## Context
 
-`claude-patches` currently maintains 12 extension-side patches (A–L) for Claude Code at `pfg-v1.7`, packaged as per-version prebuilt `apply.py` scripts with literal `(old, new)` text splices, byte-stability validation (`util/build-prebuilt.py:261-293`), `.bak` discipline, and idempotency via embedded `/*pfg-vX.Y*/` signature (`version.py`). Linux-x64 only; three target files (`extension.js`, `webview/index.js`, `webview/index.css`) per `util/build-prebuilt.py:235`.
+`claude-patches` currently maintains 12 extension-side patches (A–L) for Claude Code at `pfg-v1.8`, packaged as per-version prebuilt `apply.py` scripts with literal `(old, new)` text splices, byte-stability validation (`util/build-prebuilt.py:261-293`), `.bak` discipline, and idempotency via embedded `/*pfg-vX.Y*/` signature (`version.py`). Linux-x64 only; three target files (`extension.js`, `webview/index.js`, `webview/index.css`) per `util/build-prebuilt.py:235`.
 
 This change extends the patchset to a 4th splice target (the bun-packed CLI inside the same extension) while absorbing connoisseur's 11 display patches and standing up auto-maintenance against OpenVSX and the connoisseur upstream.
 
@@ -46,7 +46,7 @@ The plan below specifies a complete architecture. Each slice in the Implementati
 
 ## Decisions (confirmed)
 
-- **Patchset version**: bump `pfg-v1.7` to `pfg-v2.0`. Single signature family covers all four surfaces; per-target signature probes (§7).
+- **Patchset version**: bump `pfg-v1.8` to `pfg-v2.0`. Single signature family covers all four surfaces; per-target signature probes (§7).
 - **Patches M + N are new CLI-side patches.** M = subagent UI message drop. N = #59844 Option 1 (drop `!getIsNonInteractiveSession()` from the showThinkingSummaries branch). Patch L stays as the existing `--thinking-display` extension.js splice (Option 2), retained as belt-and-braces for N. CON-A through CON-J are connoisseur's display tweaks (all CLI-side); O is our repo-owned welcome-badge patch (CLI-side) that supersedes connoisseur's CON-K.
 - **Patch O (welcome marker)**: appends ` pfg-v{PATCHSET_VERSION}` to the SINGLE version-bearing site in the bundle (the settings `title:` carrying `` `Claude Code v${...VERSION}` ``), producing `Claude Code v2.1.149 pfg-v2.0`. The other four `Claude Code` rebrand sites connoisseur's `patchWelcomePatchedBadge` would touch (bold `createElement`, `Welcome to Claude Code for`, two `colorFn` forms) stay plain under Patch O; we don't carry the broader rebrand. Interpolated at synthesis time. Repo-authored (`owner="repo"`), supersedes connoisseur's matcher entirely; see §5 for the per-site enumeration and the naming rationale.
 - **Platforms (OpenVSX names)**: `linux-x64`, `linux-arm64`, `darwin-arm64`, `win32-x64`, `win32-arm64`. These are the exact platform identifiers OpenVSX uses in its `downloads` map; using anything else (`macos-arm64`, `windows-x64`) breaks the lookup. OpenVSX also exposes `darwin-x64` (Intel Mac), `alpine-x64`, and `alpine-arm64`; explicitly out of scope for v2.0. Document the exclusion in the README: "if you need darwin-x64 or alpine-*, open an issue." No proactive support; demand-driven.

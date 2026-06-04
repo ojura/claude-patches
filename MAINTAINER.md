@@ -22,7 +22,7 @@ patched live extension dir          maintainer tool             new prebuilt
   webview/index.css                  │  validates byte-stability
   webview/index.css.bak              ↓
                                   apply.py
-                                  ⤷ contains all 19 splices as
+                                  ⤷ contains all its splices as
                                     literal Python find-and-replace
                                   ⤷ self-contained, stdlib only
                                   ⤷ idempotent, signature-detected
@@ -31,7 +31,7 @@ patched live extension dir          maintainer tool             new prebuilt
 
 ## Steps
 
-1. **Apply patches A–K locally first.**
+1. **Apply all patches locally first.**
 
    Either via the Claude Code skill (`/patch-claude`) or by hand
    following [`skill/SKILL.md`](skill/SKILL.md). End state: your
@@ -140,7 +140,7 @@ that working state while migrating the on-disk signature.
 5. **Add a CHANGELOG entry.** `CHANGELOG.md` is a per-version
    historical log. Newest first; describe what changed and why.
    Critically, `CHANGELOG.md` is *deliberately excluded* from the
-   sync allowlist (Step 6): its `pfg-vN` mentions must stay frozen
+   sync allowlist (Step 7): its `pfg-vN` mentions must stay frozen
    to the version they describe.
 
 6. **Stage everything**: `git add -A`. Doing this *before* sync makes
@@ -173,7 +173,7 @@ restoring … from .bak"*. The `.bak` from their original run is the
 pre-patch baseline, reusable as the restore point indefinitely
 (until the extension itself updates).
 
-This is why the comprehensive prebuilt covers A–K in one script: a
+This is why the comprehensive prebuilt covers every patch in one script: a
 patchset bump can include changes anywhere, and a self-contained
 prebuilt guarantees the user ends up at exactly the new state without
 needing the per-patch skill walkthrough.
@@ -196,7 +196,7 @@ Consumers:
   them into the prebuilt template at synthesis time (no more hardcoded
   signatures in the template).
 - `util/sync-version-mentions.py` imports `PATCHSET_VERSION` and
-  rewrites the `SYNC_TARGETS` allowlist on demand. Run as Step 6 above.
+  rewrites the `SYNC_TARGETS` allowlist on demand. Run as Step 7 above.
 - `skill/SKILL.md` and `MAINTAINER.md` resolve the signature
   dynamically: bash blocks invoke `python3 "$REPO_ROOT/version.py"`
   inline; prose uses abstract language ("the patchset signature").
@@ -219,8 +219,8 @@ new content, causing silent confusion. Now there's one line to edit.
 `util/sync-version-mentions.py` is a standalone script, not a
 side-effect of `build-prebuilt.py`. It can technically run any time
 after Step 1 (the sync only depends on `version.py` → `SKILL.md`, not
-on the prebuilt), but the recommended order puts it as Step 6 so
-its diff is reviewable in isolation in Step 7. If sync ran inside
+on the prebuilt), but the recommended order puts it as Step 7 so
+its diff is reviewable in isolation in Step 8. If sync ran inside
 build-prebuilt, an accidental rewrite outside the intended
 SYNC_TARGETS (e.g., due to a bug in the script, or an unrelated file
 that gained a `pfg-v` mention) would get buried in the same commit as

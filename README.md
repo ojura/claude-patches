@@ -4,7 +4,7 @@ Out-of-tree patches for the Anthropic Claude Code VS Code extension
 (`anthropic.claude-code-*-linux-x64`, distributed via the
 [Open VSX Registry](https://open-vsx.org/extension/Anthropic/claude-code)).
 
-These patches address eleven user-visible bugs that, as of the current
+These patches address user-visible bugs that, as of the current
 public releases, ship with the bundled extension. Each patch has a
 corresponding upstream issue on
 [anthropics/claude-code](https://github.com/anthropics/claude-code/issues?q=is%3Aissue+author%3Aojura);
@@ -29,6 +29,7 @@ F + G); the rest just kept getting added.
 | **I** | Neutralize the webview's 500-message render cap | Sessions with > 600 messages silently truncate to last 500 in the chat panel; no UI feedback | [#55701](https://github.com/anthropics/claude-code/issues/55701) |
 | **J** | Resolve cross-file `logicalParentUuid` at session load (load sibling JSONLs to bridge fork boundaries) | Forks of compacted sessions can't scroll back into the source session's history; chain walker stops at the cross-file stitch | [#48937 (cross-file)](https://github.com/anthropics/claude-code/issues/48937) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
 | **K** | `lost+found`-style read-side recovery for sessions with dangling `logicalParentUuid`: add visible markers in the chat that recover lost earlier messages from the same file | Sessions where the compactor's lpu was never persisted (write-side bug at `compact.ts:598`) silently truncate the chain at the boundary; user thinks pre-compact work was lost | [#55818](https://github.com/anthropics/claude-code/issues/55818) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
+| **L** | Force `--thinking-display summarized` on the IDE-spawned CLI subprocess | Thinking renders as a dead "Thinking" stub instead of a summary for Opus 4.7+: Anthropic flipped the API default to `omitted`, and the CLI's `summarized` gate never fires for the non-interactive IDE subprocess, so `showThinkingSummaries` is silently ignored | [#59844](https://github.com/anthropics/claude-code/issues/59844) |
 
 See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 (why, locate, patch, verify, test). For *how* to introspect the running
@@ -52,11 +53,11 @@ claude-patches/
 ├── prebuilt/
 │   ├── <VER>/
 │   │   └── apply.py         # version-pinned, self-contained apply script
-│   │                        # covering ALL patches A through K. Built by
+│   │                        # covering ALL patches. Built by
 │   │                        # diffing the live patched bundle against its
 │   │                        # pristine .bak files, byte-stable verified.
 │   └── archive/
-│       ├── v1/              # superseded by current patchset version
+│       ├── v<patchset>/     # superseded by a newer patchset version
 │       └── broken/          # known-broken prebuilts (don't run);
 │           └── v<patchset>/ # outer dir: which patchset version
 │               └── <VER>/   # inner dir: which bundle version
@@ -123,7 +124,7 @@ curl -fsSL "https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt
 ```
 
 The script auto-detects your extension dir (across IDE variants),
-applies all 19 splices (Patches A–K), and validates with `node --check`.
+applies all its splices, and validates with `node --check`.
 Idempotent. Use `--force` to restore from `.bak` files and re-apply
 unconditionally.
 
@@ -163,7 +164,7 @@ has no `.bak` until you patch it.)
 
 If you have push access and need to add a prebuilt for a new extension
 release, see [MAINTAINER.md](MAINTAINER.md). The short version: apply
-patches A–K locally first, then
+all patches locally first, then
 `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>` synthesizes
 and byte-stability-validates a prebuilt apply script from the diff.
 

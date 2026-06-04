@@ -27,9 +27,6 @@ stop short without raising it.
   `pfgk-bookend-` reconstructed; reached cleanly → no marker; not reached
   → `pfgk-broken-` incomplete. Replaces the per-cause `pfgk-bookend-`/
   `pfgk-broken-` loops that ran in the loader.
-- **broken marker now renders.** The webview role detector didn't match
-  `pfgk-broken-`, so the incomplete-transcript marker rendered as a plain
-  unstyled message. Fixed.
 - **In-file seam** planted at each compaction the walker crosses in-file
   (previously only phantom boundaries were marked; the native
   `compact_boundary` is a filtered system message and never renders).
@@ -41,7 +38,7 @@ stop short without raising it.
 
 Verified end-to-end over CDP against 10 sessions. `prebuilt/2.1.159`
 regenerated, byte-stable; `prebuilt/2.1.158` not regenerated (no local
-bundle) and stays at v1.7.
+bundle); it stays at v1.7 and is archived under `prebuilt/archive/v1.7/`.
 
 ## v1.7 (2026-05-17): Patch L, force `--thinking-display summarized` on IDE-spawned CLI
 

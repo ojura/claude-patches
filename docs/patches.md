@@ -709,8 +709,8 @@ When a message's uuid begins `pfgk-`, replace the user-message bubble
 entirely with a structured card. The card has:
 
 - A header bar: `PATCH K` tag, a per-role state badge (`◆ RECONSTRUCTED
-  · INFO`, `⛔ INCOMPLETE TRANSCRIPT · ALERT`, `⚠ IN-FILE SEAM`, `↻
-  CROSS-FILE BRIDGE`, or `◇ IN-FILE COMPACTION`), a zero-padded
+  · INFO`, `⛔ UNRECOVERABLE`, `⚠ IN-FILE REATTACH`, `↻
+  CROSS-FILE BRIDGED`, or `◇ IN-FILE COMPACTION`), a zero-padded
   counter (`MARKER 03 OF 08`) and `↓ NEXT` / `↺ CYCLE` navigation.
   Counter and nav are computed from `$.messages.peek()`. Clicking
   cycles to the next marker via
@@ -720,9 +720,8 @@ entirely with a structured card. The card has:
 - An SVG topology diagram, built by `_pfDiagram(dg, T)` using helpers
   `L` (line), `TX` (text), `D` (chain dot). One case per role:
   bookend (chain reconstructed), broken (dead-end), seam (phantom
-  reattachment), seamClean (clean in-file bridge), bridge (single-lane
-  cross-file: `UPSTREAM · CROSS-FILE → X-FILE LEAF → BRIDGE GHOST →
-  BOUNDARY → POST-BRIDGE CHAIN`).
+  reattachment), seamClean (clean in-file link), bridge (the cross-file
+  link arc crosses a dashed file-boundary divider into the boundary).
 - A rows table from the payload's `rows` field (`[[key, value], ...]`).
   Rows whose counts are zero are omitted by the loader.
 - A body paragraph (`body`).
@@ -765,16 +764,16 @@ boundary. The chat panel should:
    · INFO`, counter `MARKER 01 OF N` with `↓ NEXT`, followed
    immediately by the conversation's true first user message (the
    canonical origin recovered via cross-conversation backfill).
-2. Show an amber **seam** card (badge `⚠ IN-FILE SEAM`) at each
+2. Show an amber **seam** card (badge `⚠ IN-FILE REATTACH`) at each
    compaction whose lpu was a phantom reattached in-file, or a slate
    **clean-seam** card (badge `◇ IN-FILE COMPACTION`) where the
    in-file bridge needed no phantom.
-3. Show an orange **bridge** card (badge `↻ CROSS-FILE BRIDGE`) at
+3. Show an orange **bridge** card (badge `↻ CROSS-FILE BRIDGED`) at
    each compaction whose lpu lives in a sibling `.jsonl`. The card's
-   "cross-file source" row names that sibling; the diagram threads
-   `X-FILE LEAF` to `BRIDGE GHOST` to `BOUNDARY`.
+   "cross-file source" row names that sibling; the diagram's cross-file
+   link arc crosses a file-boundary divider into the boundary.
 4. If the walk dead-ends at an unreachable ancestor, the top card is a
-   red **broken** card (badge `⛔ INCOMPLETE TRANSCRIPT · ALERT`)
+   red **broken** card (badge `⛔ UNRECOVERABLE`)
    instead of a bookend.
 5. Each card's counter is zero-padded (`MARKER 03 OF 08`); the last
    card reads `↺ CYCLE`. Clicking any card cycles to the next in
@@ -880,3 +879,58 @@ The result: even sessions whose own first line is a compact_boundary
 true canonical origin, sourced from a sibling fork that retained it.
 
 **Upstream issue**: [#55818](https://github.com/anthropics/claude-code/issues/55818) (read-side mitigation) + [#46603](https://github.com/anthropics/claude-code/issues/46603) (write-side root cause at `compact.ts:598`).
+
+---
+
+## Patch L: force `--thinking-display summarized` on the IDE-spawned CLI
+
+For `claude-opus-4-7[1m]` (and any 4.7+ model), Anthropic flipped the API
+default for `thinking.display` from `"summarized"` to `"omitted"`
+(documented in their Opus 4.7 migration guide). With `display: "omitted"`,
+the API returns thinking content blocks with an empty `thinking` field and
+a multi-KB `signature` only, so the webview renders the static
+`<div class="thinkingStatic">Thinking</div>` stub, since its `thinking.length > 0`
+branch can never fire. Thinking summaries vanish from the IDE chat panel.
+
+The bundled CLI *has* a gate that sets `display = "summarized"` when
+`settings.json` carries `showThinkingSummaries: true`, but the gate is
+`!getIsNonInteractiveSession() && showThinkingSummaries === true`. The IDE
+spawns the CLI subprocess with `--print --input-format stream-json
+--output-format stream-json`, which makes the session non-interactive, so
+the gate never fires for IDE chat panels, so the user's setting is silently
+ignored where it matters most.
+
+The CLI also accepts an explicit `--thinking-display <mode>` flag that
+bypasses the non-interactive gate. The IDE's SDK-side spawn code already
+knows how to pass it, but only when `thinkingConfig.display` is set on the
+spawn-time options, and the chat-panel caller never sets it, so the flag
+never reaches argv.
+
+### Patch shape
+
+In `extension.js`, find the argv assembly that gates the flag on `U.display`
+being truthy:
+
+```js
+if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
+```
+
+Replace with an unconditional push that defaults the mode to `summarized`:
+
+```js
+if(U.type!=="disabled")i.push("--thinking-display",U.display||"summarized")
+```
+
+Dropping `&&U.display` stops the empty-display case from suppressing the
+flag; `||"summarized"` supplies the fallback value. Every IDE-spawned CLI
+subprocess now receives `--thinking-display summarized`, the CLI's first
+display-gate branch fires regardless of interactive state, and the API
+returns real thinking summaries again. The local symbols (`U`, `i`) drift
+between releases; locate by the distinctive `"--thinking-display"` string
+literal.
+
+If/when upstream lands either option in [#59844](https://github.com/anthropics/claude-code/issues/59844)
+(dropping the `!getIsNonInteractiveSession()` gate from the CLI, or this
+same extension splice as the fallback), Patch L can be retired.
+
+**Upstream issue**: [#59844](https://github.com/anthropics/claude-code/issues/59844) (fix proposal); it closes the gap described by [#49902](https://github.com/anthropics/claude-code/issues/49902) / [#49322](https://github.com/anthropics/claude-code/issues/49322) / [#49268](https://github.com/anthropics/claude-code/issues/49268) / [#8477](https://github.com/anthropics/claude-code/issues/8477) and several more.
