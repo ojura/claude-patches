@@ -693,25 +693,49 @@ returned element with a colored container when `Z.uuid` starts with
 
 See SKILL.md Step 13 for the full splice. The K block has four
 synthesis steps (see "Why" above). Three ghost types are emitted
-into `_parsed`: `pfgk-bookend-…` (red, chain root), `pfgk-seam-…`
-(orange, in-file orphan reattachment at phantom-lpu boundary),
-`pfgk-bridge-…` (orange-red, redirection from cross-file shortcut
-back into the in-file orphan).
+into `_parsed`: `pfgk-bookend-…` (cyan, marks the reconstructed
+chain root of an intact transcript), `pfgk-broken-…` (red, marks a
+chain that dead-ended at a missing ancestor), `pfgk-seam-…` (amber,
+marks an in-file compaction crossed via phantom-lpu reattachment),
+`pfgk-bridge-…` (orange, marks a compaction whose lpu lives in a
+sibling `.jsonl`; the ghost is inserted between that cross-file lpu
+and the boundary), plus a slate-toned variant of seam (payload field
+`dg:"seamClean"`) for clean in-file compactions where the walk
+bridges in-file without phantoms.
 
 ### Patch (webview/index.js)
 
-Wrap the user-message bubble with a colored `<div>` (red bookend,
-orange seam, orange-red bridge) and inject a header bar showing
-`MARKER N OF M · CLICK FOR NEXT ↓` (or `· CYCLE TO TOP ↺` for the
-last marker) computed from the session's `messages.peek()`. Click
-handler cycles to the next marker in document order via
-`document.querySelectorAll("[data-pfgk-role]")`. Inject a `<style>`
-inside the wrapper that suppresses the truncation gradient, the
-"Show more / Show less" collapse buttons, and the edit/fork action
-button, none of which make sense on a synthetic message. The visual
-intensity (loud color stripe, large ⚠️, dashed border under header,
-all-caps position counter in role color) is intentional: data-
-corruption events deserve attention-grabbing markers, not muted ones.
+When a message's uuid begins `pfgk-`, replace the user-message bubble
+entirely with a structured card. The card has:
+
+- A header bar: `PATCH K` tag, a per-role state badge (`◆ RECONSTRUCTED
+  · INFO`, `⛔ INCOMPLETE TRANSCRIPT · ALERT`, `⚠ IN-FILE SEAM`, `↻
+  CROSS-FILE BRIDGE`, or `◇ IN-FILE COMPACTION`), a zero-padded
+  counter (`MARKER 03 OF 08`) and `↓ NEXT` / `↺ CYCLE` navigation.
+  Counter and nav are computed from `$.messages.peek()`. Clicking
+  cycles to the next marker via
+  `document.querySelectorAll("[data-pfgk-role]")`, wrapping from the
+  last back to the first.
+- A per-role glyph and headline.
+- An SVG topology diagram, built by `_pfDiagram(dg, T)` using helpers
+  `L` (line), `TX` (text), `D` (chain dot). One case per role:
+  bookend (chain reconstructed), broken (dead-end), seam (phantom
+  reattachment), seamClean (clean in-file bridge), bridge (single-lane
+  cross-file: `UPSTREAM · CROSS-FILE → X-FILE LEAF → BRIDGE GHOST →
+  BOUNDARY → POST-BRIDGE CHAIN`).
+- A rows table from the payload's `rows` field (`[[key, value], ...]`).
+  Rows whose counts are zero are omitted by the loader.
+- A body paragraph (`body`).
+- A separate monospace timing line (`tm`) showing K stitching
+  wall-clock.
+
+Per-role tone tokens live in `_PFTOK`: bookend cyan, broken red, seam
+amber, bridge orange, healthy (clean-seam) slate. The render-wrap also
+injects CSS that suppresses bubble truncation, the "Show more / Show
+less" collapse buttons, and the edit/fork action buttons. None of these
+apply to a synthetic marker. Payload is parsed from `block.content.text`
+after the IDE's message assembler reshapes the ghost into a content
+block array (see SKILL.md's data-channel contract bullet).
 
 ### Critical implementation notes
 
@@ -725,26 +749,36 @@ corruption events deserve attention-grabbing markers, not muted ones.
   detection (parsing message text for marker strings) is fragile:
   any real user message could spoof it. The uuid prefix is structural
   metadata that the renderer can dispatch on without reading content.
-- **The renderer treats user-message content as plain text** (no
-  markdown, no inline HTML). The visual punch comes from the wrapper
-  + emoji + colored bg, not from anything inside the message body.
+- **The card is built structurally, not from message text.** The
+  render-wrap parses the `PFGK1:` payload out of the assembled content
+  block and constructs the card via `createElement` (header, glyph,
+  SVG diagram, rows, body, timing line). The ghost's message body is
+  never shown as prose; the uuid prefix selects the card, the payload
+  fills it.
 
 ### Test
 
 Open a session in a conversation family with at least one phantom-lpu
 boundary. The chat panel should:
 
-1. Show a red **bookend** at the very top with header `MARKER 1 OF N · CLICK FOR NEXT ↓`,
-   followed immediately by the conversation's true first user message
-   (the canonical origin recovered via cross-conversation backfill).
-2. Show an orange **seam** at each compaction event whose lpu was
-   phantom (in-file orphan reattachment).
-3. Show an orange-red **bridge** at each compaction event whose lpu
-   was resolved cross-file by Patch J (the in-file orphan was kept,
-   not bypassed).
-4. The last marker's header reads `· CYCLE TO TOP ↺`.
-5. Clicking any marker cycles to the next in document order, wrapping
-   from the last back to the bookend.
+1. Show a cyan **bookend** card at the very top, badge `◆ RECONSTRUCTED
+   · INFO`, counter `MARKER 01 OF N` with `↓ NEXT`, followed
+   immediately by the conversation's true first user message (the
+   canonical origin recovered via cross-conversation backfill).
+2. Show an amber **seam** card (badge `⚠ IN-FILE SEAM`) at each
+   compaction whose lpu was a phantom reattached in-file, or a slate
+   **clean-seam** card (badge `◇ IN-FILE COMPACTION`) where the
+   in-file bridge needed no phantom.
+3. Show an orange **bridge** card (badge `↻ CROSS-FILE BRIDGE`) at
+   each compaction whose lpu lives in a sibling `.jsonl`. The card's
+   "cross-file source" row names that sibling; the diagram threads
+   `X-FILE LEAF` to `BRIDGE GHOST` to `BOUNDARY`.
+4. If the walk dead-ends at an unreachable ancestor, the top card is a
+   red **broken** card (badge `⛔ INCOMPLETE TRANSCRIPT · ALERT`)
+   instead of a bookend.
+5. Each card's counter is zero-padded (`MARKER 03 OF 08`); the last
+   card reads `↺ CYCLE`. Clicking any card cycles to the next in
+   document order, wrapping from the last back to the first.
 
 For the canonical test, open the most-compaction-impacted session in
 the family (e.g. one whose JSONL starts with a `compact_boundary` at

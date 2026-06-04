@@ -1605,12 +1605,16 @@ loader shape), the canonical guarantees the following:
   backfilled, phantoms failed, and three enumerated possible causes.
   Triggered when a user/assistant's `parentUuid` walk (capped five
   hops) dead-ends at a phantom boundary K could not backfill.
-- **`message.content` is a plain string, not a block array.** The
-  ghosts' content is a multi-paragraph diagnostic essay assembled by
-  string concatenation. A block-array form
-  (`[{type:"text",text:...}]`) is the obvious JS shape, but the
-  canonical render-wrap and the bubble renderer expect the string
-  form.
+- **`message.content` is a string at construction, but the assembler
+  reshapes it.** Loader-side, each ghost is built with
+  `message.content` as a string (`"PFGK1:"+JSON.stringify({...})`).
+  Between loader and render, the IDE's message assembler (`DT→Mn`)
+  converts that string into a single-element block array on a `wG`
+  instance, and `wG` has no `.message` field. The render-wrap
+  therefore recovers the payload from `block.content.text` (the
+  `Array.isArray(Z.content)` path), not `Z.message.content`. A
+  from-scratch reconstruction that reads `.message.content` off the
+  assembled message gets `undefined` and renders blank cards.
 - **uuid prefix is the only discriminator.** The render-wrap keys
   entirely off `Z.uuid.startsWith("pfgk-seam-")` etc.; there are no
   marker fields on the ghost object. Adding `isPfgkGhost` /
