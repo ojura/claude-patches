@@ -115,7 +115,8 @@ def find_default_ext_dir():
 SIGNATURE = "{signature}"
 PATCHSET_VERSION = re.match(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', SIGNATURE).group(1)
 
-# Each entry: (file_relpath, [(old, new), (old, new), ...])
+# Each entry: (file_relpath, [splice_dict, ...]); each splice_dict has keys
+# "old", "new", "expected_count" (mirrors util/test_splices.py:apply_splices).
 SPLICES = {splices_repr}
 
 
@@ -139,7 +140,7 @@ def main():
     ext_js = os.path.join(ext_dir, "extension.js")
     if not os.path.exists(ext_js):
         sys.exit(f"missing: {{ext_js}}")
-    with open(ext_js, "r") as f:
+    with open(ext_js, "r", encoding="utf-8", errors="surrogateescape") as f:
         head = f.read()
     has_current_sig = SIGNATURE in head
     sig_match = re.search(r'/\\*pfg-v(\\d+(?:\\.\\d+)?)\\*/', head)
@@ -171,25 +172,27 @@ def main():
 
         with open(target, "r", encoding="utf-8", errors="surrogateescape") as f:
             s = f.read()
-        for i, (old, new) in enumerate(file_splices):
+        for i, sp in enumerate(file_splices):
+            old, new = sp["old"], sp["new"]
+            expected = sp.get("expected_count", 1)
             cnt = s.count(old)
             if cnt == 0:
-                # Maybe already patched; check that new is present
-                if s.count(new) >= 1:
+                # Maybe already patched; treat as applied if the result is present
+                if s.count(new) >= max(1, expected):
                     print(f"  {{relpath}} splice {{i}}: already applied (skipped)")
                     continue
                 sys.exit(
                     f"  {{relpath}} splice {{i}}: anchor not found "
-                    f"(old_count={{cnt}}). Bundle may have shifted; this "
+                    f"(count=0). Bundle may have shifted; this "
                     f"prebuilt is for {{VERSION}}. Use the version-tolerant "
                     f"skill/apply-patch-fg.py instead."
                 )
-            if cnt != 1:
+            if cnt != expected:
                 sys.exit(
-                    f"  {{relpath}} splice {{i}}: anchor not unique "
-                    f"(old_count={{cnt}}). Refusing to apply."
+                    f"  {{relpath}} splice {{i}}: anchor count {{cnt}} != "
+                    f"expected_count {{expected}}. Refusing to apply."
                 )
-            s = s.replace(old, new, 1)
+            s = s.replace(old, new, expected)
             print(f"  {{relpath}} splice {{i}}: applied")
         with open(target, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(s)
@@ -248,7 +251,10 @@ def main():
         sps = extract(fpath, bak)
         print(f"  {relpath}: {len(sps)} splice(s)")
         if sps:
-            splices_by_file.append((relpath, [(s["old"], s["new"]) for s in sps]))
+            splices_by_file.append((relpath, [
+                {"old": s["old"], "new": s["new"], "expected_count": s["expected_count"]}
+                for s in sps
+            ]))
 
     # Build the apply.py content
     splices_repr = repr(splices_by_file)
