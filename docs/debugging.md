@@ -1532,7 +1532,7 @@ JSON.stringify({
   bridge:   document.querySelectorAll('[data-pfgk-role="bridge"]').length,
   broken:   document.querySelectorAll('[data-pfgk-role="broken"]').length,
   bodyHasAMBIG:      document.body.textContent.includes('AMBIGUOUS RECONSTRUCTION'),
-  bodyHasINCOMPLETE: document.body.textContent.includes('INCOMPLETE TRANSCRIPT'),
+  bodyHasUNRECOVERABLE: document.body.textContent.includes('UNRECOVERABLE'),
   msgs: document.querySelectorAll('[class*=message_]').length,
 })
 ```

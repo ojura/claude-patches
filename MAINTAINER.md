@@ -65,7 +65,7 @@ patched live extension dir          maintainer tool             new prebuilt
      using a fixed template (no external dependencies, stdlib only).
    - **Validates byte-stability**: applies the synthesized script to
      fresh copies of the `.bak` files in a tempdir and confirms the
-     output matches the live patched files exactly (md5 / byte
+     output matches the live patched files exactly (byte-for-byte
      compare). Refuses to write `prebuilt/<VER>/apply.py` if anything
      diverges.
 
@@ -111,7 +111,7 @@ behavior (you developed it locally). The bump procedure below preserves
 that working state while migrating the on-disk signature.
 
 1. **Edit ONE line in `skill/SKILL.md`**: change
-   `**Patchset version**: \`1.4\`` to the new version. That line is
+   the `**Patchset version**` line to the new version. That line is
    the single source of truth (see "version.py" below).
 
 2. **Re-apply patches locally as a stability check.** Run

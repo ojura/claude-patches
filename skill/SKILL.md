@@ -269,7 +269,7 @@ fi
        structurally for reference only.
     3. **Patches H, I**: follow Steps 10–11 (per-splice manual
        application). Both are short, single-anchor splices.
-    4. **Patches J + K (combined)**: follow Step 13. The v1.4 K splice
+    4. **Patches J + K (combined)**: follow Step 13. The current K splice (v1.4+)
        replaces the loader's body wholesale and incorporates J's
        cross-file fixed-point loop, so apply them together; do NOT
        run Step 12 separately. Step 12 is preserved as the structural
@@ -321,7 +321,7 @@ different correct actions:
    as for genuine new versions: manual application via Steps 2–13.
 
 3. **Version was archived as superseded** (e.g., older patchset
-   version under `prebuilt/archive/v1/`). Same handling as case 1
+   version under `prebuilt/archive/v<patchset>/`). Same handling as case 1
    if a current-patchset prebuilt is missing.
 
 To check which case you're in:
@@ -329,7 +329,7 @@ To check which case you're in:
 ```sh
 ls "$REPO_ROOT"/prebuilt/archive/broken/*/$VER/ 2>/dev/null && \
     echo "WARNING: this bundle version has a known-broken prebuilt under some patchset; read the archive README before publishing"
-ls "$REPO_ROOT/prebuilt/archive/v1/$VER/"     2>/dev/null && \
+ls "$REPO_ROOT"/prebuilt/archive/v*/$VER/     2>/dev/null && \
     echo "Note: superseded older-patchset-version prebuilt exists; this is fine"
 ```
 
@@ -1193,7 +1193,7 @@ React rendering, not the patch. If the UI lags unacceptably, partial mitigation:
 
 ## Step 12: Patch J: cross-file logicalParentUuid resolution at session load
 
-> **For v1.4 K**, skip this step and apply the combined J+K splice
+> **For the current K (v1.4+)**, skip this step and apply the combined J+K splice
 > from Step 13 instead. The v1.4 prebuilt collapses J's fixed-point
 > loop and K's four-stage synthesis into a single replacement of the
 > loader's body. This Step 12 description is preserved as the
@@ -1463,7 +1463,7 @@ by their `require` target, and do NOT assume they are two distinct symbols:
 
 Substitute these in the prebuilt's `new` string and apply. Confirm
 exactly one occurrence of the `old` anchor before replacing. (Warning:
-**don't apply Patch J as a separate splice if you're using v1.4 K**
+**don't apply Patch J as a separate splice if you're using the current K (v1.4+)**
 because the v1.4 prebuilt combines J + K into one splice that replaces the
 loader's original body wholesale. Skip Step 12 in this case.)
 
@@ -1598,13 +1598,15 @@ reconstruction needs to behave correctly. If you ever modify K (or
 synthesize an equivalent for a future patchset that touches the
 loader shape), the canonical guarantees the following:
 
-- **Four marker kinds, not three.** Beyond seam / bookend / bridge
-  there is a fourth marker emitted in the `!_bookendFired` branch:
-  `pfgk-broken-<root.uuid>`, with a ⛔ "INCOMPLETE TRANSCRIPT:
-  RECONSTRUCTION FAILED" payload listing sibling count, phantoms
-  backfilled, phantoms failed, and three enumerated possible causes.
+- **Five marker kinds.** Beyond seam / bookend / bridge there is
+  `pfgk-broken-<root.uuid>`, emitted in the `!_bookendFired` branch
+  with a ⛔ "UNRECOVERABLE" payload listing sibling count, phantoms
+  backfilled, and phantoms failed; the honest-verdict refactor plants
+  it as a single post-walk verdict, not a list of per-cause guesses.
   Triggered when a user/assistant's `parentUuid` walk (capped five
-  hops) dead-ends at a phantom boundary K could not backfill.
+  hops) dead-ends at a phantom boundary K could not backfill. The fifth
+  is a slate-toned clean-seam variant (`dg:"seamClean"`) for in-file
+  compactions the walk bridges with no phantom.
 - **`message.content` is a string at construction, but the assembler
   reshapes it.** Loader-side, each ghost is built with
   `message.content` as a string (`"PFGK1:"+JSON.stringify({...})`).

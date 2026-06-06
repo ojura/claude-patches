@@ -371,10 +371,11 @@ def main():
     print(f"  size: {os.path.getsize(out_path)} bytes")
     print(f"  total splices: {sum(len(s[1]) for s in splices_by_file)}")
     print()
-    print(f"Next: add CHANGELOG.md entry for v{PATCHSET_VERSION}, then")
-    print(f"      git add -A && python3 util/sync-version-mentions.py")
-    print(f"      review the resulting diff for any unwanted rewrites,")
-    print(f"      then git add -A && commit.")
+    print(f"Next, per MAINTAINER.md:")
+    print(f"  - new bundle version (same patchset): git add {out_path} and commit.")
+    print(f"  - patchset version bump: also add a CHANGELOG entry, then")
+    print(f"      git add -A && python3 util/sync-version-mentions.py,")
+    print(f"      review the diff for unwanted rewrites, then commit.")
 
 
 if __name__ == "__main__":
