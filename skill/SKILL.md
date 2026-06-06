@@ -199,8 +199,8 @@ for EXT in "${EXTS[@]}"; do
   fi
   if [ -n "$PREBUILT" ]; then
     # Stale-prebuilt guard: if local clone exists, compare the prebuilt's
-    # embedded signature to version.py. A stale prebuilt (e.g. pfg-v1.6
-    # when current is pfg-v1.7) would detect its own old signature as
+    # embedded signature to version.py. A stale prebuilt (signature older than the
+    # current `pfg-vX.Y`) would detect its own old signature as
     # "Already patched" and exit: a false positive that silently skips
     # the newer patches. Treat stale as "no prebuilt".
     if [ -n "$REPO_ROOT" ]; then
@@ -248,8 +248,8 @@ fi
   it itself.
   **HOWEVER**: check whether the prebuilt's signature matches the
   *current* patchset version (`python3 "$REPO_ROOT/version.py"`). If
-  the prebuilt is from an older patchset (e.g. `pfg-v1.6` when current
-  is `pfg-v1.7`), it applies stale patches and the "Already patched"
+  the prebuilt is from an older patchset (signature older than the current
+  `pfg-vX.Y`), it applies stale patches and the "Already patched"
   no-op is a false positive. In that case **fall through to the
   maintainer section** to synthesize an updated prebuilt: restore from
   `.bak`, apply ALL patches (A–L) manually per Steps 3–14 below +

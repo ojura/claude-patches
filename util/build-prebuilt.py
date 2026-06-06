@@ -3,7 +3,7 @@
 Maintainer tool: synthesize a prebuilt apply.py for a freshly-patched
 extension version.
 
-Given a patched extension directory (post-A-K) and its three pre-patch
+Given a fully-patched extension directory and its three pre-patch
 backups, this:
   1. Diffs each file against its .bak via util/extract_splices.py
   2. Aggregates the splices into a single self-contained Python script
@@ -16,8 +16,8 @@ Usage:
 
 Example:
   python3 util/build-prebuilt.py \\
-    ~/.antigravity/extensions/anthropic.claude-code-2.1.121-linux-x64 \\
-    prebuilt/2.1.121
+    ~/.antigravity-ide/extensions/anthropic.claude-code-<VER>-linux-x64 \\
+    prebuilt/<VER>
 
 After running, commit prebuilt/<VER>/apply.py to the repo so future users
 with that version can skip synthesis.
