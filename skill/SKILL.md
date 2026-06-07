@@ -1606,8 +1606,9 @@ loader shape), the canonical guarantees the following:
   single post-walk verdict, not a list of per-cause guesses.
   Triggered when a user/assistant's `parentUuid` walk (cycle-guarded by a visited set, otherwise
   unbounded) dead-ends at a phantom boundary K could not backfill. The fifth
-  is a slate-toned clean-seam variant (`dg:"seamClean"`) for in-file
-  compactions the walk bridges with no phantom.
+  is `pfgk-seamClean-…`, a slate-toned clean-seam variant
+  (`kind:"seamClean"`) for in-file compactions the walk crosses with
+  no phantom.
 - **`message.content` is a string at construction, but the assembler
   reshapes it.** Loader-side, each ghost is built with
   `message.content` as a string (`"PFGK1:"+JSON.stringify({...})`).

@@ -698,9 +698,9 @@ chain that dead-ended at a missing ancestor), `pfgk-seam-…` (amber,
 marks an in-file compaction crossed via phantom-lpu reattachment),
 `pfgk-bridge-…` (orange, marks a compaction whose lpu lives in a
 sibling `.jsonl`; the ghost is inserted between that cross-file lpu
-and the boundary), plus a slate-toned variant of seam (payload field
-`dg:"seamClean"`) for clean in-file compactions where the walk
-bridges in-file without phantoms.
+and the boundary), and `pfgk-seamClean-…` (slate, marks a clean in-file compaction
+where the walk crosses in-file without a phantom; payload field
+`kind:"seamClean"`).
 
 ### Patch (webview/index.js)
 
@@ -716,7 +716,7 @@ entirely with a structured card. The card has:
   `document.querySelectorAll("[data-pfgk-role]")`, wrapping from the
   last back to the first.
 - A per-role glyph and headline.
-- An SVG topology diagram, built by `_pfDiagram(dg, T)` using helpers
+- An SVG topology diagram, built by `_pfDiagram(kind, T)` using helpers
   `L` (line), `TX` (text), `D` (chain dot). One case per role:
   bookend (chain reconstructed), broken (dead-end), seam (phantom
   reattachment), seamClean (clean in-file link), bridge (the cross-file
@@ -728,7 +728,7 @@ entirely with a structured card. The card has:
   wall-clock.
 
 Per-role tone tokens live in `_PFTOK`: bookend cyan, broken red, seam
-amber, bridge orange, healthy (clean-seam) slate. The render-wrap also
+amber, bridge orange, seamClean (clean-seam) slate. The render-wrap also
 injects CSS that suppresses bubble truncation, the "Show more / Show
 less" collapse buttons, and the edit/fork action buttons. None of these
 apply to a synthetic marker. Payload is parsed from `block.content.text`
@@ -1026,9 +1026,9 @@ python3 util/gen_demo.py | tee /tmp/demo_sids.txt   # run from the workspace; no
 
 Pitfalls when crafting or reusing a fixture:
 
-- The seam fixture plants `dg:"seam"` only while its phantom `logicalParentUuid`
+- The seam fixture plants `kind:"seam"` only while its phantom `logicalParentUuid`
   (a uuid no record in the dir defines) stays unresolved. If a sibling defines it
-  (a prior run, a clone), the crossing renders `dg:"seamClean"` or `dg:"bridge"`
+  (a prior run, a clone), the crossing renders `kind:"seamClean"` or `kind:"bridge"`
   instead, a DIFFERENT marker. Clear leftover demo files before generating.
 - A same-titled inert stub left in the dir makes `click_convo` (Step 6a) open the
   WRONG row. Move it aside, or give your fixture a unique title, so the search
