@@ -33,8 +33,8 @@ stop short without raising it.
 - **Walker cycle fix**: skip the upstream `compactMetadata.preservedMessages`
   rewrite for in-file boundaries; with D's lpu fallback it cycled the
   walk and truncated the transcript.
-- **Seam wording**: removed a completeness claim that is false when the
-  verdict is `broken`.
+- **Seam wording**: shortened (dropped the trailing "from the rendered
+  transcript" clause).
 
 Verified end-to-end over CDP against 10 sessions. `prebuilt/2.1.159`
 regenerated, byte-stable; `prebuilt/2.1.158` not regenerated (no local
@@ -120,8 +120,10 @@ unaffected.
 
 ### Splice count and signature
 
-20 total splices now (was 19): 15 in `extension.js` (was 14, +1 for
-L), 4 in `webview/index.js`, 1 in `webview/index.css`. Signature
+20 total splices: 15 in `extension.js`, 4 in `webview/index.js`, 1 in
+`webview/index.css` (unchanged from the final v1.6 prebuilt 2.1.139,
+which already carried Patch L; the +1 over 2.1.132 reflects Patch L's
+introduction during the v1.6 line). Signature
 bumped from `/*pfg-v1.6*/` to `/*pfg-v1.7*/`. End-users on v1.6 will
 get auto-restore + reapply on the next `apply.py` run.
 
