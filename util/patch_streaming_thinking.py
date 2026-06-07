@@ -106,36 +106,101 @@ Usage
 
 ::
 
-    util/patch_streaming_thinking.py <input-binary> [--instr] [-o <out>]
+    util/patch_streaming_thinking.py <pristine-binary> [--instr] [-o <out>]
 
-Defaults: production-clean. Pass `--instr` to add the nine log hooks.
+Defaults: production-clean. Pass `--instr` to add the eleven log hooks.
 Output path defaults to `<input>.pfg` if `-o` is omitted.
 
-Input expectations
-==================
+Input
+=====
 
-The input binary must be the bun-packed CLI form (Linux ELF with a
-`.bun` section as parsed by `util/bun_handler`). Connoisseur's other
-display patches (verbose tool-call rendering, diff colors, subagent
-prompt visibility, spinner-tip suppression, version-output marker,
-welcome-badge rebrand, etc.) are independent of streaming-thinking and
-can be applied either before or after this patcher with no anchor
-conflict - they don't touch c2H or the renderer prop chain at the
-sites we own.
+A pristine bun-packed Claude Code CLI binary (Linux ELF with a `.bun`
+section as parsed by `util/bun_handler`). Get it from npm:
 
-The thinking-streaming sub-patch of connoisseur's `patchThinkingStreaming`
-must NOT be applied first: it injects `__cc_*`-prefixed code into c2H
-that would conflict with our E.* anchors. Pass `--disable
-thinking-streaming` when running connoisseur's TS patcher, or run this
-patcher against pristine bundles directly.
+::
+
+    npm pack @anthropic-ai/claude-code-linux-x64@<version>
+    tar xf anthropic-ai-claude-code-linux-x64-<version>.tgz
+    # Then the pristine binary is at package/claude
+
+DO NOT pre-apply connoisseur's display patches or any other in-bundle
+modifications - this patcher applies connoisseur's display tweaks
+itself, in-process, via the vendored `vendor/connoisseur/patch-claude-
+display.ts` subtree (run with `node --experimental-strip-types
+--disable thinking-streaming`, since Patch S owns the thinking-streaming
+surface end-to-end).
+
+Output: a final patched binary with three layers in this order:
+
+1. Connoisseur's display tweaks (verbose tool-call rendering, diff
+   colors, subagent prompt visibility, spinner-tip suppression,
+   version-output marker, welcome-badge rebrand, etc.), MINUS
+   connoisseur's thinking-streaming sub-patch.
+2. Patch S: the streaming-thinking restoration (writer + renderer end-
+   to-end, discovery-based anchors).
+3. Optional --instr instrumentation hooks (per-PID log to
+   `/tmp/pfg-instr.${process.pid}.log`).
+
+Requirements: Node.js >= 22 (for `--experimental-strip-types`) on PATH.
 """
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+CONNOISSEUR_TS = os.path.join(
+    REPO_ROOT, 'vendor', 'connoisseur', 'patch-claude-display.ts'
+)
 sys.path.insert(0, HERE)
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
+
+
+def apply_connoisseur_display_patches(js):
+    """Run the vendored connoisseur display-patch transformations against
+    the extracted JS. Disables connoisseur's thinking-streaming sub-patch
+    because Patch S (the renderer + writer code below) owns that surface
+    end-to-end with discovery-based anchors instead of connoisseur's
+    `hidePastThinking:!0,streamingThinking:VAR` literal which has not
+    existed on any 2.1.16x bundle and 0-matches silently.
+    """
+    if not os.path.exists(CONNOISSEUR_TS):
+        raise SystemExit(
+            f'[connoisseur] missing vendored patcher at {CONNOISSEUR_TS}.\n'
+            f'           Run: git subtree add --prefix=vendor/connoisseur '
+            'https://github.com/a-connoisseur/patch-claude-code main --squash'
+        )
+    with tempfile.NamedTemporaryFile(
+        suffix='.js', mode='w', delete=False, encoding='utf-8'
+    ) as f:
+        f.write(js)
+        tmp = f.name
+    try:
+        result = subprocess.run(
+            ['node', '--experimental-strip-types', CONNOISSEUR_TS,
+             '--file', tmp, '--disable', 'thinking-streaming'],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise SystemExit(
+                '[connoisseur] node patcher failed.\n'
+                f'  exit: {result.returncode}\n'
+                f'  stdout: {result.stdout.strip()}\n'
+                f'  stderr: {result.stderr.strip()}'
+            )
+        for line in result.stdout.splitlines():
+            ls = line.strip()
+            if ls and ('candidates' in ls or 'Patched:' in ls or 'Patch summary' in ls):
+                print(f'  {ls}')
+        with open(tmp, encoding='utf-8') as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def discover_names(js):
@@ -315,6 +380,10 @@ def main():
     js = bun_handler.extract_js(data).decode('utf-8', errors='surrogateescape')
     print(f"input:        {src} ({len(data)} bytes)")
     print(f"JS extracted: {len(js)} bytes")
+
+    print("\n--- connoisseur display patches (thinking-streaming disabled) ---")
+    js = apply_connoisseur_display_patches(js)
+    print(f"JS post-connoisseur: {len(js)} bytes")
 
     names = discover_names(js)
     print("\n--- discovered names ---")
