@@ -1570,7 +1570,10 @@ re-renders the panel; for that you MUST use 6a or 6b.
 
 ### Step 7: verify the rendered DOM
 
-After the session renders, probe the inner active-frame:
+After the session renders, probe the inner active-frame. Assert on this rendered
+DOM (or the wire `H` from a fresh walk), never by re-reading the fixture `.jsonl`:
+opening a session makes base Claude Code append an `ai-title` to that file, so it
+is not byte-stable across an open (see the Step 8 fixture pitfalls).
 
 ```sh
 WS_CHAT="ws://127.0.0.1:9222/devtools/page/$IFRAME"
@@ -1806,6 +1809,16 @@ Pitfalls when crafting or reusing a fixture:
 - A fixture with zero message records (an `ai-title`+`mode` stub and nothing else)
   plants no markers: the walker has no boundary or chain to fire on. It must
   contain the actual messages, not just a title.
+- Opening a session is not idempotent on disk. Base Claude Code (the `claude`
+  subprocess, via `generate_session_title` with `persist`, NOT our patches)
+  appends a compact-JSON `ai-title` record to the session's own `.jsonl` on open,
+  so a 7-line seam fixture becomes 8 lines after one open and re-opening keeps
+  adding duplicate `ai-title` lines (harmless to the render, the file just grows).
+  Verify markers from the rendered DOM (Step 7) or the wire `H` of a fresh walk,
+  NEVER by re-reading or diffing the fixture file after opening it. The `ai-title`
+  is also what the panel lists and searches, so the fixture needs one (gen_demo
+  writes it); real seam sessions often have none and cannot be opened by panel
+  title-search.
 
 Cleanup when done (delete by the exact sessionIds, leaving the real siblings
 untouched), then reload once to drop the stale panel rows:
