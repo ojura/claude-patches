@@ -101,6 +101,45 @@ the launch flags and IDE-product paths differ.
 
 ---
 
+## Fixture footguns (synthetic session JSONLs)
+
+Two ways a synthetic fixture silently fails to exercise the code, both of
+which masquerade as "the loader didn't run" or "a cache didn't refresh".
+Check these FIRST when a fixture you wrote does not list, open, or mark up
+the way you expect, before any cache/refresh/timing theory:
+
+1. **Wrong project dir.** The conversations panel lists sessions for the
+   OPEN WORKSPACE's project dir only, not the repo you happen to be editing
+   from a terminal. The project dir is the workspace path with every `/`
+   replaced by `-` (e.g. `/home/juraj/CDVIEWER/PNGS` becomes
+   `-home-juraj-CDVIEWER-PNGS`). Confirm the workspace from the renderer
+   window title (`"<workspace> - Antigravity …"`), derive the dir, and verify
+   your `.jsonl` sits in `~/.claude/projects/<that-dir>/`. A fixture written
+   to the wrong project dir never lists and never loads; that is not a stale
+   index. gen_demo writes to `os.getcwd()`'s dir, so run it from inside the
+   open workspace folder or set `PFG_DEMO_PROJ`.
+
+2. **Spaced JSON defeats cross-file resolution.** Real session files are
+   written by `JSON.stringify` (compact, no spaces). The loader's fixed-point
+   sibling scan prefilters candidate files with
+   `_str.includes('"uuid":"<lpu>"')`, a space-free literal. A fixture
+   serialized with Python `json.dumps` defaults (`"uuid": "<lpu>"`, a space
+   after the colon) fails that prefilter, so Patch J/K1 cross-file resolution
+   finds nothing and a cross-file boundary renders as `seam` instead of
+   `bridge`. Single-file demos (broken/seam/seamClean) never reach the
+   prefilter, so "the single-file demo works" proves nothing about the
+   cross-file path. Serialize cross-file fixtures compact:
+   `json.dumps(r, separators=(",", ":"))`.
+
+Both were found the hard way on one cross-file `bridge` fixture that produced
+no marker: first misdiagnosed as "the panel index doesn't refresh" (it was in
+the wrong dir), then as a loader bug (it was spaced JSON). The loader was
+correct both times. When a fixture renders the wrong marker, confirm against
+the loader BP (Recipe 1) capturing `_parsed` ghosts and `backfill`, not the
+DOM alone.
+
+---
+
 ## Mental model
 
 ### Three V8 processes, three CDP surfaces

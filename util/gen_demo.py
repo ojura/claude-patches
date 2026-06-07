@@ -31,7 +31,12 @@ def compact_rec(uid,lpu,sid,preserved):
 def write(projdir,sid,recs):
     d=os.path.expanduser("~/.claude/projects/"+projdir); os.makedirs(d,exist_ok=True)
     with open(os.path.join(d,sid+".jsonl"),"w") as f:
-        for r in recs: f.write(json.dumps(r)+"\n")
+        # COMPACT separators, to match real JSON.stringify session files. The loader's
+        # cross-file sibling scan prefilters candidates with _str.includes('"uuid":"<lpu>"'),
+        # a space-free literal; spaced json.dumps output ('"uuid": "...') fails that prefilter
+        # and silently defeats Patch J/K1 cross-file resolution (a bridge renders as seam).
+        # Single-file demos don't reach the prefilter, but keep it realistic regardless.
+        for r in recs: f.write(json.dumps(r,separators=(",",":"))+"\n")
     return os.path.join(d,sid+".jsonl")
 
 # BROKEN: root parentUuid dangles at a unique missing uuid => kind:"broken"
