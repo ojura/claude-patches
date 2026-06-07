@@ -5,7 +5,7 @@ description: Reapply Juraj's twelve local patches to all anthropic.claude-code I
 
 # Reapply anthropic.claude-code extension patches
 
-**Patchset version**: `1.8`
+**Patchset version**: `1.9`
 
 Twelve patches live out-of-tree and need to be reapplied every time a bundled
 `anthropic.claude-code-*` extension updates. The minified code
@@ -252,14 +252,14 @@ fi
   `pfg-vX.Y`), it applies stale patches and the "Already patched"
   no-op is a false positive. In that case **fall through to the
   maintainer section** to synthesize an updated prebuilt: restore from
-  `.bak`, apply ALL patches (A–L) manually per Steps 3–14 below +
+  `.bak`, apply ALL patches (A-L) manually per Steps 3-14 below +
   apply-patch-fg.py, then run `build-prebuilt.py`, commit, and push.
   Do NOT ask the user for permission: synthesize-and-push is part of
   the skill's defined maintainer workflow.
 - `ABORT: ...` → stop and surface the message to the user; don't try
   to "fix" the abort condition automatically.
 - `No prebuilt for $VER` → apply the patches manually as follows:
-    1. **Patches A–E**: follow Steps 3–7 (per-splice manual application).
+    1. **Patches A-E**: follow Steps 3-7 (per-splice manual application).
     2. **Patches F and G**: do NOT splice manually. Run
        `skill/apply-patch-fg.py`. It locates anchors via regex (so it
        handles variable-name drift across releases automatically) and
@@ -267,7 +267,7 @@ fi
        `python3 "$REPO_ROOT/version.py"`) that the prebuilt relies on
        for idempotency. Steps 8 and 9 below describe the splices
        structurally for reference only.
-    3. **Patches H, I**: follow Steps 10–11 (per-splice manual
+    3. **Patches H, I**: follow Steps 10-11 (per-splice manual
        application). Both are short, single-anchor splices.
     4. **Patches J + K (combined)**: follow Step 13. The current K splice (v1.4+)
        replaces the loader's body wholesale and incorporates J's
@@ -302,7 +302,7 @@ different correct actions:
 
 1. **Genuine new version, no prebuilt yet** (e.g., upstream just
    released `2.1.<N>` and nothing has been synthesized for it).
-   Action: apply patches manually via Steps 2–13 and 8/9, then if
+   Action: apply patches manually via Steps 2-13 and 8/9, then if
    you have push access, synthesize and publish.
 
 2. **Version was deliberately archived as broken.** Check
@@ -318,7 +318,7 @@ different correct actions:
    refuses to publish a byte-identical-to-archived-broken prebuilt,
    but it's a backstop, not a substitute for understanding why the
    archive entry exists. End-user fallback in this case is the same
-   as for genuine new versions: manual application via Steps 2–13.
+   as for genuine new versions: manual application via Steps 2-13.
 
 3. **Version was archived as superseded** (e.g., older patchset
    version under `prebuilt/archive/v<patchset>/`). Same handling as case 1
@@ -1275,7 +1275,7 @@ node --check $EXT/extension.js && echo "syntax OK"
 After reload, open a session that was forked from a compacted parent (parent stitches with
 cross-file lpus). Scrollback should reach back through the parent session's pre-fork
 content. First-load latency increases by the parse time of the matched sibling files
-(typically 1–2 s for a 56 MB sibling).
+(typically 1-2 s for a 56 MB sibling).
 
 For diagnostic logging, the maintainer's `cdp_instrument.mjs`-style approach (described in
 the project's NOTES) attaches via the `--inspect-extensions` port and logs each pass's
@@ -1612,9 +1612,10 @@ loader shape), the canonical guarantees the following:
 - **`message.content` is a string at construction, but the assembler
   reshapes it.** Loader-side, each ghost is built with
   `message.content` as a string (`"PFGK1:"+JSON.stringify({...})`).
-  Between loader and render, the IDE's message assembler (`DT→Mn`)
-  converts that string into a single-element block array on a `wG`
-  instance, and `wG` has no `.message` field. The render-wrap
+  Between loader and render, the IDE's message assembler (`DT→Mn`;
+  minified names drift per bundle) converts that string into a
+  single-element content-block array on a wrapper instance (`wG`) with
+  no `.message` field. The render-wrap
   therefore recovers the payload from `block.content.text` (the
   `Array.isArray(Z.content)` path), not `Z.message.content`. A
   from-scratch reconstruction that reads `.message.content` off the
@@ -1646,18 +1647,19 @@ loader shape), the canonical guarantees the following:
   / `_kTk1` and embeds a "K stitching wall-clock: parse Xms, J
   cross-file prepend Yms, ..." line in the bookend and broken
   essays. There is no side-channel logging.
-- **Bridge detection reads `_seen`, no separate set required.** A
-  boundary qualifies as a bridge if `!parentUuid &&
-  logicalParentUuid && _seen.has(lpu) &&
-  !String(lpu).startsWith("pfgk-")`: "in `_seen` but not a pfgk
-  ghost" reliably means "J pulled it in cross-file." The `!pfgk-`
-  guard prevents re-handling seams the earlier stage already
-  rewrote. Same-session guard (`_prev.sessionId ===
-  _m.sessionId`) skips cross-session predecessors.
-- **Bridges append, seams splice.** Canonical does
-  `_parsed.push(_bridge)` (append, relying on the chain walker to
-  re-thread by parentUuid) but `_parsed.splice(_i, 0, _seam)`
-  (in-place for seams).
+- **Resolved-boundary detection reads `_seen`, no separate set
+  required.** A `compact_boundary` qualifies for a bridge or seamClean
+  marker when `!parentUuid && logicalParentUuid && _seen.has(lpu) &&
+  !String(lpu).startsWith("pfgk-")`: "in `_seen` but not a pfgk ghost"
+  means Patch J resolved its lpu to a real predecessor. The `!pfgk-`
+  guard prevents re-handling seams the earlier stage already rewrote.
+  Bridge versus seamClean is then decided by provenance, not by `_seen`:
+  `_xf = _bFile !== _lFile` (the boundary's file vs the resolved lpu's
+  file) selects a bridge when they differ and a seamClean when they
+  match.
+- **Bridge and seam both splice in place.** Each is inserted into
+  `_parsed` with a splice and an lpu rewrite so the walker threads
+  through it; there is no `_parsed.push` append path.
 - **The webview render-wrap is part of K, not a separate concern.**
   It renders `div.pfgkAlert.pfgk-<role>` with per-role tone tokens
   (defined in `_PFTOK`; see `docs/patches.md` for the live palette), a

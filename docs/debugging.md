@@ -51,8 +51,7 @@ the launch flags and IDE-product paths differ.
 >   actually re-run `Wz4` and re-render, open the session as a NEW editor
 >   tab via the conversations panel, or close+reopen its tab (editor-tab
 >   webviews are disposed on hide). See "Patch development iteration loop"
->   Step 6. The visual loop WAS done autonomously dozens of times; it is
->   not impractical.
+>   Step 6.
 >
 > ### ABSOLUTE RULE: DOM verification before push
 >
@@ -971,7 +970,7 @@ Edit `extension.js` on disk + `Developer: Reload Window`. The reliable hot-swap:
 survives JIT-cached / closure-bound call sites where `setScriptSource`
 does not (per the gotcha). A lighter in-process swap that rebinds
 future lookups instead of already-bound references (re-bind the export,
-clear `require.cache`, a `Proxy`) is not something I have ruled out. Slow (~5–15s for the reload). This is what
+clear `require.cache`, a `Proxy`) is not something I have ruled out. Slow (~5-15s for the reload). This is what
 the patch-claude skill uses.
 
 ### Picking which mechanism
@@ -991,14 +990,14 @@ the patch-claude skill uses.
 ## Patch development iteration loop
 
 The canonical loop for editing live extension files and verifying the result
-in the running IDE. One cycle takes 20-40 seconds (mostly the reload wait).
+in the running IDE. One cycle takes roughly ten seconds (mostly the reload, ~5s).
 
 ```
 edit extension.js / webview/index.js on disk
         ↓
 trigger Developer: Reload Window via CDP        (exthost reloads patched code)
         ↓
-wait ~15s for exthost restart
+wait ~5s for exthost restart
         ↓
 re-discover iframe target (ID changes on every reload)
         ↓
@@ -1171,7 +1170,7 @@ declares success without ever seeing the restart. Watch the PID, not reachabilit
 OLD=$(curl -s --max-time 1 http://127.0.0.1:9229/json \
       | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])')
 OLD_PID=$(node /tmp/cdp-eval.mjs "$OLD" 'process.pid' \
-      | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["result"]["value"])')
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["value"])')
 echo "old exthost pid: $OLD_PID"
 # ... now trigger the reload (Step 2) ...
 
@@ -1185,7 +1184,7 @@ except Exception: pass')
   [ -z "$WS" ] && continue                       # old host gone, new not up yet
   R=$(node /tmp/cdp-eval.mjs "$WS" 'JSON.stringify({pid:process.pid,up:Math.round(process.uptime())})' 2>/dev/null \
        | python3 -c 'import sys,json
-try: print(json.load(sys.stdin)["result"]["result"]["value"])
+try: print(json.load(sys.stdin)["result"]["value"])
 except Exception: pass')
   echo "$R" | python3 -c "import sys,json
 try: d=json.loads(sys.stdin.read()); sys.exit(0 if (d['pid']!=$OLD_PID and d['up']<60) else 1)
@@ -1581,7 +1580,7 @@ Symptom: `Debugger.enable` returns immediately, `setBreakpointByUrl`
 returns `locations: []`, scripts seem invisible.
 
 Workaround: `Debugger.enable` + drain `Debugger.scriptParsed` events
-patiently for **5–10 seconds** before assuming the scripts aren't
+patiently for **5-10 seconds** before assuming the scripts aren't
 loaded. CommonJS modules are parsed by V8 once at parse time; a fresh
 inspector connection replays them but the replay isn't instant.
 
@@ -1730,7 +1729,7 @@ inside `eval_in_inner_frame.mjs` re-fetches each call so it's
 naturally robust; bash scripts that cache the outer iframe ID
 between reloads are not.
 
-Wait ~14–16 seconds after triggering Reload Window before
+Wait ~5 seconds after triggering Reload Window before
 re-fetching `/json/list`. The renderer takes a moment to bring
 the new iframes up; an immediate fetch may catch a transient state
 with no chat panel iframe yet.
@@ -1791,10 +1790,10 @@ wrapper expects to re-issue the load via its own RPC channel, not
 via in-frame navigation.
 
 Don't use `location.reload()` on webview frames. To reload webview
-content after editing `webview/index.js` on disk, use mechanism 5
+content after editing `webview/index.js` on disk, use mechanism 3
 from the refresh playbook: `Input.dispatchKeyEvent` for
-`workbench.action.reloadWindow` (Ctrl+R or via command palette →
-"Developer: Reload Window"). Mechanism 5 is the verified path; the
+`workbench.action.reloadWindow` (via command palette →
+"Developer: Reload Window"). Mechanism 3 is the verified path; the
 case studies in `patches.md` use it.
 
 ### `Page.reload` is rejected on iframe targets

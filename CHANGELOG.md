@@ -39,14 +39,16 @@ and the judgment that decides which marker to show was made more accurate.
 - **The clean in-file compaction is its own marker, `seamClean`.** A healthy
   compaction whose history is all in one file now shows in calm slate with a
   neutral "in-file compaction" badge, plainly distinct from the amber "in-file
-  reattach" warning it used to be lumped under. (The payload field that selects
-  the marker was renamed from `dg` to `kind`.)
+  reattach" warning it used to be lumped under.
 - **The seam no longer overstates completeness.** It marks one in-file
   compaction and no longer claims "no persisted message is dropped"; only the
   fully-recovered bookend can honestly say that.
+- **More accurate marker details.** The unrecoverable card now names the
+  missing ancestor instead of the visible message, and a compaction whose origin
+  is recovered only during a sibling backfill is shown as a cross-file bridge
+  rather than an in-file compaction.
 - **Smaller fixes.** The stitching wall-clock moved to its own line; the
-  seamClean diagram's crowded labels were spaced out; a dead color key and a
-  stray layout gap were removed.
+  seamClean diagram's crowded labels were spaced out.
 
 Verified live in the IDE, and checked against several hundred existing sessions.
 

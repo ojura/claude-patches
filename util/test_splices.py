@@ -81,6 +81,12 @@ PASS = []
 def check(name, ok, detail=""):
     PASS.append(ok)
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if detail else ""))
+    # Raise on failure so the suite is meaningful under pytest, which calls the
+    # test_* functions directly and would otherwise see them return normally even
+    # when a check fails. main() wraps each test so the standalone run still
+    # collects and reports the full PASS/FAIL tally.
+    if not ok:
+        raise AssertionError(f"{name}" + (f": {detail}" if detail else ""))
 
 
 def write_pair(tmpdir, pre, post):
@@ -378,19 +384,47 @@ def test_subset_match_rejected(tmp):
     check("subset match returns None (occurrences != count gate fires)", result is None, f"got {result!r}")
 
 
+def test_count_zero_idempotency_and_missing_anchor(tmp):
+    """The apply_splices count==0 branch: a splice whose `new` is already present
+    is treated as already-applied (skip, no-op); a splice where neither `old` nor
+    `new` is present raises 'anchor not found (count=0)'. Exercises the documented
+    idempotency / re-apply contract that was previously never hit by a test."""
+    print("test: count==0 already-applied skip + missing-anchor raise")
+    text = "head NEWBODY tail"
+    out = apply_splices(text, [{"old": "OLDBODY", "new": "NEWBODY"}])
+    check("already-applied (new present, old absent) is a no-op skip", out == text, repr(out))
+    raised = False
+    try:
+        apply_splices("nothing relevant here", [{"old": "OLDBODY", "new": "NEWBODY"}])
+    except ValueError as exc:
+        raised = "anchor not found (count=0)" in str(exc)
+    check("missing anchor (old and new absent) raises count=0", raised)
+
+
 def main():
     import tempfile
     print("=== splice tooling standalone tests ===")
+    tests = [
+        test_default_count_matches_today,
+        test_multi_site_expected_count,
+        test_clamped_edge_collision,
+        test_expected_count_gate_rejects_wrong_count,
+        test_surrogateescape_roundtrip,
+        test_collision_path_surrogateescape,
+        test_hard_collision_reports_not_silent,
+        test_subset_match_rejected,
+        test_count_zero_idempotency_and_missing_anchor,
+    ]
     with tempfile.TemporaryDirectory() as tmp:
-        test_default_count_matches_today(tmp)
-        test_multi_site_expected_count(tmp)
-        test_clamped_edge_collision(tmp)
-        test_expected_count_gate_rejects_wrong_count(tmp)
-        test_surrogateescape_roundtrip(tmp)
-        test_collision_path_surrogateescape(tmp)
-        test_hard_collision_reports_not_silent(tmp)
-        test_subset_match_rejected(tmp)
-    ok = all(PASS)
+        for t in tests:
+            try:
+                t(tmp)
+            except AssertionError as exc:
+                # check() now raises on the first failing assertion in a test; keep
+                # running the remaining tests so the standalone run still reports
+                # the full tally instead of stopping at the first failure.
+                print(f"  !! {t.__name__} aborted on a failed check: {exc}")
+    ok = bool(PASS) and all(PASS)
     print(f"\nSUITE {'PASS' if ok else 'FAIL'} ({sum(PASS)}/{len(PASS)} checks)")
     return 0 if ok else 1
 

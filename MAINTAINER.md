@@ -346,7 +346,7 @@ just the K message text.
 If the wrap counts are zero but the message text is in the DOM
 (`document.body.textContent.includes("PATCH K · ")` returns true),
 the splice produced dead code. See [`docs/patches.md`'s
-"Case study: dead K wrap from non-pristine .bak synthesis"](docs/patches.md#case-study-dead-k-wrap-from-non-pristine-bak-synthesis-2132)
+"Case study: dead K wrap from non-pristine .bak synthesis"](docs/patches.md#case-study-dead-k-wrap-from-non-pristine-bak-synthesis-21132)
 for the empirical diagnosis walkthrough.
 
 The full CDP toolkit + recipes live in

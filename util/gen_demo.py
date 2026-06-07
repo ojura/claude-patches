@@ -6,13 +6,13 @@ import json, uuid, os
 # (the conversations panel only lists projects of open workspace folders), or set
 # PFG_DEMO_CWD / PFG_DEMO_PROJ to target a different one.
 #
-# SEAM fixture => dg:"seam" (unpersisted-predecessor case): a compact_boundary
+# SEAM fixture => kind:"seam" (unpersisted-predecessor case): a compact_boundary
 #   whose logicalParentUuid (PHANTOM) exists in NO .jsonl in the dir, so the
 #   walker's Loop A guard  !_seen.has(logicalParentUuid)  is TRUE and it plants a
 #   pfgk-seam- ghost reattached to the nearest in-file predecessor. If the phantom
-#   WERE resolvable (a sibling defines it), the crossing renders dg:"seamClean" or
-#   dg:"bridge" instead, so keep the phantom uuid unique to this fixture.
-# BROKEN fixture => dg:"broken": root parentUuid dangles at a unique missing uuid.
+#   WERE resolvable (a sibling defines it), the crossing renders kind:"seamClean" or
+#   kind:"bridge" instead, so keep the phantom uuid unique to this fixture.
+# BROKEN fixture => kind:"broken": root parentUuid dangles at a unique missing uuid.
 def u(): return str(uuid.uuid4())
 TS="2026-06-04T11:30:00.000Z"; VER="2.1.159"
 # Target the project dir of the current workspace. Claude Code encodes a workspace
@@ -34,7 +34,7 @@ def write(projdir,sid,recs):
         for r in recs: f.write(json.dumps(r)+"\n")
     return os.path.join(d,sid+".jsonl")
 
-# BROKEN: root parentUuid dangles at a unique missing uuid => dg:"broken"
+# BROKEN: root parentUuid dangles at a unique missing uuid => kind:"broken"
 sid_b=u()
 DANGLING="deadbeef-0000-4000-8000-000000000001"
 b_u1,b_a1,b_u2,b_a2=u(),u(),u(),u()
@@ -46,7 +46,7 @@ broken=[title_rec(sid_b,"PFGK DEMO broken: incomplete-transcript marker (synthet
  leaf_rec(sid_b,b_a2)]
 pb=write(PROJ_DIR,sid_b,broken)
 
-# SEAM: compact_boundary whose logicalParentUuid is a unique missing phantom => dg:"seam"
+# SEAM: compact_boundary whose logicalParentUuid is a unique missing phantom => kind:"seam"
 sid_s=u()
 PHANTOM="deadbeef-0000-4000-8000-000000000002"
 s_u1,s_a1,s_cb,s_u2,s_a2=u(),u(),u(),u(),u()

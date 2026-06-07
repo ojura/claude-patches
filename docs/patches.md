@@ -587,7 +587,7 @@ Step 12 for the full minified body and per-version variable mapping
 
 First open of an affected session: load latency increases by the parse
 time of matched siblings. For a 56 MB sibling parsed once, that's about
-1–2 seconds. Subsequent re-opens of the same session are fast (V8 has
+1-2 seconds. Subsequent re-opens of the same session are fast (V8 has
 the parsed result cached in module-scope `_filesParsed` for the lifetime
 of the extension host process. No, that's per-call inside `Wz4`; the
 benefit is from OS filesystem cache only).
@@ -631,21 +631,24 @@ shape of compaction corruption:
    (the message immediately before the boundary in `_parsed`), and
    rewrite the boundary's lpu to point at the seam. The chain walker
    bridges through the seam.
-3. **Bridge ghosts** (cross-file → in-file redirection):
-   For each compact_boundary whose lpu was resolved cross-file by
-   Patch J (the live chain takes the cross-file shortcut), synthesize
-   a `pfgk-bridge-…` ghost between the in-file orphan chain's leaf
-   and the boundary's first child (live chain head). The chain walker
-   now traverses the in-file orphan instead of the cross-file shortcut.
-   The cross-file content is still in `_parsed` (J prepended it) and
-   reachable via the seam path → its content stays rendered.
-4. **Bookend ghost** (chain-root marker):
-   Prepend a `pfgk-bookend-…` ghost at the chain root. Two predicates,
-   tried in order: (a) original, first non-system message with
-   `parent==null && !lpu`; (b) relaxed, first user/assistant whose
-   parent chain dead-ends in a phantom-lpu compact_boundary (covers
-   the case where the chain root is parented to a system boundary, as
-   happens after step 1's backfill).
+3. **Bridge ghosts** (label a cross-file compaction):
+   For each compact_boundary whose lpu Patch J resolved to a *different*
+   file (`_xf`, i.e. `_bFile !== _lFile`), synthesize a `pfgk-bridge-…`
+   ghost sitting between that cross-file lpu and the boundary: the ghost
+   is parented to the resolved cross-file lpu (`_origLpu`) and the
+   boundary is reparented onto the ghost, so the walk runs
+   boundary → ghost → cross-file content. The ghost *labels* the
+   cross-file link; it does not redirect away from it, and there is no
+   in-file-orphan substitution. The same splice emits a `pfgk-seamClean-…`
+   ghost instead when the boundary's lpu resolved inside the same file
+   (`!_xf`).
+4. **Bookend / broken verdict** (chain-root marker):
+   Computed by the Patch D chain walker, not the loader (see the v1.8
+   note below). After the up-walk, a terminus check
+   `_root = !_nextRef || V.has(_nextRef)` decides: a `pfgk-bookend-…`
+   ghost marks the reconstructed root when `_root && _recovered`, and a
+   `pfgk-broken-…` marker fires when `!_root` (the chain dead-ended at a
+   missing ancestor).
 
 After all four steps, the renderer's chain walker traverses the full
 conversation tree in chronological order: bookend → backfilled origin
@@ -659,7 +662,7 @@ to land in the same JSONL), the seam/bridge brackets could fudge
 unrelated content. The visible markers exist to make the
 recovery-vs-fabrication boundary legible to the user.
 
-### v1.8: verdict moved to the walker; in-file seams; render fix
+### v1.8: verdict moved to the walker; in-file seams
 
 The bookend/broken verdict no longer runs as per-cause loops in the
 loader (step 4 above). It is a single 3-state verdict computed in the
@@ -671,9 +674,9 @@ the seam (step 2) and bridge (step 3) loops stay.
   for phantom boundaries; v1.8 also plants one at each `compact_boundary`
   the walker crosses in-file (the native boundary is a filtered system
   message and never renders, so the crossing was previously invisible).
-- **Render-wrap `pfgk-broken-` case.** The role detector matched
-  `pfgk-bookend`/`pfgk-seam-`/`pfgk-bridge-` but not `pfgk-broken-`, so
-  the broken marker rendered unstyled. Added the case.
+  (v1.9 later split this: the clean, resolved-lpu in-file crossing became
+  `seamClean`; the amber seam now covers only phantom/unresolved lpus.
+  See the marker list below.)
 
 ### Locate
 
@@ -837,9 +840,11 @@ single-leaf-walk constraint:
 - **Seam ghosts** (K2) give the walker a `uuid` to follow when
   boundaries have phantom lpus, by rewriting `boundary.lpu =
   seam.uuid` and parenting the seam to the in-file predecessor.
-- **Bridge ghosts** (K3) redirect the walker from Patch J's
-  cross-file shortcut back into the in-file orphan chain, by
-  reparenting the boundary's first child onto the bridge ghost.
+- **Bridge ghosts** (K3) mark a compaction whose lpu Patch J resolved
+  cross-file: the ghost is parented to that cross-file lpu (`_origLpu`)
+  and the boundary is reparented onto the ghost, so the walk passes
+  through a visible marker on its way to the cross-file content rather
+  than crossing to the other file silently.
 - **Bookend / broken** at the chain root marks where the recovered
   chain begins (or, in `pfgk-broken-` case, where it failed to).
 
