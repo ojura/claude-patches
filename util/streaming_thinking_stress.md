@@ -250,7 +250,7 @@ A `FAIL` on `broken_pairs ≥ 1` means the propagation chain is wrong
 even if the totals look healthy - **load-bearing**.
 
 A `FAIL` on the M1-transitions / distinct-blockIndex rows with the
-volume rows passing means the model didn't actually interleave - 
+volume rows passing means the model didn't actually interleave -
 either it collapsed to one streaming turn or it stalled after one
 turn. Verify by reading the tmux session; if the model produced only
 one thinking block + one text block, the interleaving instruction
