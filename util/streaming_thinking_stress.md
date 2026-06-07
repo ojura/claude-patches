@@ -29,7 +29,7 @@ load-bearing assertions (`W1 ≥ 1` shows progressive writer is wired,
 `broken_pairs == 0` shows propagation chain is intact) hold across
 runs regardless of small Sonnet cadence variation.
 
-## Prompt wording matters — both parts
+## Prompt wording matters - both parts
 
 The right stress needs both halves: a problem the model can't just
 retrieve, AND an explicit instruction to derive rather than recall.
@@ -45,8 +45,8 @@ Either half alone fails:
   primes) gives one-sentence thinking. The model complies with the
   preamble only to the extent the problem rewards it.
 
-The combination — preamble + a problem whose answer the model has to
-derive from constraints — is what produces sustained streaming.
+The combination - preamble + a problem whose answer the model has to
+derive from constraints - is what produces sustained streaming.
 
 ## Canonical test prompt: interleaved multi-turn
 
@@ -54,7 +54,7 @@ derive from constraints — is what produces sustained streaming.
 Think through this combinatorial problem case-by-case. After
 completing your reasoning for each value of N, immediately stop
 thinking and write a single short visible sentence reporting the
-count for that N. Then begin reasoning fresh for the next N — do not
+count for that N. Then begin reasoning fresh for the next N - do not
 carry over your previous thinking. Produce one short pause-sentence
 per value, one per N from 1 to 3. Problem: Consider an infinite
 chessboard. A knight starts at (0,0). After exactly N moves, how
@@ -63,21 +63,21 @@ many distinct squares can the knight be on?
 
 Why this is canonical, not the simpler "Show your reasoning for each
 step" form: the interleaved variant exercises the full streaming
-state-machine cycle — E.3 (thinking content_block_start init) and
+state-machine cycle - E.3 (thinking content_block_start init) and
 E.4 (text content_block_start snapshot) fire once per turn rather
 than once per run, the renderer prop chain re-fires through the lxH
 / QyA / MH path on every turn boundary, and the absorbed writer
 (E.7) runs through a fresh accumulator each turn. The simpler form
 covers only the single-turn case and under-tests the lifecycle hooks.
 
-**Why N=3, not N=5**: N=1..5 is empirically too slow — Sonnet
+**Why N=3, not N=5**: N=1..5 is empirically too slow - Sonnet
 finishes it cleanly but takes 12+ minutes and stalls partway through
 the later turns. N=1..3 drives all 3 turn boundaries in 4-6 minutes.
 
 Models naturally produce 3 separate API turns for this prompt: each
 turn has one thinking block followed by one text pause-sentence. If
 a turn stalls (thinking but no text), the test is still valid for
-the turns it completed — just compare metric counts against `actual
+the turns it completed - just compare metric counts against `actual
 turns × per-turn thresholds`.
 
 Substitute problems that share the same shape (combinatorial counting
@@ -85,7 +85,7 @@ on an infinite/large structure with a parity or symmetry constraint)
 work equivalently, but only with an equivalent "stop thinking after
 each case, write a one-sentence summary" preamble. Bad substitutes:
 anything whose answer the model has memorised (famous proofs, well-
-known sequences with short closed forms) — even the preamble doesn't
+known sequences with short closed forms) - even the preamble doesn't
 help because there's no derivation to do.
 
 ## Quick alternate: single-turn derivation
@@ -101,7 +101,7 @@ step by step: Consider an infinite chessboard. A knight starts at
 knight be on for N=1,2,3? Show your reasoning for each step.
 ```
 
-Produces one thinking block and one text block — only verifies E.3
+Produces one thinking block and one text block - only verifies E.3
 init and E.4 snapshot once each, but the load-bearing assertions
 (W1 ≥ 1, broken_pairs == 0) hold the same way and per-delta volume
 is comparable.
@@ -125,12 +125,12 @@ one turn instead of three.
 
 | Metric | Threshold (interleaved N=1..3) | What a failure means |
 |---|---|---|
-| `W1` writer fires | ≥ 60 | Absorbed thinking_delta writer (E.7) not firing — A4 only sees finalized writes. **Load-bearing.** |
+| `W1` writer fires | ≥ 60 | Absorbed thinking_delta writer (E.7) not firing - A4 only sees finalized writes. **Load-bearing.** |
 | `thinkLen` peak | ≥ 1200 chars | Either prompt too easy (model retrieved a closed form) or thinking not received |
 | `R2 A4 t=function` | ≥ 60 | Total React useState setter invocations: should approximately equal W1 + finalized writes per turn. R2 ≈ W1 means all writes are progressive (good) |
 | `M2` with `thinkE ≥ 1` | ≥ 60 | MH not folding streaming thinking into transcript |
 | `E1` with `MH ≥ 1` | ≥ 60 | Aggregator dropping the thinking branch |
-| `L1(n) → C2(y)` broken pairs | 0 | streamingThinking prop appeared at QyA without arriving at lxH — propagation bug. **Load-bearing.** |
+| `L1(n) → C2(y)` broken pairs | 0 | streamingThinking prop appeared at QyA without arriving at lxH - propagation bug. **Load-bearing.** |
 | `L1(y) → C2(y)` healthy pairs | ≥ 30 | Prop chain propagating through memo enough times |
 | `M1 stMsgs=0` transitions | ≥ 2 (= N-1 turn boundaries) | Each new API turn re-initializes streamingThinking; counts boundaries between turns. If < N-1, the model didn't actually interleave |
 | Distinct `blockIndex` for `blockType=thinking` | ≥ 3 | One content-block index per thinking block; confirms a fresh thinking block per turn |
@@ -165,7 +165,7 @@ actually interleaved across turns or collapsed into a single response.
    ```
 4. Paste the canonical prompt above and submit.
 5. Wait for `✻ Cooked/Crunched/Baked for Xs` to settle and the prompt to
-   return. **Always use a fresh claude session per test** — the prompt
+   return. **Always use a fresh claude session per test** - the prompt
    cache + in-session context will short-circuit thinking on repeat
    sends.
 6. Grade the resulting log:
@@ -181,7 +181,7 @@ If you're delegating the run to a Sonnet subagent (the usual cheap-
 orchestration pattern), two specific footguns to avoid:
 
 **Newline-as-Enter in `tmux send-keys`.** Bash multi-line strings get
-sent VERBATIM to tmux — each embedded newline becomes a literal Enter
+sent VERBATIM to tmux - each embedded newline becomes a literal Enter
 keypress in the target pane. A naive `tmux send-keys -t 3 "$PROMPT"`
 where `$PROMPT` is a multi-line variable will submit the first line
 prematurely, then submit each subsequent line as if it were a fresh
@@ -199,7 +199,7 @@ tmux send-keys -t 3 Enter
 NOT:
 
 ```bash
-# WRONG — heredoc/multi-line interpretation will hit Enter mid-string
+# WRONG - heredoc/multi-line interpretation will hit Enter mid-string
 tmux send-keys -t 3 'Think through this combinatorial problem case-by-case.
 After completing your reasoning for each value of N...'
 ```
@@ -236,7 +236,7 @@ diagnostic-rich; blind blocking is neither.
 ## Reading the result
 
 A `PASS` on `W1 ≥ 1` AND `broken_pairs == 0` is the minimal
-load-bearing success — the absorbed progressive writer is firing AND
+load-bearing success - the absorbed progressive writer is firing AND
 the prop chain is wired end-to-end. Volume metrics (thinkLen, R2,
 M2/think, E1/MH, healthy_pairs) are advisory; they vary with prompt
 difficulty, model choice, and Anthropic-side streaming cadence.
@@ -247,10 +247,10 @@ likely the absorbed writer (E.7) didn't land or anchor-drifted on
 this version. Check the patcher's apply log for E.7 status.
 
 A `FAIL` on `broken_pairs ≥ 1` means the propagation chain is wrong
-even if the totals look healthy — **load-bearing**.
+even if the totals look healthy - **load-bearing**.
 
 A `FAIL` on the M1-transitions / distinct-blockIndex rows with the
-volume rows passing means the model didn't actually interleave —
+volume rows passing means the model didn't actually interleave - 
 either it collapsed to one streaming turn or it stalled after one
 turn. Verify by reading the tmux session; if the model produced only
 one thinking block + one text block, the interleaving instruction

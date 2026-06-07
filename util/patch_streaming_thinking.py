@@ -25,7 +25,7 @@ separately-broken halves on contact with connoisseur's patches:
 
 What connoisseur ships on 2.1.16x: WRITER side partial (4 of 7
 sub-replacements fire because shapes drifted), RENDERER side fully
-absent. Net visible: nothing — the writer fires but no renderer reads.
+absent. Net visible: nothing - the writer fires but no renderer reads.
 
 What this patcher ships: both halves, owned by us, discovery-based.
 
@@ -59,7 +59,7 @@ Surfaces
 
   Three connoisseur sub-replacements (message_stop and two message_delta
   variants) drift on 2.1.168 and are intentionally not ported. They
-  affect only the `isStreaming` flag's reset timing — the visible thinking
+  affect only the `isStreaming` flag's reset timing - the visible thinking
   text streams correctly without them. If end-of-stream cleanup matters
   for a future surface, re-derive against current bytes.
 
@@ -120,7 +120,7 @@ display patches (verbose tool-call rendering, diff colors, subagent
 prompt visibility, spinner-tip suppression, version-output marker,
 welcome-badge rebrand, etc.) are independent of streaming-thinking and
 can be applied either before or after this patcher with no anchor
-conflict — they don't touch c2H or the renderer prop chain at the
+conflict - they don't touch c2H or the renderer prop chain at the
 sites we own.
 
 The thinking-streaming sub-patch of connoisseur's `patchThinkingStreaming`
@@ -180,7 +180,7 @@ def discover_names(js):
         r'([A-Za-z_$][\w$]*)\(\{content:\[',
         'create virtual message helper (MH useMemo)',
     )
-    # c2H signature destructure — capture the option vars the absorbed
+    # c2H signature destructure - capture the option vars the absorbed
     # writer (E.1, E.3, E.4, E.7) substitutes into its emitted bodies.
     # The c2H option names are stable (set by Anthropic in source); only
     # the local-bound minified vars drift release-to-release. Pulling them
@@ -465,7 +465,7 @@ def main():
         'E.4 text content_block_start snapshot',
     )
     # E.7: progressive writer. Pristine 2.1.168 ships the with-text
-    # thinking_delta shape (`else if("thinking" in delta...)`) — we anchor
+    # thinking_delta shape (`else if("thinking" in delta...)`) - we anchor
     # against the full body, inject the accumulator at the head, and keep
     # the existing api-metrics block downstream of it.
     OLD_TD_BODY = (
@@ -504,23 +504,23 @@ def main():
         print("\n--- instrumentation hooks (per-PID log) ---")
 
         # R1: c2H entry. Logs the full event shape we care about:
-        #   - type             — outer wrapper (stream_event, assistant, etc.)
-        #   - eventType        — H.event.type (content_block_start/delta/stop,
+        #   - type             - outer wrapper (stream_event, assistant, etc.)
+        #   - eventType        - H.event.type (content_block_start/delta/stop,
         #                        message_start/delta/stop, ping, ...)
-        #   - deltaType        — H.event.delta.type (thinking_delta /
+        #   - deltaType        - H.event.delta.type (thinking_delta /
         #                        signature_delta / text_delta / input_json_delta);
         #                        distinguishes which delta sub-shape just arrived.
-        #   - sigLen           — H.event.delta.signature.length; detects whether
+        #   - sigLen           - H.event.delta.signature.length; detects whether
         #                        signature arrives whole-in-one or streams in
         #                        pieces (the `signature: $.delta.signature`
         #                        assignment would drop all but the last chunk
         #                        if signature streams).
-        #   - blockType        — H.event.content_block.type; populated on
+        #   - blockType        - H.event.content_block.type; populated on
         #                        content_block_start events (thinking / text /
         #                        redacted_thinking / tool_use / ...).
         #                        Lets the grader count distinct thinking-block
         #                        starts without inferring from W1 alone.
-        #   - blockIndex       — H.event.index; the content-block index the
+        #   - blockIndex       - H.event.index; the content-block index the
         #                        current event applies to. With blockType,
         #                        unique (blockIndex, blockType="thinking") pairs
         #                        count thinking blocks in a run.
