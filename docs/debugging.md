@@ -1150,6 +1150,12 @@ node /tmp/reload_go.mjs "$PAGE"
 If the palette opens but typing fails (focus stuck on a broken iframe), run a
 body-area mouse click first. See the "Focus-lost-to-broken-iframe" gotcha.
 
+Do not read the script's exit code as success. On a successful reload the 9222
+page tears down mid-script, the post-Enter `await`s never settle, and Node exits
+non-zero (13, "unsettled top-level await"). A dispatched Enter is not proof of a
+reload regardless; confirm only via Step 3 (exthost pid change) and Step 5 (a new
+chat iframe id).
+
 ### Step 3: wait for the exthost to RESTART (not merely respond)
 
 Reload Window kills the old exthost process and spawns a new one (confirmed:
@@ -1204,6 +1210,16 @@ better default for the iteration loop because what you verify next lives in that
 iframe (it dovetails with Step 6's fresh-mount requirement). Use the pid check to
 prove the *exthost* reloaded your `extension.js`; use the iframe-id change when
 you need the *renderer*. The workbench PAGE id never changes; do not use it.
+
+Caveat if you (or any tool) hold an exthost inspector socket OPEN across the
+reload: the old Node process will not exit until the debugger detaches (Node
+`--inspect` blocks at exit waiting for the inspector), so it leaks and stays in
+the process table, indefinitely while the socket is held. A liveness check like
+"is the old pid gone?" then falsely reports the reload as incomplete. The served
+pid on `9229` and the new iframe id flip on schedule regardless, so they remain
+the correct signals; never use "old pid still in `ps`" as a reload-incomplete
+test when a socket is held. One-shot connect/eval/close tooling (`cdp-eval.mjs`)
+closes within milliseconds and never hits this.
 
 ### Step 4: confirm the patch is in the running in-memory code
 
