@@ -1329,16 +1329,22 @@ async function inActive(wsUrl,expr){return withWS(wsUrl,async(call,ctx)=>{await 
 let ready=false;
 for(let i=0;i<30;i++){try{if(await wbEval(`document.querySelectorAll('.activitybar [aria-label="Claude Code"]').length`)>0){ready=true;break;}}catch(e){}await sleep(1500);}
 if(!ready){console.log('WB_NOT_READY');process.exit(1);}
-// 2. click the activity-bar "Claude Code" view to open the conversations panel
-await wbEval(`(function(){var t=document.querySelector('.activitybar .action-item a[aria-label="Claude Code"],.activitybar [aria-label="Claude Code"]');if(t)t.click();return !!t;})()`);
-await sleep(2000);
-// 3. find the panel iframe: the index.html iframe that has a Search box
-let panelWs=null;
-for(let i=0;i<12 && !panelWs;i++){
+// 2-3. Open the panel ONLY if it is not already open, then bind its iframe.
+// The activity-bar click is a TOGGLE: clicking it while the view is already
+// active CLOSES the panel and clobbers the user's open panel. So probe for the
+// panel iframe (the index.html iframe with a Search box) FIRST, and click the
+// activity-bar to open it ONLY when it is absent.
+const findPanel=async()=>{
   for(const f of (await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'))){
-    if(await inActive(f.webSocketDebuggerUrl,`!!document.querySelector('input[placeholder*="Search" i]')`)===true){panelWs=f.webSocketDebuggerUrl;break;}
+    if(await inActive(f.webSocketDebuggerUrl,`!!document.querySelector('input[placeholder*="Search" i]')`)===true) return f.webSocketDebuggerUrl;
   }
-  if(!panelWs)await sleep(1200);
+  return null;
+};
+let panelWs=await findPanel();
+if(!panelWs){                                   // panel closed -> open it (single click)
+  await wbEval(`(function(){var t=document.querySelector('.activitybar .action-item a[aria-label="Claude Code"],.activitybar [aria-label="Claude Code"]');if(t)t.click();return !!t;})()`);
+  await sleep(2000);
+  for(let i=0;i<12 && !panelWs;i++){ panelWs=await findPanel(); if(!panelWs) await sleep(1200); }
 }
 if(!panelWs){console.log('PANEL_NOT_FOUND');process.exit(1);}
 // 4. set the search box (native setter + input event so React sees it)
