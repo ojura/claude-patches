@@ -45,6 +45,14 @@ the launch flags and IDE-product paths differ.
 >   `await mgr.getConnection(sid).then(c => c.sendRequest({type: 'get_session_request', sessionId: sid}))` from the inner
 >   active-frame. Returns the walker's H array directly. See
 >   "Trigger the chain walker without BP setup" recipe.
+> - **Forcing a FRESH re-render after a code edit + reload**: a reloaded
+>   webview REHYDRATES from serialized state (stale, no re-walk). Neither
+>   the `probe`-channel RPC nor `conn.sendRequest` re-renders the panel. To
+>   actually re-run `Wz4` and re-render, open the session as a NEW editor
+>   tab via the conversations panel, or close+reopen its tab (editor-tab
+>   webviews are disposed on hide). See "Patch development iteration loop"
+>   Step 6. The visual loop WAS done autonomously dozens of times; it is
+>   not impractical.
 >
 > ### ABSOLUTE RULE: DOM verification before push
 >
@@ -769,7 +777,7 @@ Mutators include `updateSessionState`, `setActivePanel`,
 - `this.sessionStates: Map<sessionId, {sessionId, state, title}>`:
   the title cache. **Patch F's target.** `updateSessionState(V, K, B)`
   is the mutator (`V`=sessionId, `K`=state, `B`=title); the
-  `/*pfg-v1.4*/` signature is just upstream of it. Pencil rename in
+  `/*pfg-vN*/` patchset signature is just upstream of it. Pencil rename in
   sidebar updates this; without Patch F, the rename was applied to
   `sessionPanels[sid].title` but the `sessionStates` entry's title
   wasn't refreshed, so on session-switch the broadcast resent the stale
@@ -967,6 +975,868 @@ the patch-claude skill uses.
   (direct method).
 - "Apply a code change that actually runs" → mechanism 5. **Don't
   waste turns on `setScriptSource`.**
+
+---
+
+## Patch development iteration loop
+
+The canonical loop for editing live extension files and verifying the result
+in the running IDE. One cycle takes 20-40 seconds (mostly the reload wait).
+
+```
+edit extension.js / webview/index.js on disk
+        ↓
+trigger Developer: Reload Window via CDP        (exthost reloads patched code)
+        ↓
+wait ~15s for exthost restart
+        ↓
+re-discover iframe target (ID changes on every reload)
+        ↓
+FORCE A FRESH WALK: open the session as a NEW tab via the conversations
+panel, or close+reopen its tab. A rehydrated tab is STALE (no re-walk).
+        ↓
+re-discover the new chat-panel iframe (fresh mount = new target id)
+        ↓
+DOM-verify [data-pfgk-role] counts + body text in active-frame
+        ↓
+iterate
+```
+
+The make-or-break step is the fresh walk (Step 6). A bare reload restores the
+old rendered DOM from serialized state; it does not re-run the walker. See Step
+6 for why, and the two triggers that actually re-mount the webview.
+
+### One-shot runnable block (full cycle, copy-paste)
+
+The Steps below break the cycle down for understanding, but each fenced block is
+a separate shell, so shell vars (`$WB_PAGE`, `$PANEL_WS`, `$BEFORE`, `$WS_CHAT`)
+do NOT persist between them, and several blocks reference vars another block set.
+For an actual zero-shot run, paste THIS single block: it recreates every `/tmp`
+helper inline, threads all vars through one shell, opens "PFGK DEMO seam" as a
+FRESH tab via the conversations panel, re-discovers the freshly-mounted iframe by
+diffing `/json/list`, and prints the marker probe (`pfg_markers.js`). Assumes you already did the disk
+edit + Reload Window (Steps 1-3) so the exthost runs the new code, and that the
+`PFGK DEMO seam` fixture exists in an open-workspace project (Step 8). Change
+`NEEDLE` to verify a different session.
+
+```sh
+set -u
+NEEDLE="PFGK DEMO seam"          # session title to open + verify
+R=http://127.0.0.1:9222          # renderer CDP HTTP endpoint (DOM side)
+
+# ---- helper: cdp-eval.mjs (one-shot Runtime.evaluate against any target) ----
+cat > /tmp/cdp-eval.mjs <<'EOF'
+const wsUrl = process.argv[2], exprArg = process.argv[3];
+const expression = exprArg.startsWith('@')
+  ? await (async () => { const fs = await import('node:fs/promises'); return fs.readFile(exprArg.slice(1), 'utf8'); })()
+  : exprArg;
+const ws = new WebSocket(wsUrl);
+let nextId = 1;
+const pending = new Map();
+ws.addEventListener('open', () => {
+  send('Runtime.enable', {}).then(() =>
+    send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true,
+                               allowUnsafeEvalBlockedByCSP: true, includeCommandLineAPI: true })
+  ).then(r => { console.log(JSON.stringify(r, null, 2)); ws.close(); });
+});
+ws.addEventListener('message', ev => {
+  const msg = JSON.parse(ev.data);
+  if (msg.id && pending.has(msg.id)) {
+    const { resolve, reject } = pending.get(msg.id);
+    pending.delete(msg.id);
+    if (msg.error) reject(msg.error); else resolve(msg.result);
+  }
+});
+function send(method, params) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
+}
+EOF
+
+# ---- helper: eval_in_inner_frame.mjs (drill into the active-frame React app) -
+cat > /tmp/eval_in_inner_frame.mjs <<'EOF'
+const wsUrl = process.argv[2];
+const expression = process.argv[3].startsWith('@')
+  ? await (async () => { const fs = await import('node:fs/promises'); return fs.readFile(process.argv[3].slice(1), 'utf8'); })()
+  : process.argv[3];
+const ws = new WebSocket(wsUrl);
+let nextId = 1, pending = new Map();
+const ctxEvents = [];
+ws.addEventListener('message', ev => {
+  const msg = JSON.parse(ev.data);
+  if (msg.id && pending.has(msg.id)) {
+    const { resolve, reject } = pending.get(msg.id);
+    pending.delete(msg.id);
+    if (msg.error) reject(msg.error); else resolve(msg.result);
+  } else if (msg.method === 'Runtime.executionContextCreated') {
+    ctxEvents.push(msg.params.context);
+  }
+});
+function call(method, params={}) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
+}
+await new Promise(r => ws.addEventListener('open', r));
+await call('Page.enable');
+await call('Runtime.enable');
+await new Promise(r => setTimeout(r, 800));
+const tree = await call('Page.getFrameTree');
+function findInner(node, acc=[]) { if (node.frame) acc.push(node.frame); (node.childFrames||[]).forEach(c => findInner(c, acc)); return acc; }
+const allFrames = findInner(tree.frameTree);
+const innerFrame = allFrames.find(f => f.name === 'active-frame');
+if (!innerFrame) { console.error('FAIL: no name=active-frame'); process.exit(1); }
+const mainCtx = ctxEvents.find(c => c.auxData?.frameId === innerFrame.id && !c.name && c.origin);
+if (!mainCtx) { console.error('FAIL: no main-world context'); process.exit(1); }
+const r = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, contextId: mainCtx.id, includeCommandLineAPI: true });
+console.log(JSON.stringify(r, null, 2));
+ws.close();
+EOF
+
+# ---- helper: pfg_markers.js (general marker probe) -------------------------
+cat > /tmp/pfg_markers.js <<'EOF'
+JSON.stringify({
+  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
+  bookend:   document.querySelectorAll('[data-pfgk-role="bookend"]').length,
+  seam:      document.querySelectorAll('[data-pfgk-role="seam"]').length,
+  seamClean: document.querySelectorAll('[data-pfgk-role="seamClean"]').length,
+  bridge:    document.querySelectorAll('[data-pfgk-role="bridge"]').length,
+  broken:    document.querySelectorAll('[data-pfgk-role="broken"]').length,
+  markerText:(() => { const c = document.querySelector(".pfgkAlert"); return c ? c.textContent.replace(/\s+/g, " ").trim().slice(0, 400) : null; })()
+})
+EOF
+
+# ---- helper: click_convo.js (click a panel row by title needle) ------------
+cat > /tmp/click_convo.js <<'EOF'
+(function(){
+  var needle=NEEDLE;
+  var rows=[...document.querySelectorAll('div,li,a,button')],target=null;
+  for(var i=0;i<rows.length;i++){
+    var t=(rows[i].innerText||'').replace(/\s+/g,' ').trim();
+    if(t.indexOf(needle)>=0 && t.length<220 && rows[i].children.length<=8) target=rows[i];
+  }
+  if(!target) return {found:false};
+  var el=target;
+  for(var k=0;k<6 && el && el.parentElement;k++){
+    var c=String(el.className||'');
+    if(/row|item|session|card|listItem/i.test(c)||(el.getAttribute&&el.getAttribute('role')==='button')) break;
+    el=el.parentElement;
+  }
+  (el||target).click();
+  return {found:true, text:(target.innerText||'').replace(/\s+/g,' ').trim().slice(0,60)};
+})()
+EOF
+
+# ---- helper: panel_ready.mjs (open activity-bar panel, search, print WS) ----
+cat > /tmp/panel_ready.mjs <<'EOF'
+import http from 'node:http';
+const WB=process.argv[2];
+const NEEDLE=process.argv[3]||'';
+const getJSON=p=>new Promise((res,rej)=>{http.get('http://127.0.0.1:9222'+p,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(JSON.parse(d)));}).on('error',rej);});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function withWS(wsUrl,fn){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl);let nid=1;const pend=new Map();const ctx=[];ws.addEventListener('message',ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(m.error):res(m.result);}else if(m.method==='Runtime.executionContextCreated')ctx.push(m.params.context);});const call=(method,params={})=>{const id=nid++;return new Promise((res,rej)=>{pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}));});};ws.addEventListener('open',async()=>{try{const r=await fn(call,ctx);ws.close();resolve(r);}catch(e){ws.close();reject(e);}});ws.addEventListener('error',e=>reject(e));setTimeout(()=>{try{ws.close();}catch(_){}reject(new Error('to'));},7000);});}
+const wbEval=expr=>withWS(WB,async call=>{await call('Runtime.enable');const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true});return r.result.value;});
+async function inActive(wsUrl,expr){return withWS(wsUrl,async(call,ctx)=>{await call('Page.enable');await call('Runtime.enable');await sleep(600);const tree=await call('Page.getFrameTree');const fr=[];(function w(n){if(n.frame)fr.push(n.frame);(n.childFrames||[]).forEach(w);})(tree.frameTree);const inner=fr.find(f=>f.name==='active-frame');if(!inner)return {__noframe:1};const c=ctx.find(x=>x.auxData&&x.auxData.frameId===inner.id&&!x.name&&x.origin);if(!c)return {__noctx:1};const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true,contextId:c.id});return r.result.value;}).catch(e=>({__err:String(e.message||e)}));}
+let ready=false;
+for(let i=0;i<20;i++){try{if(await wbEval(`document.querySelectorAll('.activitybar [aria-label="Claude Code"]').length`)>0){ready=true;break;}}catch(e){}await sleep(1000);}
+if(!ready){console.log('WB_NOT_READY');process.exit(1);}
+await wbEval(`(function(){var t=document.querySelector('.activitybar .action-item a[aria-label="Claude Code"],.activitybar [aria-label="Claude Code"]');if(t)t.click();return !!t;})()`);
+await sleep(2000);
+let panelWs=null;
+for(let i=0;i<12 && !panelWs;i++){
+  for(const f of (await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'))){
+    if(await inActive(f.webSocketDebuggerUrl,`!!document.querySelector('input[placeholder*="Search" i]')`)===true){panelWs=f.webSocketDebuggerUrl;break;}
+  }
+  if(!panelWs)await sleep(1200);
+}
+if(!panelWs){console.log('PANEL_NOT_FOUND');process.exit(1);}
+await inActive(panelWs,`(function(){var inp=document.querySelector('input.search,.filterInput_90gk3A,input[placeholder*="Search" i]');var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'');inp.dispatchEvent(new Event('input',{bubbles:true}));s.call(inp,${JSON.stringify(NEEDLE)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.focus();return inp.value;})()`);
+await sleep(900);
+console.log('PANEL_WS='+panelWs);
+EOF
+
+# A. workbench top-level page id (9222, NOT an iframe, NOT Launchpad)
+WB_PAGE=$(curl -s "$R/json/list" | python3 -c '
+import sys, json
+for t in json.load(sys.stdin):
+    if t.get("type")=="page" and "Launchpad" not in (t.get("title") or ""):
+        print(t["id"]); break')
+echo "workbench page: $WB_PAGE"
+WB="ws://127.0.0.1:9222/devtools/page/$WB_PAGE"
+
+# B. snapshot chat-iframe ids BEFORE opening (to spot the fresh mount after)
+BEFORE=$(curl -s "$R/json/list" | python3 -c '
+import sys, json
+print(" ".join(t["id"] for t in json.load(sys.stdin)
+      if t.get("type")=="iframe" and "vscode-webview" in (t.get("url") or "")))')
+
+# C. open the conversations panel + search the title; capture PANEL_WS
+PANEL_WS=$(node /tmp/panel_ready.mjs "$WB" "$NEEDLE" | sed -n 's/^PANEL_WS=//p')
+echo "panel iframe WS: $PANEL_WS"
+[ -z "$PANEL_WS" ] && { echo "ABORT: conversations panel not found"; exit 1; }
+
+# D. click the matching row -> mounts a FRESH chat tab (real Wz4 re-walk)
+sed "s/NEEDLE/\"$NEEDLE\"/" /tmp/click_convo.js > /tmp/click_convo.ready.js
+node /tmp/eval_in_inner_frame.mjs "$PANEL_WS" @/tmp/click_convo.ready.js \
+  | python3 -c "import sys,json;print('clicked:',json.load(sys.stdin).get('result',{}).get('value'))"
+
+# E. find the fresh chat iframe (id NOT in BEFORE), poll it until markers paint
+for attempt in $(seq 1 8); do
+  sleep 3
+  for id in $(curl -s "$R/json/list" | python3 -c '
+import sys, json
+print("\n".join(t["id"] for t in json.load(sys.stdin)
+      if t.get("type")=="iframe" and "vscode-webview" in (t.get("url") or "")))'); do
+    case " $BEFORE " in *" $id "*) continue;; esac          # skip pre-existing iframes
+    out=$(node /tmp/eval_in_inner_frame.mjs "ws://127.0.0.1:9222/devtools/page/$id" @/tmp/pfg_markers.js 2>/dev/null)
+    val=$(printf '%s' "$out" | python3 -c "import sys,json
+try: print(json.load(sys.stdin)['result']['value'])
+except Exception: pass" 2>/dev/null)
+    # Require a marker actually painted (pfgkAlert>=1): the conversations-panel
+    # iframe also answers the probe but with pfgkAlert:0 and is a false target.
+    if printf '%s' "$val" | python3 -c "import sys,json
+try: sys.exit(0 if json.load(sys.stdin).get('pfgkAlert',0)>=1 else 1)
+except Exception: sys.exit(1)"; then
+      echo "=== fresh chat iframe $id (attempt $attempt) ==="
+      echo "$val"
+      echo ">>> Inspect markerText: the string your edit REMOVED must be absent and the one it ADDED present. Pre-edit text means a stale render (Step 6 skipped) or old exthost code, not a failed edit."
+      exit 0
+    fi
+  done
+done
+echo "no freshly-mounted marker iframe found (check the panel row title, or the tab did not open)"; exit 1
+```
+
+Expected: the fresh tab shows the markers your fixture or session produces (e.g.
+`pfgkAlert >= 1` with the relevant role), and `markerText` reflects your edit. If
+markers are missing, or `markerText` still shows the pre-edit content, the render
+is stale (you skipped Step 6) or the exthost runs old code (reload, re-run), not
+a failed edit. The Steps below explain each piece.
+
+### Step 0: ensure helpers are on disk
+
+```sh
+# Write cdp-eval.mjs if not present
+ls /tmp/cdp-eval.mjs /tmp/eval_in_inner_frame.mjs 2>/dev/null \
+  || echo "MISSING: write them from the Tooling section above"
+```
+
+Both scripts require Node 22+ (built-in `WebSocket`). See the Tooling section
+for their full source.
+
+### Step 1: edit the live extension file(s)
+
+```sh
+EXT="$HOME/.antigravity-ide/extensions/anthropic.claude-code-2.1.159-linux-x64"
+# For other IDEs, adjust the path:
+#   VS Code:   ~/.vscode/extensions/anthropic.claude-code-*-linux-x64
+#   Cursor:    ~/.cursor/extensions/anthropic.claude-code-*-linux-x64
+#   VSCodium:  ~/.vscode-oss/extensions/anthropic.claude-code-*-linux-x64
+
+# Edit directly (the .bak was already created on first patch apply):
+#   $EXT/extension.js          (extension host logic)
+#   $EXT/webview/index.js      (React renderer)
+#   $EXT/webview/index.css     (styles)
+
+# Sanity check before reloading:
+node --check "$EXT/extension.js" && echo "syntax OK"
+```
+
+Never edit `.bak` files. The `.bak` is the pristine baseline; see MAINTAINER.md.
+
+### Step 2: trigger Developer: Reload Window via CDP
+
+Run this against a top-level workbench page (not an iframe, not Launchpad):
+
+```sh
+# Find the workbench page ID
+PAGE=$(curl -s http://127.0.0.1:9222/json/list | python3 -c '
+import sys, json
+for t in json.load(sys.stdin):
+    if t.get("type") == "page" and "Launchpad" not in (t.get("title") or ""):
+        print(t["id"]); break
+')
+echo "workbench page: $PAGE"
+
+# Write and run the reload script
+cat > /tmp/reload_go.mjs << 'EOF'
+const wsUrl = `ws://127.0.0.1:9222/devtools/page/${process.argv[2]}`;
+const ws = new WebSocket(wsUrl);
+let nextId = 1; const pending = new Map();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+ws.addEventListener('message', ev => {
+  const msg = JSON.parse(ev.data);
+  if (msg.id && pending.has(msg.id)) {
+    const {resolve, reject} = pending.get(msg.id); pending.delete(msg.id);
+    if (msg.error) reject(msg.error); else resolve(msg.result);
+  }
+});
+function call(method, params={}) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, {resolve, reject});
+    ws.send(JSON.stringify({id, method, params}));
+  });
+}
+await new Promise(r => ws.addEventListener('open', r));
+// Open command palette with Ctrl+Shift+P (modifiers: Ctrl=2, Shift=8 → 10)
+await call('Input.dispatchKeyEvent', {type:'rawKeyDown', modifiers:10,
+  key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
+await call('Input.dispatchKeyEvent', {type:'keyUp', modifiers:10,
+  key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
+await sleep(400);
+// Verify palette opened
+const after = JSON.parse((await call('Runtime.evaluate', {expression:
+  '(()=>{const w=document.querySelector(".quick-input-widget");return JSON.stringify({open:!!w,val:(w&&w.querySelector("input"))?.value})})()',
+  returnByValue:true})).result.value);
+if (!after.open) { console.log("ABORT: palette did not open"); ws.close(); process.exit(1); }
+// Type the command without clearing the ">" prefix
+await call('Input.insertText', {text: 'Developer: Reload Window'});
+await sleep(400);
+// Verify first suggestion is the right command
+const st = JSON.parse((await call('Runtime.evaluate', {expression:
+  '(()=>{const w=document.querySelector(".quick-input-widget");const f=w&&w.querySelector(".quick-input-list .monaco-list-row");return JSON.stringify({input:(w&&w.querySelector("input"))?.value,first:f?.textContent?.slice(0,60).trim()||null})})()',
+  returnByValue:true})).result.value);
+if (!st.first || !st.first.startsWith('Developer: Reload Window')) {
+  console.log('ABORT: first result is', st.first); ws.close(); process.exit(1);
+}
+console.log('reloading:', st.first);
+try {
+  await call('Input.dispatchKeyEvent', {type:'rawKeyDown', key:'Enter',
+    code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
+  await call('Input.dispatchKeyEvent', {type:'keyUp', key:'Enter',
+    code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
+  console.log('RELOAD TRIGGERED');
+} catch (e) { console.log('enter sent'); }
+ws.close();
+EOF
+node /tmp/reload_go.mjs "$PAGE"
+```
+
+If the palette opens but typing fails (focus stuck on a broken iframe), run a
+body-area mouse click first. See the "Focus-lost-to-broken-iframe" gotcha.
+
+### Step 3: wait for the exthost to restart
+
+```sh
+echo "waiting for exthost..."
+for i in $(seq 1 20); do
+  sleep 1
+  R=$(curl -s --max-time 1 http://127.0.0.1:9229/json/version 2>/dev/null)
+  [ -n "$R" ] && echo "exthost up after ${i}s" && break
+done
+```
+
+Typical wait: 12-16 seconds. The renderer (9222) comes up faster than the
+exthost (9229). Do not proceed to verification until the exthost responds.
+
+### Step 4: confirm the patch is in the running in-memory code
+
+Disk edit + reload is the reliable swap, but verify the new exthost actually
+loaded the edited file:
+
+```sh
+EXT="$HOME/.antigravity-ide/extensions/anthropic.claude-code-2.1.159-linux-x64"
+WS=$(curl -s http://127.0.0.1:9229/json | python3 -c \
+  'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])')
+node /tmp/cdp-eval.mjs "$WS" "(function(){
+  var s = require('fs').readFileSync('$EXT/extension.js','utf-8');
+  return JSON.stringify({
+    sig: (s.match(/\/\*pfg-v[\d.]+\*\//g)||[]),
+    hasMyMarker: s.includes('<unique substring of your edit>')
+  });
+})()"
+```
+
+Replace `<unique substring of your edit>` with a string that only your new
+code contains (a comment, a variable name, a literal). Empty `sig` means the
+patches aren't installed at all; run `/patch-claude` first.
+
+`readFileSync` on the exthost reads the on-disk file. To confirm what the
+exthost is RUNNING (in-memory), use `Debugger.getScriptSource` instead. See
+the "Debugger.getScriptSource shows in-memory script, NOT disk" gotcha for
+the full recipe. In practice, disk edit + Reload Window always produces
+disk == in-memory; `readFileSync` is sufficient for normal iteration.
+
+### Step 5: re-discover the chat-panel iframe target
+
+Iframe CDP target IDs change on every reload. Do not reuse old IDs.
+
+```sh
+# All iframe targets after reload (abbreviated):
+curl -s http://127.0.0.1:9222/json/list | python3 -c "
+import sys, json
+for t in json.load(sys.stdin):
+    if t.get('type') == 'iframe':
+        print(t['id'], '|', t.get('url','')[:100])
+"
+```
+
+To narrow to a specific session's chat panel:
+
+```sh
+SID="<your-session-uuid>"
+IFRAME=$(curl -s http://127.0.0.1:9222/json/list | python3 -c "
+import sys, json
+for t in json.load(sys.stdin):
+    if t.get('type') == 'iframe' and 'session=$SID' in t.get('url',''):
+        print(t['id']); break
+")
+echo "chat panel iframe: $IFRAME"
+```
+
+If no iframe matches by session ID (session wasn't visible before the reload),
+open or switch to the session in the IDE and repeat the curl. The iframe
+appears when the panel is visible, not before.
+
+### Step 6: force a FRESH walk + re-render (the rehydration trap)
+
+**This is the step the loop lives or dies on. Read it before improvising.**
+
+A session that was visible before the reload comes back as a STALE rehydrated
+webview: VS Code restores the editor's serialized DOM/state, it does NOT re-run
+`Wz4`. So the markers you see after a bare reload are from the OLD code, even
+though the new code is live in the exthost. Waiting for the iframe to reappear
+in `/json/list` is NOT verification. The `get_session_request` RPC to a
+throwaway `probe` channel (below) likewise does NOT re-render the visible panel
+(no webview is subscribed to `probe`); it only runs the walker for capture.
+
+What actually re-renders fresh: the chat panels are **editor tabs**, and
+**editor-tab webviews are disposed when hidden**. Activating a fresh tab (or
+closing + reopening one) disposes the stale webview and forces a brand-new
+mount, which re-runs `Wz4` → `Ez4` against the on-disk JSONL with your patched
+code. Two proven triggers:
+
+**6a. Open the session fresh via the conversations panel (preferred).** The
+panel is the activity-bar "Claude Code" view (NOT a programmatic RPC). Opening
+a session that is not already an open tab mounts a fresh webview. Drive it from
+the workbench page (port 9222), discover the panel iframe by its Search box,
+type the session's title, click the row. The `/tmp/panel_ready.mjs` recovered
+below does discovery → open → search → list-rows in one shot; the
+`/tmp/click_convo.js` snippet clicks a row by needle.
+
+```sh
+# Open the activity-bar panel, search a title, dump matching rows.
+# WB = the workbench top-level page (NOT an iframe, NOT Launchpad).
+cat > /tmp/panel_ready.mjs <<'EOF'
+import http from 'node:http';
+const WB=process.argv[2];                       // ws://127.0.0.1:9222/devtools/page/<workbench-page-id>
+const NEEDLE=process.argv[3]||'';               // title substring to search/list
+const getJSON=p=>new Promise((res,rej)=>{http.get('http://127.0.0.1:9222'+p,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(JSON.parse(d)));}).on('error',rej);});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function withWS(wsUrl,fn){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl);let nid=1;const pend=new Map();const ctx=[];ws.addEventListener('message',ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(m.error):res(m.result);}else if(m.method==='Runtime.executionContextCreated')ctx.push(m.params.context);});const call=(method,params={})=>{const id=nid++;return new Promise((res,rej)=>{pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}));});};ws.addEventListener('open',async()=>{try{const r=await fn(call,ctx);ws.close();resolve(r);}catch(e){ws.close();reject(e);}});ws.addEventListener('error',e=>reject(e));setTimeout(()=>{try{ws.close();}catch(_){}reject(new Error('to'));},7000);});}
+const wbEval=expr=>withWS(WB,async call=>{await call('Runtime.enable');const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true});return r.result.value;});
+async function inActive(wsUrl,expr){return withWS(wsUrl,async(call,ctx)=>{await call('Page.enable');await call('Runtime.enable');await sleep(600);const tree=await call('Page.getFrameTree');const fr=[];(function w(n){if(n.frame)fr.push(n.frame);(n.childFrames||[]).forEach(w);})(tree.frameTree);const inner=fr.find(f=>f.name==='active-frame');if(!inner)return {__noframe:1};const c=ctx.find(x=>x.auxData&&x.auxData.frameId===inner.id&&!x.name&&x.origin);if(!c)return {__noctx:1};const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true,contextId:c.id});return r.result.value;}).catch(e=>({__err:String(e.message||e)}));}
+// 1. wait for the workbench to be back (activity-bar present)
+let ready=false;
+for(let i=0;i<30;i++){try{if(await wbEval(`document.querySelectorAll('.activitybar [aria-label="Claude Code"]').length`)>0){ready=true;break;}}catch(e){}await sleep(1500);}
+if(!ready){console.log('WB_NOT_READY');process.exit(1);}
+// 2. click the activity-bar "Claude Code" view to open the conversations panel
+await wbEval(`(function(){var t=document.querySelector('.activitybar .action-item a[aria-label="Claude Code"],.activitybar [aria-label="Claude Code"]');if(t)t.click();return !!t;})()`);
+await sleep(2000);
+// 3. find the panel iframe: the index.html iframe that has a Search box
+let panelWs=null;
+for(let i=0;i<12 && !panelWs;i++){
+  for(const f of (await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'))){
+    if(await inActive(f.webSocketDebuggerUrl,`!!document.querySelector('input[placeholder*="Search" i]')`)===true){panelWs=f.webSocketDebuggerUrl;break;}
+  }
+  if(!panelWs)await sleep(1200);
+}
+if(!panelWs){console.log('PANEL_NOT_FOUND');process.exit(1);}
+// 4. set the search box (native setter + input event so React sees it)
+await inActive(panelWs,`(function(){var inp=document.querySelector('input.search,.filterInput_90gk3A,input[placeholder*="Search" i]');var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'');inp.dispatchEvent(new Event('input',{bubbles:true}));s.call(inp,${JSON.stringify(NEEDLE)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.focus();return inp.value;})()`);
+await sleep(900);
+// 5. dump matching rows (and click the first exact-ish match)
+const rows=await inActive(panelWs,`(function(){var out=[],seen={};for(var e of document.querySelectorAll('div,li,a,button')){var t=(e.innerText||'').replace(/\\s+/g,' ').trim();if(t.length>10&&t.length<170&&t.indexOf(${JSON.stringify(NEEDLE)})>=0&&e.children.length<=8&&!seen[t]){seen[t]=1;out.push(t.slice(0,95));}}return out;})()`);
+console.log('PANEL_WS='+panelWs);
+console.log('ROWS='+JSON.stringify(rows));
+EOF
+
+# Discover the workbench page id, then run. Capture PANEL_WS from the output
+# (panel_ready.mjs PRINTS it; it is not exported), since the next block needs it:
+WB_PAGE=$(curl -s http://127.0.0.1:9222/json/list | python3 -c '
+import sys, json
+for t in json.load(sys.stdin):
+    if t.get("type")=="page" and "Launchpad" not in (t.get("title") or ""):
+        print(t["id"]); break')
+PANEL_WS=$(node /tmp/panel_ready.mjs "ws://127.0.0.1:9222/devtools/page/$WB_PAGE" "PFGK DEMO seam" \
+           | sed -n 's/^PANEL_WS=//p')
+echo "PANEL_WS=$PANEL_WS"
+```
+
+Then click the row by title needle (this opens a FRESH tab). NB: `$PANEL_WS`
+must be set in the SAME shell, or re-derive it (the one-shot block above threads
+it for you):
+
+```sh
+cat > /tmp/click_convo.js <<'JS'
+(function(){
+  var needle=NEEDLE, rows=[...document.querySelectorAll('div,li,a,button')], target=null;
+  for(var e of rows){var t=(e.innerText||'').replace(/\s+/g,' ').trim();
+    if(t.indexOf(needle)>=0 && t.length<220 && e.children.length<=8) target=e;}
+  if(!target) return {found:false};
+  var el=target;
+  for(var k=0;k<6 && el && el.parentElement;k++){
+    var c=String(el.className||'');
+    if(/row|item|session|card|listItem/i.test(c)||(el.getAttribute&&el.getAttribute('role')==='button')) break;
+    el=el.parentElement;
+  }
+  (el||target).click();
+  return {found:true, text:(target.innerText||'').replace(/\s+/g,' ').trim().slice(0,60)};
+})()
+JS
+sed -i 's/NEEDLE/"PFGK DEMO seam"/' /tmp/click_convo.js
+# PANEL_WS printed by panel_ready.mjs above:
+node /tmp/eval_in_inner_frame.mjs "$PANEL_WS" @/tmp/click_convo.js
+```
+
+**6b. Close + reopen the active editor tab (force fresh re-walk of the open
+session).** Activating any other tab disposes the current one; reopening
+re-mounts it fresh. From the workbench page (9222):
+
+```sh
+# Click a chat tab by title to ACTIVATE it (disposes the previously-active one,
+# which then re-mounts fresh on next activation):
+node /tmp/cdp-eval.mjs "ws://127.0.0.1:9222/devtools/page/$WB_PAGE" \
+ '(function(){var t=[].slice.call(document.querySelectorAll(".tabs-container .tab"))
+   .filter(function(e){return /PFGK DEMO seam/i.test(e.getAttribute("aria-label")||e.textContent||"")})[0];
+   if(!t)return "tab not found"; t.click(); return "clicked "+(t.getAttribute("aria-label")||"").slice(0,45);})()'
+# Or via palette: workbench.action.closeActiveEditor then
+# workbench.action.reopenClosedEditor (Input.dispatchKeyEvent, mechanism 3).
+```
+
+After the fresh mount, the chat-panel iframe is a NEW CDP target with a NEW id;
+re-discover it (Step 5) before probing. The robust discovery when several chats
+are open (or the session-id URL filter is ambiguous) is to **snapshot the
+`vscode-webview` iframe ids BEFORE opening, then diff after**: the id NOT in the
+snapshot is the fresh mount. The mount + first render takes a few seconds, so
+poll (the marker probe returns nothing until the React app has painted). This
+loop uses `/tmp/pfg_markers.js`, written in Step 7 below:
+
+```sh
+# BEFORE opening the session:
+BEFORE=$(curl -s http://127.0.0.1:9222/json/list | python3 -c '
+import sys, json
+print(" ".join(t["id"] for t in json.load(sys.stdin)
+      if t.get("type")=="iframe" and "vscode-webview" in (t.get("url") or "")))')
+
+# ... open via 6a or 6b ...
+
+# AFTER: find the new iframe id, poll it until markers paint:
+for attempt in $(seq 1 8); do
+  sleep 3
+  for id in $(curl -s http://127.0.0.1:9222/json/list | python3 -c '
+import sys, json
+print("\n".join(t["id"] for t in json.load(sys.stdin)
+      if t.get("type")=="iframe" and "vscode-webview" in (t.get("url") or "")))'); do
+    case " $BEFORE " in *" $id "*) continue;; esac          # skip pre-existing iframes
+    out=$(node /tmp/eval_in_inner_frame.mjs "ws://127.0.0.1:9222/devtools/page/$id" @/tmp/pfg_markers.js 2>/dev/null)
+    # Require a marker actually painted (pfgkAlert>=1): the conversations-panel
+    # iframe also answers but with pfgkAlert:0 and would be a false target.
+    val=$(printf '%s' "$out" | python3 -c "import sys,json
+try: print(json.load(sys.stdin)['result']['value'])
+except Exception: pass" 2>/dev/null)
+    printf '%s' "$val" | python3 -c "import sys,json
+try: sys.exit(0 if json.load(sys.stdin).get('pfgkAlert',0)>=1 else 1)
+except Exception: sys.exit(1)" && { echo "FRESH IFRAME $id: $val"; break 2; }
+  done
+done
+```
+
+**Capture-only alternative (no re-render): run the walker and read its H array
+directly.** When you only need to confirm what `Wz4` *produces* (not what the
+panel shows), skip the render entirely. From the inner active-frame, call the
+conn directly (this is the canonical invocation; see "`conn.sendRequest` is the
+canonical chain-walker invocation"):
+
+```sh
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" "(async()=>{
+  const root=document.querySelector('#root');
+  const fk=Object.keys(root).find(k=>k.startsWith('__reactContainer\$'));
+  const mgr=root[fk].child.child.child.memoizedProps.sessions;
+  const conn=await mgr.getConnection('$SID');
+  const resp=await conn.sendRequest({type:'get_session_request', sessionId:'$SID'});
+  const H=resp?.messages||[];
+  const ghosts=H.filter(m=>String(m&&m.uuid).startsWith('pfgk-')).map(m=>String(m.uuid).replace(/^(pfgk-[a-z]+)-.*/,'$1'));
+  return JSON.stringify({n:H.length, ghosts});
+})()"
+```
+
+The throwaway-`probe`-channel RPC (`window.__vscode_post_message__('onmessage',
+{message:{type:'request', channelId:'probe', requestId:'r'+Math.random(),
+request:{type:'get_session_request', sessionId:'$SID'}}})` from the OUTER
+iframe) ALSO runs the walker (useful to trigger a side-effect BP, see Recipe 1),
+but its response goes nowhere visible. Neither this nor `conn.sendRequest`
+re-renders the panel; for that you MUST use 6a or 6b.
+
+### Step 7: verify the rendered DOM
+
+After the session renders, probe the inner active-frame:
+
+```sh
+WS_CHAT="ws://127.0.0.1:9222/devtools/page/$IFRAME"
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" 'JSON.stringify({
+  pfgkAlert:  document.querySelectorAll(".pfgkAlert").length,
+  bookend:    document.querySelectorAll("[data-pfgk-role=\"bookend\"]").length,
+  seam:       document.querySelectorAll("[data-pfgk-role=\"seam\"]").length,
+  bridge:     document.querySelectorAll("[data-pfgk-role=\"bridge\"]").length,
+  broken:     document.querySelectorAll("[data-pfgk-role=\"broken\"]").length,
+  msgs:       document.querySelectorAll("[class*=message_]").length,
+  bodyHasK:   document.body.textContent.includes("PATCH K"),
+})'
+```
+
+Expected for a session with Patch K markers: `pfgkAlert >= 1`, `bookend = 1`,
+`seam >= 1`. If `bodyHasK` is true but `pfgkAlert = 0`, the React wrap node
+isn't rendering. See the "dead K wrap from non-pristine .bak synthesis"
+case study.
+
+To assert on a marker's actual TEXT (e.g. confirming an edit that changed a
+marker's prose took effect in the rendered panel), read `markerText`. This is the
+canonical "is the new code live in the render" check used during marker
+iteration. Write the probe to a file so the poll loop in Step 6
+(`@/tmp/pfg_markers.js`) and ad-hoc probes share one definition:
+
+```sh
+cat > /tmp/pfg_markers.js <<'EOF'
+JSON.stringify({
+  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
+  bookend:   document.querySelectorAll('[data-pfgk-role="bookend"]').length,
+  seam:      document.querySelectorAll('[data-pfgk-role="seam"]').length,
+  seamClean: document.querySelectorAll('[data-pfgk-role="seamClean"]').length,
+  bridge:    document.querySelectorAll('[data-pfgk-role="bridge"]').length,
+  broken:    document.querySelectorAll('[data-pfgk-role="broken"]').length,
+  markerText:(() => { const c = document.querySelector(".pfgkAlert"); return c ? c.textContent.replace(/\s+/g, " ").trim().slice(0, 400) : null; })()
+})
+EOF
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" @/tmp/pfg_markers.js
+```
+
+The load-bearing assertion is change-specific and belongs with YOUR change, not in
+this playbook: a FRESH walk (Step 6a/6b) must render the edit you made, so assert
+that `markerText` no longer contains the string you removed and does contain the
+one you added. If a removed string still shows (or an added one does not), you are
+looking at a STALE rehydrated webview (you skipped Step 6) or the exthost is still
+running old code (see the `Debugger.getScriptSource` gotcha), NOT a failed edit.
+Re-walk fresh, then re-probe.
+
+Field notes for the probe: `pfgkAlert` counts the wrap divs (structural "did it
+render as a marker"); the per-role counts (`bookend`/`seam`/`seamClean`/`bridge`/
+`broken`) assert the exact marker SET the walk produced; `markerText` is the first
+marker card's `textContent` (whitespace-collapsed, capped at 400 chars) for
+asserting on the marker PROSE. `textContent` returns the FULL body even when the
+card visually collapses it (the wrap injects `.pfgkAlert
+.content_xGDvVg.collapsed_xGDvVg{max-height:none}` and hides the truncation
+gradient), so a removed phrase cannot hide behind a collapse. The injected
+`<style>` text and the header/emoji chrome are included in `textContent`, so
+assert on a specific substring, not on exact equality.
+
+To verify a specific CSS property (e.g. marker background color):
+
+```sh
+node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" '(function(){
+  const el = document.querySelector("[data-pfgk-role=\"broken\"]");
+  if (!el) return "not found";
+  const hdr = el.querySelector("[class*=header]");
+  return JSON.stringify({
+    bg:          getComputedStyle(el).backgroundColor,
+    headerColor: hdr ? getComputedStyle(hdr).color : "no header",
+  });
+})()'
+```
+
+To eyeball the marker (screenshot the whole workbench page):
+
+```sh
+cat > /tmp/shot.mjs <<'JS'
+const ws=new WebSocket(process.argv[2]);          // ws://127.0.0.1:9222/devtools/page/<workbench-page-id>
+let id=1;const p=new Map();
+ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id&&p.has(m.id)){p.get(m.id)(m.result);p.delete(m.id);}});
+const call=(method,params={})=>new Promise(r=>{const i=id++;p.set(i,r);ws.send(JSON.stringify({id:i,method,params}));});
+await new Promise(r=>ws.addEventListener('open',r));
+await call('Page.enable');
+const sc=await call('Page.captureScreenshot',{format:'png'});
+const fs=await import('node:fs');fs.writeFileSync('/tmp/wb_now.png',Buffer.from(sc.data,'base64'));
+console.log('saved /tmp/wb_now.png');ws.close();
+JS
+node /tmp/shot.mjs "ws://127.0.0.1:9222/devtools/page/$WB_PAGE"   # then Read /tmp/wb_now.png
+```
+
+To pull the marker's own SVG out of the live DOM (crisp, panel-independent
+render): iterate the chat iframes, find the active-frame that has
+`[data-pfgk-role]` nodes, grab each `svg.outerHTML`, dedupe by `role|caption`,
+and write them to an HTML file you can headless-screenshot.
+
+```sh
+cat > /tmp/extract_live_svgs.mjs <<'EOF'
+import http from 'node:http';
+import fs from 'node:fs';
+const extract=`(function(){var els=document.querySelectorAll('[data-pfgk-role]');var seen={},out=[];for(var i=0;i<els.length;i++){var e=els[i],role=e.getAttribute('data-pfgk-role'),svg=e.querySelector('svg'),t=svg?svg.outerHTML:'';var cap=(t.match(/(in-file reattach|in-file link|cross-file link)/)||[''])[0];var key=role+'|'+cap;if(!seen[key]){seen[key]=1;out.push({role:role,cap:cap,svg:t});}}return out;})()`;
+const getJSON=p=>new Promise((res,rej)=>{http.get('http://127.0.0.1:9222'+p,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(JSON.parse(d)));}).on('error',rej);});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function withWS(wsUrl,fn){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl);let nid=1;const pend=new Map();const ctx=[];ws.addEventListener('message',ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(m.error):res(m.result);}else if(m.method==='Runtime.executionContextCreated')ctx.push(m.params.context);});const call=(method,params={})=>{const id=nid++;return new Promise((res,rej)=>{pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}));});};ws.addEventListener('open',async()=>{try{const r=await fn(call,ctx);ws.close();resolve(r);}catch(e){ws.close();reject(e);}});ws.addEventListener('error',e=>reject(e));setTimeout(()=>{try{ws.close();}catch(_){}reject(new Error('ws timeout'));},8000);});}
+// Loop ALL index iframes; merge + dedupe by role|caption. (After a tab switch the
+// stale iframe may still be listed; only the active one returns marker nodes. For
+// multiple open chats this collects markers across all of them.)
+const ifs=(await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'));
+let arr=[];const _seen={};
+for(const wv of ifs){
+  const r=await withWS(wv.webSocketDebuggerUrl,async(call,ctx)=>{
+    await call('Page.enable');await call('Runtime.enable');await sleep(700);
+    const tree=await call('Page.getFrameTree');const frames=[];(function w(n){if(n.frame)frames.push(n.frame);(n.childFrames||[]).forEach(w);})(tree.frameTree);
+    const inner=frames.find(f=>f.name==='active-frame');if(!inner)return [];
+    const c=ctx.find(x=>x.auxData&&x.auxData.frameId===inner.id&&!x.name&&x.origin);if(!c)return [];
+    const r=await call('Runtime.evaluate',{expression:extract,returnByValue:true,contextId:c.id});
+    return r.result.value||[];
+  }).catch(()=>[]);
+  for(const it of (r||[])){const k=it.role+'|'+(it.cap||'');if(!_seen[k]){_seen[k]=1;arr.push(it);}}
+}
+const bgs={bookend:'#142a35',broken:'#3a1818',seam:'#3a2c14',seamClean:'#181d28',bridge:'#3a2418'};
+let html='<html><body style="margin:0;background:#0a0a0c;font-family:monospace">';
+for(const it of arr){
+  let bg=it.cap==='in-file link'?bgs.seamClean:it.cap==='cross-file link'?bgs.bridge:it.cap==='in-file reattach'?bgs.seam:(bgs[it.role]||'#222');
+  let svg=it.svg.replace('width:100%;height:124px','width:860px;height:auto');
+  html+='<div style="color:#999;padding:11px 24px 3px;font-size:13px">live: '+it.role+' / '+(it.cap||'(no caption)')+'</div><div style="background:'+bg+';margin:0 24px 14px;padding:16px;border-radius:8px">'+svg+'</div>';
+}
+html+='</body></html>';
+fs.writeFileSync('/tmp/live_extracted.html',html);
+console.log('extracted '+arr.length+' unique live SVGs: '+arr.map(a=>a.role+'/'+(a.cap||'-')).join(', '));
+EOF
+node /tmp/extract_live_svgs.mjs
+# Render the extracted SVGs to a PNG you can Read:
+google-chrome --headless=new --disable-gpu --force-device-scale-factor=2 \
+  --screenshot=/tmp/live_all.png --window-size=920,900 file:///tmp/live_extracted.html
+```
+
+CROP LAW for the headless screenshot: a card at width `W` is about `W*0.24` px
+tall, so the `--window-size` height must exceed `W*0.24 + 90` or the bottom
+sub-labels are cropped. For a single role bump `--window-size` to e.g.
+`920,360`; for all five markers stacked use `920,900` or taller.
+
+### Step 8: synthetic demo sessions (when no real session triggers your marker)
+
+Some markers (seam, broken, ambiguous) only fire on rare chain topologies
+(phantom-lpu compaction, dangling root, multi-sibling backfill) that may not be
+present in any of your real sessions. Rather than hunt, CRAFT a minimal `.jsonl`
+that triggers exactly the case you want. The "PFGK DEMO seam" / "PFGK DEMO
+broken" tabs were made this way.
+
+Two hard requirements learned empirically:
+
+1. **The file must live in the project dir of an OPEN workspace folder.** The
+   conversations panel lists sessions via the extension's SessionStore, scoped to
+   the folders in the currently open workspace; it does NOT live-scan arbitrary
+   dirs, and it is NOT enough for the dir to be anywhere under `~/.claude/projects`.
+   A `.jsonl` dropped into a brand-new project dir (`-tmp-foo/`, or a fresh
+   `-home-juraj-foo/` for a folder you do not have open) will NOT appear, even
+   after reload. Empirically: `/tmp`-rooted and a fresh `/home/juraj/pfgk-demo`
+   both showed zero rows; only placing the file under the open workspace's project
+   (e.g. with `~/CDVIEWER/PNGS` open, the dir
+   `~/.claude/projects/-home-juraj-CDVIEWER-PNGS/`) surfaced it. The project-dir
+   name is the workspace path with `/` replaced by `-`. Use a **unique** dangling
+   / phantom uuid (`deadbeef-0000-4000-8000-0000000000NN`) so none of the real
+   siblings in that dir accidentally resolve it and defuse the trigger.
+
+2. **Reload the window to re-scan after writing the file.** The panel caches its
+   list; a freshly written `.jsonl` only surfaces after `Developer: Reload
+   Window` (Step 2). Then open it via the panel (Step 6a) for a fresh `Wz4` walk.
+
+Generator: the maintained script is **`util/gen_demo.py`** (run it from inside the
+open workspace folder so it targets that project dir, or set `PFG_DEMO_CWD` /
+`PFG_DEMO_PROJ`). It writes one seam-triggering and one broken-triggering session;
+records use the real on-disk JSONL shape, `ai-title` gives the panel a searchable
+title, `last-prompt` marks the leaf. The same logic, condensed, inline:
+
+```python
+# Minimal inline copy; the maintained version is util/gen_demo.py. Seam + broken.
+import json, uuid, os
+def u(): return str(uuid.uuid4())
+TS="2026-06-04T11:30:00.000Z"; VER="2.1.159"
+CWD=os.environ.get("PFG_DEMO_CWD") or os.getcwd()                 # run from the OPEN workspace folder
+PROJ_DIR=os.environ.get("PFG_DEMO_PROJ") or CWD.replace("/","-")  # Claude Code project-dir encoding
+def user_rec(uid,parent,sid,text):
+    return {"parentUuid":parent,"isSidechain":False,"type":"user","message":{"role":"user","content":text},
+            "isMeta":False,"uuid":uid,"timestamp":TS,"cwd":CWD,"sessionId":sid,"version":VER,"gitBranch":""}
+def asst_rec(uid,parent,sid,text):
+    return {"parentUuid":parent,"isSidechain":False,"type":"assistant","uuid":uid,"timestamp":TS,"cwd":CWD,
+            "sessionId":sid,"version":VER,"gitBranch":"","message":{"model":"claude-opus-4-8","id":"msg_"+uid.replace('-','')[:24],
+            "type":"message","role":"assistant","content":[{"type":"text","text":text}],"stop_reason":"end_turn"}}
+def title_rec(sid,t): return {"type":"ai-title","aiTitle":t,"sessionId":sid}
+def leaf_rec(sid,leaf): return {"type":"last-prompt","leafUuid":leaf,"sessionId":sid}
+def compact_rec(uid,lpu,sid,preserved):
+    return {"parentUuid":None,"logicalParentUuid":lpu,"isSidechain":False,"type":"system","subtype":"compact_boundary",
+            "content":"Conversation compacted","isMeta":False,"timestamp":TS,"uuid":uid,"level":"info",
+            "compactMetadata":{"trigger":"auto","preTokens":900000,"preservedMessages":{"anchorUuid":preserved[0],"uuids":preserved}},"sessionId":sid}
+def write(sid,recs):
+    d=os.path.expanduser("~/.claude/projects/"+PROJ_DIR); os.makedirs(d,exist_ok=True)
+    p=os.path.join(d,sid+".jsonl")
+    with open(p,"w") as f:
+        for r in recs: f.write(json.dumps(r)+"\n")
+    return p
+
+# BROKEN: root parentUuid dangles at a unique missing uuid (isolated => unresolvable => INCOMPLETE TRANSCRIPT)
+sb=u(); DANGLING="deadbeef-0000-4000-8000-000000000001"; b1,b2,b3,b4=u(),u(),u(),u()
+broken=[title_rec(sb,"PFGK DEMO broken: incomplete-transcript marker (synthetic)"),
+  user_rec(b1,DANGLING,sb,"PFGK DEMO (broken). Root points at a missing upstream message."),
+  asst_rec(b2,b1,sb,"Acknowledged."), user_rec(b3,b2,sb,"Continue."), asst_rec(b4,b3,sb,"Continuing."),
+  leaf_rec(sb,b4)]
+# SEAM: compact_boundary whose logicalParentUuid is a unique missing phantom (Loop A reattaches in-file)
+ss=u(); PHANTOM="deadbeef-0000-4000-8000-000000000002"; s1,s2,scb,s3,s4=u(),u(),u(),u(),u()
+seam=[title_rec(ss,"PFGK DEMO seam: in-file phantom reattach marker (synthetic)"),
+  user_rec(s1,None,ss,"PFGK DEMO (seam). Compaction predecessor was never persisted."),
+  asst_rec(s2,s1,ss,"Acknowledged."), compact_rec(scb,PHANTOM,ss,[s1,s2]),
+  user_rec(s3,scb,ss,"Continue after the compaction."), asst_rec(s4,s3,ss,"Continuing."),
+  leaf_rec(ss,s4)]
+print("BROKEN:",sb,"->",write(sb,broken)); print("SEAM:  ",ss,"->",write(ss,seam))
+```
+
+```sh
+python3 util/gen_demo.py | tee /tmp/demo_sids.txt   # run from the workspace; note the two sessionIds
+# Reload (Step 2), then open via the panel (Step 6a, search "PFGK DEMO"), verify (Step 7).
+```
+
+Pitfalls when crafting or reusing a fixture:
+
+- The seam fixture plants `dg:"seam"` only while its phantom `logicalParentUuid`
+  (a uuid no record in the dir defines) stays unresolved. If a sibling defines it
+  (a prior run, a clone), the crossing renders `dg:"seamClean"` or `dg:"bridge"`
+  instead, a DIFFERENT marker. Clear leftover demo files before generating.
+- A same-titled inert stub left in the dir makes `click_convo` (Step 6a) open the
+  WRONG row. Move it aside, or give your fixture a unique title, so the search
+  matches exactly one session.
+- A fixture with zero message records (an `ai-title`+`mode` stub and nothing else)
+  plants no markers: the walker has no boundary or chain to fire on. It must
+  contain the actual messages, not just a title.
+
+Cleanup when done (delete by the exact sessionIds, leaving the real siblings
+untouched), then reload once to drop the stale panel rows:
+
+```sh
+DIR="$HOME/.claude/projects/$(pwd | tr / -)"   # run from the same workspace folder
+rm -f "$DIR/<broken-sid>.jsonl" "$DIR/<seam-sid>.jsonl"
+grep -l "PFGK DEMO" "$DIR"/*.jsonl 2>/dev/null | wc -l   # expect 0
+```
+
+(For inducing edge cases on an EXISTING real session instead of crafting one
+from scratch, see the "Patch K verification recipes" gotcha:
+clone-a-sibling for ambiguity, rename-the-source-away for reconstruction
+failure.)
+
+### Quick-reference: one-liner port checks
+
+```sh
+# Is Antigravity's renderer reachable?
+curl -s http://127.0.0.1:9222/json/version | python3 -c 'import sys,json;print(json.load(sys.stdin).get("Browser"))'
+
+# Which exthost ports are live?
+for p in $(ss -tlnp 2>/dev/null | grep -oE '127\.0\.0\.1:[0-9]+' | sort -u); do
+  R=$(curl -s --max-time 1 "http://$p/json" 2>/dev/null | head -c 60)
+  case "$R" in *electron/js2c/utility_init*) echo "exthost @ ${p##*:}";; esac
+done
+
+# WS URL for the first exthost (usually 9229):
+curl -s http://127.0.0.1:9229/json | python3 -c \
+  'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])'
+```
 
 ---
 
@@ -1244,11 +2114,10 @@ panel you're looking at, or (b) you ran disk-edit + Reload Window
 and want to verify the fresh exthost actually picked up the new
 code (vs. some unexpected caching).
 
-Concrete failure mode this catches: I once spent ~15 minutes
-believing v1.5 K was running because `readFileSync` showed the new
-signature on disk and v1.5 markers in the source, but the exthost
-serving the chat panel I was probing had v1.4 in memory (cached
-from before my disk edit). `Debugger.getScriptSource` immediately
+Concrete failure mode this catches: `readFileSync` can show the new
+signature and markers on disk while the exthost serving the chat panel
+still runs the old code from memory (cached from before the disk edit),
+so you wrongly conclude the new K is live when it isn't. `Debugger.getScriptSource` immediately
 disambiguates.
 
 ### `location.reload()` on a webview iframe leaves it in `chrome-error://chromewebdata/`
