@@ -1,0 +1,15 @@
+{
+  "name": "patch-claude-code",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=23.6.0"
+  },
+  "scripts": {
+    "patch:native": "node scripts/patch-native-with-tweakcc.ts"
+  },
+  "dependencies": {
+    "node-lief": "^1.0.0",
+    "tweakcc": "^4.0.11"
+  }
+}
