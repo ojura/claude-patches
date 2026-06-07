@@ -103,7 +103,7 @@ applies the patches, end to end. The skill:
 - **Falls back to manual per-patch synthesis** if no prebuilt exists
   yet for your version.
 
-After the skill prints `PATCHES_APPLIED`, reload your VS Code window
+After the skill prints `PATCHES_APPLIED`, reload your IDE window
 and you're done.
 
 The symlink layout means `git pull` in `~/claude-patches` updates the
@@ -146,7 +146,7 @@ cp "$EXT/webview/index.js.bak"    "$EXT/webview/index.js"
 cp "$EXT/webview/index.css.bak"   "$EXT/webview/index.css"
 ```
 
-Reload VS Code. The extension is now back to whatever Open VSX shipped.
+Reload your IDE. The extension is now back to whatever Open VSX shipped.
 
 To also remove the Claude Code skill installation:
 
@@ -155,7 +155,7 @@ rm ~/.claude/skills/patch-claude
 rm -rf ~/claude-patches              # optional: delete the local clone too
 ```
 
-(VS Code auto-updates the extension occasionally. When it does, your
+(Your IDE auto-updates the extension occasionally. When it does, your
 `.bak` files stay in the old version's directory, which gets removed
 when the IDE garbage-collects old extensions. The new version's directory
 has no `.bak` until you patch it.)
@@ -182,5 +182,5 @@ curl -fsSL https://raw.githubusercontent.com/ojura/claude-patches/main/prebuilt/
 - The patches are tied to specific structural shapes; sufficiently
   extensive upstream refactoring will break them. The version-tolerant
   script will refuse to write rather than corrupt the bundle.
-- Reload VS Code after applying. The extension host caches `extension.js`
+- Reload your IDE after applying. The extension host caches `extension.js`
   and won't pick up changes mid-session.

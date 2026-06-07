@@ -117,7 +117,7 @@ def find_next_long_match(a, b, a_start, b_start, a_end, b_end):
     if a_end - a_start < GAP_THRESHOLD:
         return None
     # Try anchors at a_start, a_start+1, ..., until we find one that exists in b
-    max_anchor_offset = min(2000, a_end - a_start - GAP_THRESHOLD)
+    max_anchor_offset = min(2000, a_end - a_start - GAP_THRESHOLD + 1)  # +1: also try the last offset where a full anchor still fits (region == GAP_THRESHOLD)
     for off in range(0, max_anchor_offset, 1):
         anchor = a[a_start + off : a_start + off + GAP_THRESHOLD]
         # Find anchor in b[b_start:b_end]
@@ -226,9 +226,12 @@ def _resolve_collision(a: bytes, b: bytes, sa_s, sa_e, sb_s, sb_e, collision):
         window = a[lo:hi]
         occ = a.count(window)
         if occ <= count:
-            # First pad at which the window stops occurring more than `count`
-            # times. occ < count cannot happen (the window contains this site),
-            # so occ == count here: a clean replace-all anchor.
+            # A widened anchor can match a *subset* of the K identical sites
+            # (when that window is also unique within those K), so occ < count
+            # is reachable here, not anomalous. The safety guarantee is
+            # downstream: the `occurrences != count` gate in this function's
+            # verify step rejects any window whose actual count does not equal
+            # the expected `count`, so a subset match is caught before apply.
             old_bytes = window
             inner_start = sa_s - lo
             inner_end = sa_e - lo

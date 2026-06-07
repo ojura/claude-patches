@@ -344,6 +344,40 @@ def test_hard_collision_reports_not_silent(tmp):
     check("non-uniform multi-site raises SystemExit (no silent wrong splice)", raised)
 
 
+def test_subset_match_rejected(tmp):
+    """Regression: _resolve_collision returns None when widening the changed span
+    lands on an anchor matching only a SUBSET of the K sites (occ < count),
+    instead of emitting an expected_count=K splice whose `old` occurs fewer than
+    K times. Guards the 'occ < count cannot happen' false closure: occ can jump
+    from > count straight to < count when one widening step drops the extra
+    matches and one of the K sites at once."""
+    print("test: subset-match anchor (occ < count) rejected by the verify gate")
+    mc = extract_splices.MIN_CONTEXT
+    shared = bytes(65 + (i % 26) for i in range(mc))      # mc-byte core shared by all 3
+    sep = b"\n" + b"-" * (2 * extract_splices.MAX_CONTEXT) + b"\n"
+
+    def loc(tag):
+        ring = (b"<" + tag + b">") * 8                     # > 20 bytes, unique per location
+        return ring + shared + b"ZZ" + shared + ring
+
+    a = sep + loc(b"AAAA") + sep + loc(b"BBBB") + sep + loc(b"CCCC") + sep
+    sa_s = a.index(b"ZZ")
+    sa_e = sa_s + 2                                        # the A-site changed span
+    b_post = a[:sa_s] + b"QQ" + a[sa_e:]
+    sb_s, sb_e = sa_s, sa_s + 2
+
+    # Geometry sanity: the MIN_CONTEXT window matches all 3 sites; one widening
+    # step out is unique, so occ jumps 3 -> 1, skipping count == 2 entirely.
+    win_mc = a[sa_s - mc:sa_e + mc]
+    check("MIN_CONTEXT window matches all 3 sites", a.count(win_mc) == 3, f"got {a.count(win_mc)}")
+    win_wide = a[sa_s - (mc + 20):sa_e + (mc + 20)]
+    check("one step out drops straight to a single site", a.count(win_wide) == 1, f"got {a.count(win_wide)}")
+
+    collision = extract_splices.WidenCollision(sa_s, sa_e, win_mc, 2)   # count == 2 (K sites)
+    result = extract_splices._resolve_collision(a, b_post, sa_s, sa_e, sb_s, sb_e, collision)
+    check("subset match returns None (occurrences != count gate fires)", result is None, f"got {result!r}")
+
+
 def main():
     import tempfile
     print("=== splice tooling standalone tests ===")
@@ -355,6 +389,7 @@ def main():
         test_surrogateescape_roundtrip(tmp)
         test_collision_path_surrogateescape(tmp)
         test_hard_collision_reports_not_silent(tmp)
+        test_subset_match_rejected(tmp)
     ok = all(PASS)
     print(f"\nSUITE {'PASS' if ok else 'FAIL'} ({sum(PASS)}/{len(PASS)} checks)")
     return 0 if ok else 1

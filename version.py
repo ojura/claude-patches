@@ -8,8 +8,9 @@ bumping requires editing exactly ONE line in SKILL.md.
 The line in SKILL.md must match the regex below, for example:
     **Patchset version**: `1.8`
 
-build-prebuilt.py also auto-syncs the README.md `pfg-vN` mention to the
-extracted version on every prebuilt synthesis, so README never drifts.
+After a bump, build-prebuilt.py prints a reminder to run
+`util/sync-version-mentions.py` to update the README.md `pfg-vN` mention;
+that sync is a manual step, not automatic.
 """
 import os
 import re

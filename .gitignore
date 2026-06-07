@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 .DS_Store
 neva/
+.pytest_cache/
+.agents/
+.claude/
+.codex/

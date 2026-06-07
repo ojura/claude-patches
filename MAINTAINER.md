@@ -45,6 +45,11 @@ patched live extension dir          maintainer tool             new prebuilt
    you applied here, so anything wrong now ships to every downstream
    user.
 
+   For the full CDP-based iteration loop (edit live file, reload
+   via CDP key events, re-discover iframe target, DOM-verify
+   `[data-pfgk-role]` counts), see
+   [`docs/debugging.md` "Patch development iteration loop"](docs/debugging.md).
+
 2. **Synthesize the prebuilt.**
 
    ```sh
@@ -79,20 +84,21 @@ patched live extension dir          maintainer tool             new prebuilt
 
 ## Sanity checks before push
 
-- `prebuilt/<VER>/apply.py` is ~24KB at v1.5 (was ~22KB at v1.4,
-  ~17KB pre-K). Trends upward as patches accumulate. If it's huge
-  (>50KB) something drifted (probably a non-deterministic field
+- `prebuilt/<VER>/apply.py` is ~38KB at v1.8 (was ~24KB at v1.5, ~22KB
+  at v1.4, ~17KB pre-K). Trends upward as patches accumulate. If it's
+  huge (>60KB) something drifted (probably a non-deterministic field
   like a timestamp or random UUID got captured into a splice;
   those should never be in diff regions).
-- The splice count is roughly 14 in `extension.js`, 3–4 in
-  `webview/index.js`, 1 in `webview/index.css` (~18–19 total at v1.4).
+- The splice count is roughly 19 in `extension.js`, 4 in
+  `webview/index.js`, 1 in `webview/index.css` (~24 total at v1.8).
   Counts can drift slightly across bundles because adjacent diff hunks
   sometimes merge or split depending on the surrounding context window
-  in the new minified output (observed: 19 in 2.1.126, 18 in 2.1.132,
-  no functional difference). A *large* count change (e.g. 14 → 7 in
-  `extension.js`) means the bundle restructured or the patches applied
+  in the new minified output (observed: 19 vs 18 in `extension.js`
+  across 2.1.126 and 2.1.132, no functional difference). A *large*
+  proportional drop (e.g. losing a third or more of `extension.js`'s
+  splices) means the bundle restructured or the patches applied
   wrong; investigate before pushing. The byte-stability check is the
-  authoritative correctness signal.
+  authoritative correctness signal; the counts are a soft heuristic.
 - `python3 prebuilt/<VER>/apply.py --help`-equivalent: just run the
   script with no args; it should auto-detect the extension dir and
   say `Already patched (signature <SIG> present). Nothing to do.`
@@ -254,14 +260,12 @@ Translating the resulting prebuilt to a fresh bundle then leaves
 those earlier transformations missing, often producing dead code or
 silent no-ops while passing every byte-stability check.
 
-This bit us during 2.1.132's first synthesis: the v1.4 K webview
-wrap captured from a 2.1.126 install with non-pristine `.bak` was
-missing the `return createElement(...)` → `let _ws=createElement(...)`
-transformation (which had been introduced in v1.2 or v1.3 K iteration
-and was already in the post-iteration `.bak`). Applying the splice to
-a fresh 2.1.132 install left the K wrap as dead code after the
-`return` statement. Diagnosed by CDP DOM probe; fixed by adding the
-missing transformation as an explicit splice. See
+A K webview wrap captured from an install with a non-pristine `.bak`
+can omit an earlier transformation (e.g. `return createElement(...)` →
+`let _ws=createElement(...)`, introduced in a prior K iteration and
+already baked into that `.bak`). Applying such a splice to a fresh
+install leaves the wrap as dead code after the `return` statement while
+still passing every byte-stability check. See
 [`docs/debugging.md`](docs/debugging.md) "Byte-stability check is
 necessary but not sufficient" gotcha.
 

@@ -684,7 +684,7 @@ break;_parsed=[..._newPrepend,..._parsed];}`) and the trailing
 `return dl(_parsed,K)` call.
 
 In `webview/index.js`, find the user-message render path: the only
-`Z.type==="user"` branch that creates `XR0` after the
+`Z.type==="user"` branch that creates the user-message component (`<USER_MSG_COMPONENT>`, drifts per bundle) after the
 `parentToolUseId`/`isSynthetic` early-return guards. Wrap the
 returned element with a colored container when `Z.uuid` starts with
 `pfgk-`.
@@ -692,8 +692,7 @@ returned element with a colored container when `Z.uuid` starts with
 ### Patch (extension.js)
 
 See SKILL.md Step 13 for the full splice. The K block has four
-synthesis steps (see "Why" above). Three ghost types are emitted
-into `_parsed`: `pfgk-bookend-…` (cyan, marks the reconstructed
+synthesis steps (see "Why" above). Five marker kinds are emitted: `pfgk-bookend-…` (cyan, marks the reconstructed
 chain root of an intact transcript), `pfgk-broken-…` (red, marks a
 chain that dead-ended at a missing ancestor), `pfgk-seam-…` (amber,
 marks an in-file compaction crossed via phantom-lpu reattachment),
@@ -710,7 +709,7 @@ entirely with a structured card. The card has:
 
 - A header bar: `PATCH K` tag, a per-role state badge (`◆ RECONSTRUCTED
   · INFO`, `⛔ UNRECOVERABLE`, `⚠ IN-FILE REATTACH`, `↻
-  CROSS-FILE BRIDGED`, or `◇ IN-FILE COMPACTION`), a zero-padded
+  CROSS-FILE BRIDGE`, or `◇ IN-FILE COMPACTION`), a zero-padded
   counter (`MARKER 03 OF 08`) and `↓ NEXT` / `↺ CYCLE` navigation.
   Counter and nav are computed from `$.messages.peek()`. Clicking
   cycles to the next marker via
@@ -768,7 +767,7 @@ boundary. The chat panel should:
    compaction whose lpu was a phantom reattached in-file, or a slate
    **clean-seam** card (badge `◇ IN-FILE COMPACTION`) where the
    in-file bridge needed no phantom.
-3. Show an orange **bridge** card (badge `↻ CROSS-FILE BRIDGED`) at
+3. Show an orange **bridge** card (badge `↻ CROSS-FILE BRIDGE`) at
    each compaction whose lpu lives in a sibling `.jsonl`. The card's
    "cross-file source" row names that sibling; the diagram's cross-file
    link arc crosses a file-boundary divider into the boundary.
@@ -787,8 +786,7 @@ backfill should produce identical recovered origins across the tree.
 
 ### Background: walker constraints + recovery topology
 
-The renderer's chain walker (`rO4` in 2.1.132, formerly `Ez4` in
-2.1.126) is **single-leaf, max-by-_parsed-index, traversing
+The renderer's chain walker (the Patch D up-walk function; the minified name drifts every bundle, `xE0` in 2.1.159) is **single-leaf, max-by-_parsed-index, traversing
 parentUuid (with logicalParentUuid fallback per Patch D) backward**:
 
 1. Build `K`: uuid → msg map from `V` (= `_parsed` after J's prepend

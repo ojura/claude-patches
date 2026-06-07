@@ -760,7 +760,7 @@ The script handles both F (+F.2 +F.3) and G (+G.1 +G.2). It locates
 anchors via regex with named captures, so renamings like `m1`→`c1`
 (storage class) or `[z,L]`→`[z,A]` (sessionPanels destructure) are
 absorbed automatically. It also embeds the patchset signature
-into `extension.js` after `updateSessionState(V,K,B){`, which
+into `extension.js` after the `updateSessionState` method's opening brace, which
 `build-prebuilt.py` will then capture into the synthesized prebuilt.
 The literal signature value comes from `version.py`, which extracts
 it from this file's `**Patchset version**` line above.
@@ -1124,10 +1124,10 @@ Confirm exactly one occurrence before replacing.
 ### Verify
 
 ```
-grep -c '!(!0||M2(process\.env\.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP))' $EXT/extension.js
+grep -cE '!\(!0\|\|[A-Za-z_$0-9]+\(process\.env\.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP\)\)' "$EXT/extension.js"
 ```
 
-Expect `1`. The original `&&!M2(...)` form must no longer appear.
+Expect `1`. The original `&&!<checker>(...)` form must no longer appear.
 
 ### Test
 
@@ -1159,7 +1159,7 @@ function OD($){if($.length>g20){let Z=$.length-u20;return $.slice(Z)}return $}
 Where `g20 = 600` and `u20 = 500`. Discover via:
 
 ```
-grep -oE 'function [A-Za-z_$]+\(\$\)\{if\(\$\.length>[a-z0-9]+\)\{let [A-Za-z_$]+=\$\.length-[a-z0-9]+;return \$\.slice\([A-Za-z_$]+\)\}return \$\}' $EXT/webview/index.js
+grep -oE 'function [A-Za-z_$]+\(\$\)\{if\(\$\.length>[A-Za-z0-9]+\)\{let [A-Za-z_$]+=\$\.length-[A-Za-z0-9]+;return \$\.slice\([A-Za-z_$]+\)\}return \$\}' $EXT/webview/index.js
 ```
 
 Replace with the identity function:
@@ -1179,7 +1179,7 @@ occurrence before replacing.
 ### Verify
 
 ```
-grep -c 'function OD(\$){return \$}' $EXT/webview/index.js
+grep -c 'function <FN>(\$){return \$}' $EXT/webview/index.js
 ```
 
 Expect `1` (with the function name observed during locate).
@@ -1312,19 +1312,19 @@ chain walker (`zi`/`dl`):
 2. **Seam ghosts.** For phantom-lpu boundaries, plant `pfgk-seam-…`
    parented to the in-file predecessor; rewrite the boundary's lpu
    to point at the seam.
-3. **Bookend ghost (chain root marker).** If K fired, plant a
+3. **Bridge ghosts.** For boundaries whose lpu was resolved cross-file
+   by Patch J (live chain takes the cross-file shortcut), plant
+   `pfgk-bridge-…` between the in-file orphan chain's leaf and the
+   boundary's first child. Walker now traverses the in-file orphan
+   instead of the cross-file shortcut. Cross-file content stays
+   reachable via the seam path so it's still rendered.
+4. **Bookend ghost (chain root marker).** If K fired, plant a
    `pfgk-bookend-…` ghost as the chain root and reparent the original
    first chain-participant onto it. Two predicates: (a) the original
    "first non-system msg with `parent==null && !lpu`"; (b) a relaxed
    "first user/assistant whose parent chain dead-ends in a phantom-lpu
    boundary" for cases where the chain root is parented to a system
    boundary.
-4. **Bridge ghosts.** For boundaries whose lpu was resolved cross-file
-   by Patch J (live chain takes the cross-file shortcut), plant
-   `pfgk-bridge-…` between the in-file orphan chain's leaf and the
-   boundary's first child. Walker now traverses the in-file orphan
-   instead of the cross-file shortcut. Cross-file content stays
-   reachable via the seam path so it's still rendered.
 
 Result: the panel for any session in a conversation family renders
 the same canonical origin at top, then the full tree in chronological
@@ -1599,12 +1599,13 @@ synthesize an equivalent for a future patchset that touches the
 loader shape), the canonical guarantees the following:
 
 - **Five marker kinds.** Beyond seam / bookend / bridge there is
-  `pfgk-broken-<root.uuid>`, emitted in the `!_bookendFired` branch
-  with a ⛔ "UNRECOVERABLE" payload listing sibling count, phantoms
-  backfilled, and phantoms failed; the honest-verdict refactor plants
-  it as a single post-walk verdict, not a list of per-cause guesses.
-  Triggered when a user/assistant's `parentUuid` walk (capped five
-  hops) dead-ends at a phantom boundary K could not backfill. The fifth
+  `pfgk-broken-<term.uuid>`, emitted in the walker's `!_root` branch
+  (the up-walk's terminal node `_term` is not a legitimate root) with a
+  ⛔ "UNRECOVERABLE" payload that reports where the walk stopped (the
+  terminal's short uuid, type, and unresolved `parentUuid`/`lpu`) as a
+  single post-walk verdict, not a list of per-cause guesses.
+  Triggered when a user/assistant's `parentUuid` walk (cycle-guarded by a visited set, otherwise
+  unbounded) dead-ends at a phantom boundary K could not backfill. The fifth
   is a slate-toned clean-seam variant (`dg:"seamClean"`) for in-file
   compactions the walk bridges with no phantom.
 - **`message.content` is a string at construction, but the assembler
@@ -1777,7 +1778,7 @@ a forced WebSearch query and got 5+ requests, all 200 OK, no 400.
 
 In `extension.js`, find the SDK-side spawn-args builder. The
 specific anchor is the one-line gate that pushes the
-`--thinking-display` flag conditionally on `U.display`:
+`--thinking-display` flag conditionally on the config's `.display` (the variable names like `U`/`i` drift every bundle, so the greps below match any names):
 
 ```
 if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
@@ -1786,7 +1787,7 @@ if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
 Locate via grep:
 
 ```sh
-grep -c 'if(U.type!=="disabled"&&U.display)i.push("--thinking-display"' "$EXT/extension.js"
+grep -cE '[A-Za-z_$0-9]+\.type!=="disabled"&&[A-Za-z_$0-9]+\.display\)[A-Za-z_$0-9]+\.push\("--thinking-display"' "$EXT/extension.js"
 ```
 
 Expect exactly 1 match.
@@ -1821,7 +1822,7 @@ signature stub.
 ### Verify
 
 ```
-grep -c 'if(U.type!=="disabled")i.push("--thinking-display",U.display||"summarized")' $EXT/extension.js
+grep -cE '[A-Za-z_$0-9]+\.type!=="disabled"\)[A-Za-z_$0-9]+\.push\("--thinking-display",[A-Za-z_$0-9]+\.display\|\|"summarized"\)' "$EXT/extension.js"
 ```
 
 Expect `1`. Old form (with `&&U.display`) should be gone.
