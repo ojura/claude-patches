@@ -62,6 +62,10 @@ the launch flags and IDE-product paths differ.
 > sanity checks but **none of them substitute for a query against the actual
 > rendered iframe** counting the elements your change renders, plus a
 > `document.body.textContent.includes(...)` text check.
+> When the change is exercised by a fixture, embed a unique **nonce** in
+> that fixture's payload and assert the nonce appears in the rendered DOM:
+> a stale or rehydrated tab will not contain it, so it cannot pass as a
+> fresh render (byte-size or resource-timing guesses do not prove this).
 > The DOM is the user's view of truth; everything else is internal
 > model agreement.
 >
@@ -211,6 +215,13 @@ that didn't fire.
 Two tiny Node scripts cover all of CDP that you'll need. Both rely on
 Node 22+'s built-in `WebSocket` global: no `npm install`, no Python,
 no MCP servers.
+
+Use them, not an ad-hoc client. The DevTools WS endpoint rejects any
+handshake carrying an `Origin` header with `403 Forbidden`; Node's native
+`WebSocket` sends none, which is the entire reason these work where a
+hand-rolled connection does not. Python's `websocket-client`, for instance,
+403s unless you pass `suppress_origin=True`. That is a workaround, not a
+license to deviate; the Node scripts are the path.
 
 ### `/tmp/cdp-eval.mjs`: one-shot Runtime.evaluate
 
@@ -1078,6 +1089,19 @@ function call(method, params={}) {
   });
 }
 await new Promise(r => ws.addEventListener('open', r));
+// FOCUS RECOVERY first: a broken chrome-error iframe (from an earlier botched
+// reload) captures focus and silently swallows the later Enter, so the reload
+// no-ops. Escape, then a REAL mouse click on workbench chrome (titlebar or
+// statusbar rect, never an iframe), restores focus to the workbench.
+await call('Input.dispatchKeyEvent', {type:'rawKeyDown', key:'Escape', code:'Escape', keyCode:27, windowsVirtualKeyCode:27});
+await call('Input.dispatchKeyEvent', {type:'keyUp', key:'Escape', code:'Escape', keyCode:27, windowsVirtualKeyCode:27});
+await sleep(120);
+const _rc = JSON.parse((await call('Runtime.evaluate', {expression:
+  '(()=>{const s=document.querySelector(".part.titlebar")||document.querySelector(".statusbar");const r=s?s.getBoundingClientRect():{left:300,top:6,width:0,height:0};return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)})})()',
+  returnByValue:true})).result.value);
+await call('Input.dispatchMouseEvent', {type:'mousePressed', x:_rc.x, y:_rc.y, button:'left', clickCount:1});
+await call('Input.dispatchMouseEvent', {type:'mouseReleased', x:_rc.x, y:_rc.y, button:'left', clickCount:1});
+await sleep(200);
 // Open command palette with Ctrl+Shift+P (modifiers: Ctrl=2, Shift=8 → 10)
 await call('Input.dispatchKeyEvent', {type:'rawKeyDown', modifiers:10,
   key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
@@ -1092,21 +1116,32 @@ if (!after.open) { console.log("ABORT: palette did not open"); ws.close(); proce
 // Type the command without clearing the ">" prefix
 await call('Input.insertText', {text: 'Developer: Reload Window'});
 await sleep(400);
-// Verify first suggestion is the right command
+// Verify the SELECTED row (.monaco-list-row.focused), not just the first row,
+// IS the command, AND that the palette input still holds focus. A broken
+// chrome-error iframe steals focus and silently swallows the Enter, so the
+// reload no-ops (see the Focus-lost-to-broken-iframe gotcha; recover focus
+// with a real mouse click on workbench chrome first).
 const st = JSON.parse((await call('Runtime.evaluate', {expression:
-  '(()=>{const w=document.querySelector(".quick-input-widget");const f=w&&w.querySelector(".quick-input-list .monaco-list-row");return JSON.stringify({input:(w&&w.querySelector("input"))?.value,first:f?.textContent?.slice(0,60).trim()||null})})()',
+  '(()=>{const w=document.querySelector(".quick-input-widget");const f=w&&w.querySelector(".quick-input-list .monaco-list-row.focused");const a=document.activeElement;return JSON.stringify({active:a?a.tagName+"/"+(a.className||"").slice(0,30):null,selected:f?f.textContent.slice(0,60).trim():null})})()',
   returnByValue:true})).result.value);
-if (!st.first || !st.first.startsWith('Developer: Reload Window')) {
-  console.log('ABORT: first result is', st.first); ws.close(); process.exit(1);
+if (!/INPUT/.test(st.active||'')) {
+  console.log('ABORT: focus on', st.active, '(broken iframe; recover then retry)'); ws.close(); process.exit(1);
 }
-console.log('reloading:', st.first);
+if (!st.selected || !st.selected.startsWith('Developer: Reload Window')) {
+  console.log('ABORT: selected row is', st.selected); ws.close(); process.exit(1);
+}
+console.log('selected row:', st.selected);
 try {
   await call('Input.dispatchKeyEvent', {type:'rawKeyDown', key:'Enter',
     code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
   await call('Input.dispatchKeyEvent', {type:'keyUp', key:'Enter',
     code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
-  console.log('RELOAD TRIGGERED');
-} catch (e) { console.log('enter sent'); }
+  // Enter was DISPATCHED. That is NOT confirmation the window reloaded: if a
+  // broken iframe still had focus, or the row was not actually selected, this
+  // is a silent no-op. Confirm separately (Step 5: the chat iframe target id
+  // changes; Step 3: the exthost comes back fresh). Never treat this as success.
+  console.log('ENTER DISPATCHED (NOT confirmed; verify via Step 5 + Step 3)');
+} catch (e) { console.log('enter dispatch error:', e && e.message); }
 ws.close();
 EOF
 node /tmp/reload_go.mjs "$PAGE"
@@ -1115,19 +1150,60 @@ node /tmp/reload_go.mjs "$PAGE"
 If the palette opens but typing fails (focus stuck on a broken iframe), run a
 body-area mouse click first. See the "Focus-lost-to-broken-iframe" gotcha.
 
-### Step 3: wait for the exthost to restart
+### Step 3: wait for the exthost to RESTART (not merely respond)
+
+Reload Window kills the old exthost process and spawns a new one (confirmed:
+`process.pid` changes and `process.uptime()` resets to 0 on every reload; the old
+pid is gone, the Antigravity main process re-parents the fresh one). The naive
+"poll 9229 until it answers" FALSE-POSITIVES: for ~1.7s after you start driving
+the palette the old host is still alive and 9229 still serves it, so a poll that
+begins right after triggering catches the OLD host (with a large uptime) and
+declares success without ever seeing the restart. Watch the PID, not reachability.
 
 ```sh
-echo "waiting for exthost..."
-for i in $(seq 1 20); do
+# BEFORE triggering the reload, record the current exthost pid:
+OLD=$(curl -s --max-time 1 http://127.0.0.1:9229/json \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])')
+OLD_PID=$(node /tmp/cdp-eval.mjs "$OLD" 'process.pid' \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["result"]["value"])')
+echo "old exthost pid: $OLD_PID"
+# ... now trigger the reload (Step 2) ...
+
+# Then poll for a DIFFERENT pid with a small uptime (race-free):
+for i in $(seq 1 40); do
   sleep 1
-  R=$(curl -s --max-time 1 http://127.0.0.1:9229/json/version 2>/dev/null)
-  [ -n "$R" ] && echo "exthost up after ${i}s" && break
+  WS=$(curl -s --max-time 1 http://127.0.0.1:9229/json 2>/dev/null \
+       | python3 -c 'import sys,json
+try: print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])
+except Exception: pass')
+  [ -z "$WS" ] && continue                       # old host gone, new not up yet
+  R=$(node /tmp/cdp-eval.mjs "$WS" 'JSON.stringify({pid:process.pid,up:Math.round(process.uptime())})' 2>/dev/null \
+       | python3 -c 'import sys,json
+try: print(json.load(sys.stdin)["result"]["result"]["value"])
+except Exception: pass')
+  echo "$R" | python3 -c "import sys,json
+try: d=json.loads(sys.stdin.read()); sys.exit(0 if (d['pid']!=$OLD_PID and d['up']<60) else 1)
+except Exception: sys.exit(1)" && { echo "exthost restarted: $R (was $OLD_PID)"; break; }
 done
 ```
 
-Typical wait: 12-16 seconds. The renderer (9222) comes up faster than the
-exthost (9229). Do not proceed to verification until the exthost responds.
+Conditions, by importance: (1) `pid != OLD_PID` is ground truth that a new
+process exists, and kills the "old host still alive" false positive outright;
+(2) `uptime < 60` is belt-and-suspenders; (3) treat HTTP-refused, empty `/json`,
+and transient `Promise was collected` eval errors (the new host's first ~1s of
+inspector init) as keep-polling, never as terminal.
+
+Measured timing (the old "12-16s" figure is stale): the new exthost HTTP-answers
+~1.6-2.2s after Enter, and the chat iframe re-mounts ~1s after that. Total reload
+is ~5s, not 15; keep a ~40s ceiling but expect ~5s.
+
+Cheaper renderer-side signal: snapshot the `vscode-webview` chat-iframe id(s)
+from 9222 `/json/list` before the reload, then poll until a NEW id appears that
+was not in the snapshot (~3s after Enter). No exthost eval needed; it is the
+better default for the iteration loop because what you verify next lives in that
+iframe (it dovetails with Step 6's fresh-mount requirement). Use the pid check to
+prove the *exthost* reloaded your `extension.js`; use the iframe-id change when
+you need the *renderer*. The workbench PAGE id never changes; do not use it.
 
 ### Step 4: confirm the patch is in the running in-memory code
 
@@ -1159,7 +1235,11 @@ disk == in-memory; `readFileSync` is sufficient for normal iteration.
 
 ### Step 5: re-discover the chat-panel iframe target
 
-Iframe CDP target IDs change on every reload. Do not reuse old IDs.
+Iframe CDP target IDs change on every reload. Do not reuse old IDs. The
+workbench PAGE id, by contrast, persists across a reload (the BrowserWindow
+is reused; only its contents reload), so an unchanged page id does NOT mean
+the reload failed. The renderer-side signal that the reload landed is the
+chat iframe target id changing, not the page id.
 
 ```sh
 # All iframe targets after reload (abbreviated):
@@ -1213,6 +1293,10 @@ the workbench page (port 9222), discover the panel iframe by its Search box,
 type the session's title, click the row. The `/tmp/panel_ready.mjs` recovered
 below does discovery → open → search → list-rows in one shot; the
 `/tmp/click_convo.js` snippet clicks a row by needle.
+
+The panel re-reads the project dir on each search, so a fixture you just
+wrote to disk appears without any manual refresh and without a reload; you do
+not need to reload the window for the panel to list a brand-new session.
 
 ```sh
 # Open the activity-bar panel, search a title, dump matching rows.
@@ -1708,6 +1792,12 @@ case studies in `patches.md` use it.
 CDP only allows `Page.reload` on top-level pages. The webview iframe
 inherits its lifecycle from its parent workbench page; reload that
 instead (or use the refresh playbook's mechanism 3/5).
+
+The `-32000` is not guaranteed. In practice `Page.reload` on a
+vscode-webview iframe can instead return `ok` and break the frames anyway:
+they go `chrome-error://chromewebdata/` and drop out of `/json/list` (e.g.
+the count falls 3 to 1). A protocol `ok` is therefore not a safe signal.
+Never `Page.reload` an iframe, whatever it returns.
 
 ### Focus-lost-to-broken-iframe blocks command-palette typing
 
