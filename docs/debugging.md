@@ -2543,6 +2543,7 @@ window). What's different?
 ### Step 1: precheck patches are loaded
 
 ```sh
+# Path stem was ~/.antigravity/ at the time; current installs use ~/.antigravity-ide/.
 node /tmp/cdp-eval.mjs "$WS_TARGET" '(function(){
   var s = require("fs").readFileSync(
     "/home/juraj/.antigravity/extensions/anthropic.claude-code-2.1.126-linux-x64/extension.js","utf-8");
@@ -2650,7 +2651,7 @@ through the orphan; Session B's second-compaction `lpu` resolves
 CROSS-FILE (a `tool_result` uuid in a sibling JSONL), bypassing the
 orphan entirely.
 
-### Mitigation (added in pfg-v1.4)
+### Mitigation (added in pfg-v1.3, later subsumed by the bridge mechanism in v1.4)
 
 Once the empirical diagnosis was nailed, the fix was straightforward:
 detect the unreachable scenario at K-time (signal: a seam was planted
@@ -2712,6 +2713,7 @@ is the circular navigation?"
 
 ```sh
 WS=$(curl -s http://127.0.0.1:9229/json | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["webSocketDebuggerUrl"])')
+# Path stem was ~/.antigravity/ at the time; current installs use ~/.antigravity-ide/.
 node /tmp/cdp-eval.mjs "$WS" '(function(){
   var s = require("fs").readFileSync(
     "/home/juraj/.antigravity/extensions/anthropic.claude-code-2.1.132-linux-x64/extension.js","utf-8");
