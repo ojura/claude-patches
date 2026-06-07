@@ -48,7 +48,11 @@ patched live extension dir          maintainer tool             new prebuilt
    For the full CDP-based iteration loop (edit live file, reload
    via CDP key events, re-discover iframe target, DOM-verify
    `[data-pfgk-role]` counts), see
-   [`docs/debugging.md` "Patch development iteration loop"](docs/debugging.md).
+   [`docs/debugging.md` "Patch development iteration loop"](docs/debugging.md)
+   for the general method, and
+   [`docs/patches.md` "Verifying and debugging the recovery markers"](docs/patches.md#verifying-and-debugging-the-recovery-markers)
+   for the marker fixtures (`gen_demo`), the rendered-marker probes, the
+   marker-specific gotchas, and the worked Patch K case studies.
 
 2. **Synthesize the prebuilt.**
 
@@ -266,7 +270,7 @@ can omit an earlier transformation (e.g. `return createElement(...)` →
 already baked into that `.bak`). Applying such a splice to a fresh
 install leaves the wrap as dead code after the `return` statement while
 still passing every byte-stability check. See
-[`docs/debugging.md`](docs/debugging.md) "Byte-stability check is
+[`docs/patches.md`](docs/patches.md#verifying-and-debugging-the-recovery-markers) "Byte-stability check is
 necessary but not sufficient" gotcha.
 
 **Invariant: `.bak` is always the pristine pre-patch baseline.**
