@@ -130,16 +130,38 @@ display.ts` subtree (run with `node --experimental-strip-types
 --disable thinking-streaming`, since Patch S owns the thinking-streaming
 surface end-to-end).
 
-Output: a final patched binary with three layers in this order:
+Output: a final patched binary with three layers in this order.
 
-1. Connoisseur's display tweaks (verbose tool-call rendering, diff
-   colors, subagent prompt visibility, spinner-tip suppression,
-   version-output marker, welcome-badge rebrand, etc.), MINUS
-   connoisseur's thinking-streaming sub-patch.
-2. Patch S: the streaming-thinking restoration (writer + renderer end-
-   to-end, discovery-based anchors).
-3. Optional --instr instrumentation hooks (per-PID log to
-   `/tmp/pfg-instr.${process.pid}.log`).
+1. Connoisseur's display tweaks. Patch IDs match the v2.0 plan's
+   PATCH_MODULES enumeration; function names are connoisseur's exports
+   in `patch-claude-display.ts`. CON-F (thinking-streaming) is
+   explicitly disabled because Patch S below owns that surface.
+
+   - CON-A (`patchCollapsedReadSearch`): verbose tool-call rendering.
+   - CON-B (`patchWriteCreateDiffColors`): write + create diff colors.
+   - CON-C (`patchWordDiffLineBackgrounds`): word-diff line backgrounds.
+   - CON-D (`patchThinkingCase`): inline thinking display.
+   - CON-E (`patchRedactedThinkingSummaries`): inline redacted-thinking
+     display. Currently 0-matches on 2.1.16x; connoisseur's anchor
+     drifted, retained as required=False per the plan.
+   - CON-F (`patchThinkingStreaming`): SKIPPED. Patch S supersedes
+     it end-to-end; connoisseur's renderer-seed anchor 0-matches on
+     2.1.16x anyway, and the writer half is rewritten with discovery.
+   - CON-G (`patchSubagentPromptVisibility`): subagent prompt
+     visibility outside transcript mode.
+   - CON-H (`patchDisableSpinnerTips`): suppress spinner tips.
+   - CON-I (`patchVersionOutput`): append (patched) to --version.
+   - CON-J (`patchInstallerMigrationMessage`): rewrite the npm-to-
+     native installer warning. Currently 0-matches on 2.1.16x because
+     the literal string was removed from the bundle; retained as
+     required=False.
+
+2. Patch S: the streaming-thinking restoration. Discovery-based
+   writer + renderer end-to-end (see "Surfaces" above for the per-
+   sub-patch breakdown). Replaces CON-F.
+
+3. Optional --instr instrumentation hooks. Eleven per-PID logs (see
+   "Surfaces" above), written to `/tmp/pfg-instr.${process.pid}.log`.
 
 Requirements: Node.js >= 22 (for `--experimental-strip-types`) on PATH.
 """
@@ -158,13 +180,36 @@ sys.path.insert(0, HERE)
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
 
 
+# Map connoisseur's --list-patches IDs (the labels in patch-claude-display.ts)
+# to the v2.0 plan's PATCH_MODULES enumeration. Used to prefix the runtime
+# echo of connoisseur's stdout so users see plan-level IDs next to the
+# connoisseur-labelled output.
+CONNOISSEUR_TO_CON_ID = {
+    'tool-call-verbose':         'CON-A',
+    'create-diff-colors':        'CON-B',
+    'word-diff-line-bg':         'CON-C',
+    'thinking-inline':           'CON-D',
+    'redacted-thinking-inline':  'CON-E',
+    'thinking-streaming':        'CON-F',  # disabled; never echoes
+    'subagent-prompt':           'CON-G',
+    'disable-spinner-tips':      'CON-H',
+    'version-output':            'CON-I',
+    'installer-label':           'CON-J',
+    # welcome-badge runs as-is for now (rebrands to "Connoisseur's Code").
+    # The v2.0 plan supersedes it with repo-authored Patch O that scopes
+    # down to just the version-bearing site; not implemented separately
+    # in this script yet.
+    'welcome-badge':             'connoisseur-welcome (Patch O TBD)',
+}
+
+
 def apply_connoisseur_display_patches(js):
     """Run the vendored connoisseur display-patch transformations against
     the extracted JS. Disables connoisseur's thinking-streaming sub-patch
-    because Patch S (the renderer + writer code below) owns that surface
-    end-to-end with discovery-based anchors instead of connoisseur's
-    `hidePastThinking:!0,streamingThinking:VAR` literal which has not
-    existed on any 2.1.16x bundle and 0-matches silently.
+    (CON-F) because Patch S (the renderer + writer code below) owns that
+    surface end-to-end with discovery-based anchors instead of
+    connoisseur's `hidePastThinking:!0,streamingThinking:VAR` literal
+    which has not existed on any 2.1.16x bundle and 0-matches silently.
     """
     if not os.path.exists(CONNOISSEUR_TS):
         raise SystemExit(
@@ -192,8 +237,17 @@ def apply_connoisseur_display_patches(js):
             )
         for line in result.stdout.splitlines():
             ls = line.strip()
-            if ls and ('candidates' in ls or 'Patched:' in ls or 'Patch summary' in ls):
+            if not ls:
+                continue
+            if 'Patch summary' in ls or ls.startswith('Patched:'):
                 print(f'  {ls}')
+                continue
+            if 'candidates' in ls:
+                m = re.match(r'^([\w-]+)\s+candidates', ls)
+                if m and m.group(1) in CONNOISSEUR_TO_CON_ID:
+                    print(f'  [{CONNOISSEUR_TO_CON_ID[m.group(1)]}] {ls}')
+                else:
+                    print(f'  {ls}')
         with open(tmp, encoding='utf-8') as f:
             return f.read()
     finally:
