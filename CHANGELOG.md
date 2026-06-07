@@ -120,10 +120,8 @@ unaffected.
 
 ### Splice count and signature
 
-20 total splices: 15 in `extension.js`, 4 in `webview/index.js`, 1 in
-`webview/index.css` (unchanged from the final v1.6 prebuilt 2.1.139,
-which already carried Patch L; the +1 over 2.1.132 reflects Patch L's
-introduction during the v1.6 line). Signature
+20 total splices now (was 19): 15 in `extension.js` (was 14, +1 for
+L), 4 in `webview/index.js`, 1 in `webview/index.css`. Signature
 bumped from `/*pfg-v1.6*/` to `/*pfg-v1.7*/`. End-users on v1.6 will
 get auto-restore + reapply on the next `apply.py` run.
 

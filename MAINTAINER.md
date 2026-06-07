@@ -133,7 +133,7 @@ that working state while migrating the on-disk signature.
    prebuilt left in `prebuilt/<VER>/` will be fetched by the skill,
    detect its own old signature as "Already patched", and exit with a
    false-positive `PATCHES_APPLIED`, and the user never gets the new
-   patches. Archive layout: `prebuilt/archive/v1.6/2.1.139/apply.py`.
+   patches. Archive layout: `prebuilt/archive/v1.6/2.1.132/apply.py`.
 
 4. **Synthesize the new prebuilt(s).** For every extension version you
    have installed: `python3 util/build-prebuilt.py <ext_dir> prebuilt/<VER>`.
