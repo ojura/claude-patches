@@ -205,6 +205,39 @@ def discover_names(js):
         if pm is None:
             raise SystemExit(f'[discover] c2H {opt} not found in destructure')
         names[slot] = pm.group(1)
+
+    # streamingText useState pair, identified by the unique reduced-motion-guarded
+    # useCallback that wraps its setter. Used to stash the streamingText value
+    # to the cross-probe cache so X1 can read it at cancel time.
+    stext_match = re.search(
+        r'\[([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\]='
+        r'[A-Za-z_$][\w$]*\.useState\(null\),'
+        r'[A-Za-z_$][\w$]*=![^,]{0,300}?,'
+        r'[A-Za-z_$][\w$]*='
+        r'[A-Za-z_$][\w$]*\.useCallback\(\([A-Za-z_$][\w$]*\)=>'
+        r'\{if\(![A-Za-z_$][\w$]*\)\{\2\(',
+        js,
+    )
+    if stext_match is None:
+        raise SystemExit('[discover] streamingText useState pair not found')
+    names['stext_state'] = stext_match.group(1)
+    names['stext_setter'] = stext_match.group(2)
+
+    # tGH (message-dispatch callback). The c2H reducer invokes onMessage:tGH
+    # whenever a message is ready to commit; wrapping it gives X3 a single
+    # chokepoint for every messages-array mutation in the live chat scope.
+    # Discovered by the unique compactMetadata.preservedMessages access in
+    # the function body.
+    tgh_match = re.search(
+        r'([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.useCallback\(\(([A-Za-z_$][\w$]*)\)=>'
+        r'\{if\([A-Za-z_$][\w$]*\(\3\)\)'
+        r'\{let [A-Za-z_$][\w$]*=\3\.compactMetadata\.preservedMessages,',
+        js,
+    )
+    if tgh_match is None:
+        raise SystemExit('[discover] tGH message-dispatch callback not found')
+    names['tgh_name'] = tgh_match.group(1)
+    names['tgh_arg'] = tgh_match.group(3)
     # QyA-equivalent component alias
     names['qya_var'] = find_one(
         r',([A-Za-z_$][\w$]*)\s*=\s*\(\{messages:[A-Za-z_$][\w$]*,tools:\$,'
@@ -538,13 +571,24 @@ def main():
             + '  let{onMessage:q,',
             'R1 c2H entry',
         )
-        # R2: A4 setter wrap
+        # R2: A4 setter wrap + module-level stash of the streamingThinking
+        # state on every render (S4 is the destructured current value).
+        # The stash lets X1 read the cancel-moment state inline rather than
+        # composing across the next L1/C2 log.
         splice(
             '[S4,A4]=W8.useState(null)',
             '[S4, __pfg_A4_real] = W8.useState(null),\n'
-            '  /* pfg-instr R2: wrap A4 setter to log each invocation. */\n'
+            '  __pfg_cache = ((globalThis.__pfg_cache = globalThis.__pfg_cache || {}), globalThis.__pfg_cache),\n'
+            '  __pfg_stash_st = (__pfg_cache.lastSt = S4, __pfg_cache.lastStAt = Date.now(), 0),\n'
+            '  /* pfg-instr R2: wrap A4 setter with kind discrimination. */\n'
             '  A4 = (__pfg_arg) => {\n'
-            + logwrite('`[pfg-instr R2 A4 t=${typeof __pfg_arg}]\\n`')
+            + logwrite(
+                '`[pfg-instr R2 A4 t=${typeof __pfg_arg} ` +\n'
+                '      `kind=${typeof __pfg_arg === "function" ? "func" : '
+                '__pfg_arg === null ? "null" : '
+                '(__pfg_arg && typeof __pfg_arg === "object" && "isStreaming" in __pfg_arg) ? '
+                '(__pfg_arg.isStreaming ? "streaming" : "finalized") : "other"}]\\n`'
+            )
             + '    return __pfg_A4_real(__pfg_arg);\n'
             '  }',
             'R2 A4 wrap',
@@ -661,7 +705,10 @@ def main():
         # minified as `P$`) so the splice survives release-to-release
         # minified-name drift. Inject a self-logging IIFE that wraps the
         # P$("escape") call, preserving the original semantics while
-        # firing X1 on every chat:cancel invocation.
+        # firing X1 on every chat:cancel invocation. Reads the cross-
+        # probe state cache (populated by the R2 stash and the Ih stash
+        # below) so the cancel-moment state is reported inline rather
+        # than composed from adjacent renders.
         cancel_src_match = re.search(
             r'source:([A-Za-z_$][\w$]*)\("escape"\),streamMode:',
             js,
@@ -672,13 +719,70 @@ def main():
         splice(
             f'source:{cancel_src_fn}("escape"),streamMode:',
             f'source:(() => {{\n'
-            '    /* pfg-instr X1: chat:cancel useCallback fired (bare Escape during streaming). */\n'
+            '    /* pfg-instr X1: chat:cancel useCallback fired (bare Escape during streaming).\n'
+            '     * Reads the cross-probe state cache populated by R2 (S4 / streamingThinking)\n'
+            '     * and the Ih stash below (streamingText). */\n'
+            '    const __pfg_c = (globalThis.__pfg_cache = globalThis.__pfg_cache || {});\n'
+            '    const __pfg_st = __pfg_c.lastSt;\n'
+            '    const __pfg_text = __pfg_c.lastText;\n'
             + logwrite(
-                '`[pfg-instr X1 cancel handler=chat-cancel source=escape]\\n`'
+                '`[pfg-instr X1 cancel handler=chat-cancel source=escape ` +\n'
+                '      `stHas=${__pfg_st ? "y" : "n"} ` +\n'
+                '      `stThinkLen=${__pfg_st?.thinking?.length ?? 0} ` +\n'
+                '      `stMsgs=${__pfg_st?.messages?.length ?? 0} ` +\n'
+                '      `stIsStreaming=${__pfg_st?.isStreaming ?? false} ` +\n'
+                '      `stEndedAt=${__pfg_st?.streamingEndedAt ?? 0} ` +\n'
+                '      `textHas=${__pfg_text != null ? "y" : "n"} ` +\n'
+                '      `textLen=${(typeof __pfg_text === "string") ? __pfg_text.length : 0}]\\n`'
             )
             + f'    return {cancel_src_fn}("escape");\n'
             '  })(),streamMode:',
             f'X1 chat:cancel handler ({cancel_src_fn})',
+        )
+
+        # Ih stash: populate __pfg_cache.lastText each render so X1 can read
+        # the current streamingText state inline. Mirrors the S4 stash in
+        # the R2 wrap above. No setter wrap (the user-driven question is
+        # the current value, not write events; R2's kind discrimination
+        # already captures write shapes for the analogous A4 setter).
+        ih = names['stext_state']
+        ob = names['stext_setter']
+        splice(
+            f'[{ih},{ob}]=W8.useState(null),',
+            f'[{ih},{ob}]=W8.useState(null),\n'
+            '  /* pfg-instr: stash streamingText state to cross-probe cache for X1. */\n'
+            f'  __pfg_stash_text = ((globalThis.__pfg_cache = globalThis.__pfg_cache || {{}}).lastText = {ih}, 0),\n',
+            f'Ih stash (streamingText -> cache)',
+        )
+
+        # X3: wrap tGH (the message-dispatch callback c2H calls via onMessage).
+        # Every message commit goes through tGH; capturing its arg's shape at
+        # entry tells us exactly what got pushed to the messages array and
+        # when. On Escape, the user's hypothesis says streamingText gets
+        # committed but streamingThinking does not; if true, X3 logs a single
+        # commit with a text-only content array and no thinking blocks at
+        # cancel-adjacent time. If neither commits, X3 shows zero firings
+        # between the cancel and the next user submission.
+        tgh = names['tgh_name']
+        tgh_arg = names['tgh_arg']
+        splice(
+            f'{tgh}=W8.useCallback(({tgh_arg})=>{{if(',
+            f'{tgh}=W8.useCallback(({tgh_arg})=>{{\n'
+            '  /* pfg-instr X3: message-dispatch callback invoked. Logs the\n'
+            '   * incoming message shape so commits during the cancel flow\n'
+            '   * are observable directly. */\n'
+            + logwrite(
+                f'`[pfg-instr X3 commit type=${{{tgh_arg}?.type}} ` +\n'
+                f'      `uuid=${{{tgh_arg}?.uuid ?? ""}} ` +\n'
+                f'      `msgId=${{{tgh_arg}?.message?.id ?? ""}} ` +\n'
+                f'      `blocks=${{Array.isArray({tgh_arg}?.message?.content) ? {tgh_arg}.message.content.length : -1}} ` +\n'
+                f'      `blockTypes=${{Array.isArray({tgh_arg}?.message?.content) ? '
+                f'{tgh_arg}.message.content.map((__pfg_b) => __pfg_b?.type ?? "?").join(",") : ""}} ` +\n'
+                f'      `isVirtual=${{{tgh_arg}?.isVirtual ? "y" : "n"}} ` +\n'
+                f'      `isErr=${{{tgh_arg}?.isApiErrorMessage ? "y" : "n"}}]\\n`'
+            )
+            + '  if(',
+            f'X3 message-commit wrap ({tgh})',
         )
 
         # X2.a: wrap pOA = filterTrailingThinkingFromLastAssistant. The

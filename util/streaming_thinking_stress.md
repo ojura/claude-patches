@@ -1,5 +1,77 @@
 # Streaming-thinking stress test
 
+## CRITICAL: subagent dispatch footguns - READ BEFORE TOUCHING TMUX
+
+If you are a subagent reading this doc to drive a stress test in tmux,
+the two failure modes below will both burn an entire run before you
+notice. Both have happened repeatedly in this codebase. The 2026-06-07
+incident: a subagent hit BOTH simultaneously and was effectively dead
+for ten minutes while waste accumulated.
+
+**FOOTGUN 1: newlines in `tmux send-keys` strings ARE Enter keypresses.**
+Every embedded `\n` in the typed string is a literal Enter at that
+position. A multi-line bash string sent verbatim submits the first
+line, then submits each subsequent line as a fresh turn. You will see
+the prompt land partially, claude responds to fragments, then your
+wait-for-completion hangs or terminates weirdly.
+
+  ```bash
+  # WRONG - the literal newline in the string IS an Enter keypress.
+  tmux send-keys -t 2 'Carefully derive the closed form for sum
+  1 + 2 + ... + n, showing the inductive step.'
+
+  # WRONG - heredoc has the same newline problem.
+  tmux send-keys -t 2 "$(cat <<EOF
+  Carefully derive...
+  EOF
+  )"
+
+  # RIGHT - prompt on ONE line, no embedded newlines, then Enter as a
+  # SEPARATE send-keys call.
+  tmux send-keys -t 2 'Carefully derive the closed form for sum 1 + 2 + ... + n, showing the inductive step.'
+  sleep 1
+  tmux send-keys -t 2 Enter
+  ```
+
+When this doc shows a prompt across multiple visual lines for
+readability, that is markdown line-wrapping. The actual prompt sent
+must be ONE LINE in the bash string. Collapse before sending.
+
+**FOOTGUN 2: blocking `Bash` polling = the agent is dead for the
+duration.** A `Bash` call like `until tmux capture-pane ...; sleep 15;
+done` ties up the agent's tool slot for the full wait. The agent
+cannot inspect, react, or report until the loop exits. A 10-minute
+model run plus a hung waiting condition equals an agent gone for
+10+ minutes that you cannot stop mid-flight without TaskStop.
+
+  ```bash
+  # WRONG - blocks the agent's main loop until the loop exits.
+  until tmux capture-pane -t 2 -p | tail -20 | grep -qE 'idle'; do
+    sleep 15
+  done
+  ```
+
+  RIGHT pattern: arm `Monitor` (background, fires one event when
+  condition matches), then between dispatch and event do periodic
+  foreground `tmux capture-pane -t <window> -p | tail -20` checks at
+  ~30s, ~90s, near-expected-completion to verify the prompt looks
+  right and catch dispatch contamination early.
+
+  ```
+  Monitor({
+    description: "wait for stress run to complete",
+    timeout_ms: 600000,
+    persistent: false,
+    command: "until tmux capture-pane -t 2 -p | tail -20 | grep -qE '...idle...'; do sleep 15; done; echo DONE"
+  })
+  ```
+
+  Between dispatching Monitor and the completion event, two or three
+  capture-pane foreground checks cost three tool calls; missing
+  dispatch contamination costs the whole run.
+
+Both footguns are also captured in `feedback_agent_dispatching` memory.
+
 ## Purpose
 
 Verify that the inline streaming-thinking restoration applied by
