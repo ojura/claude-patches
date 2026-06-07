@@ -1623,12 +1623,16 @@ loader shape), the canonical guarantees the following:
   marker fields on the ghost object. Adding `isPfgkGhost` /
   `pfgkKind` / `logicalParentUuid: null` is harmless but dead
   weight.
-- **Two flags, not one.** Canonical tracks `_kFired` (a seam was
-  planted) AND `_kAttempted` (a phantom boundary was seen, even
-  if no predecessor existed). The bookend / bridge / broken stages
-  gate on `_kAttempted`. Gating those on `_kFired` alone causes
-  the downstream stages to silently skip on edge cases where a
-  phantom is seen but no seam plants.
+- **Marker stages gate in the walker, not on a loader flag.** The
+  loader tracks `_kFired` (a seam was planted) and `_kAttempted` (a
+  phantom boundary was seen), but the current build's downstream marker
+  stages read neither, so `_kAttempted` is dead weight (written, never
+  read). The bookend and broken markers are emitted in the
+  cycle-guarded chain-walker from one post-walk verdict on whether the
+  up-walk reached a legitimate root (broken fires under `!_root`,
+  bookend when a root was reached); the bridge is a loader-side
+  cross-file marker. Gating bookend / broken on a loader flag was the
+  superseded v1.5 -> v1.6 design; see `docs/patches.md`.
 - **Ambiguity propagation.** K1 backfill tracks `_ambigCount` per
   phantom and an aggregate `_ambigPhLpus`. When >1 sibling
   qualified, K prepends a `"⚠ AMBIGUOUS RECONSTRUCTION: ..."`

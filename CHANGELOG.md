@@ -159,7 +159,7 @@ of whether the seam plant succeeded). Gate the fallback block on
 now fires correctly when reconstruction failed.
 
 Generalized as a playbook design rule:
-[`docs/debugging.md`](docs/debugging.md) "K detected vs K
+[`docs/patches.md`](docs/patches.md#k-detected-vs-k-succeeded-gate-downstream-logic-on-attempt-not-effect) "K detected vs K
 succeeded: gate downstream logic on attempt, not effect".
 
 ### Marker informativeness: surface concrete data instead of generic prose
@@ -215,8 +215,8 @@ specifically. DOM-verified `getComputedStyle(brokenHeaderDiv).color
 === "rgb(255, 255, 255)"` post-fix.
 
 Generalized as a playbook gotcha:
-[`docs/debugging.md`](docs/debugging.md) "Red-on-red (and other
-role-specific bg-color clashes)".
+[`docs/patches.md`](docs/patches.md#red-on-red-and-other-role-specific-bg-color-clashes) "Red-on-red (and other
+role-specific bg color clashes)".
 
 ### End-to-end verification
 

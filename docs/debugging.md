@@ -22,7 +22,7 @@ the launch flags and IDE-product paths differ.
 > or reload mechanisms before checking whether the playbook already
 > covers your case. Specifically:
 >
-> - **Reload mechanisms**: see "Refresh / reload playbook" for six
+> - **Reload mechanisms**: see "Refresh / reload playbook" for five
 >   verified mechanisms ordered by precision. `location.reload()` on
 >   webview iframes BREAKS the iframe (chrome-error). `Page.reload`
 >   is rejected on iframe targets. Don't try them. Use mechanism 3
@@ -31,7 +31,7 @@ the launch flags and IDE-product paths differ.
 >   unreliable** (keybinding-context-sensitive); the canonical
 >   reload is `Ctrl+Shift+P` → type `Reload Window` → `Enter`.
 > - **Verifying a code change took effect**: see the Patch K case study in
->   [`patches.md`](patches.md) ("End-to-end verification of the fix"). The exact recipe
+>   [`patches.md`](patches.md#verifying-and-debugging-the-recovery-markers) (its "End-to-end verification of the fix" paragraph). The exact recipe
 >   is `Input.dispatchKeyEvent` reload + BP-free verification via
 >   fiber-walk + DOM probing. `node --check` and byte-stability
 >   passing are NOT verification.
@@ -697,7 +697,7 @@ typically materializes immediately.
 
 ### Manager structure
 
-The webview-side session manager (class `Wn` in v2.1.126):
+The webview-side session manager (class `Wn`; minified name drifts between releases):
 
 - `sessions`: Preact signal; `.value` is array of session entries
 - `activeSession`: signal; `.value.id` is current sessionId

@@ -938,7 +938,7 @@ same extension splice as the fallback), Patch L can be retired.
 The general CDP method (mental model, tooling, the BP/RPC/fiber recipes, the
 refresh mechanisms, and the universal gotchas) lives in [`debugging.md`](debugging.md).
 This section is the claude-patches-specific part: fixtures that trigger the
-Patch K markers, marker-specific gotchas, and worked diagnoses. Where the text
+Patch K markers, marker-specific gotchas, plus two worked diagnoses (the case studies below). Where the text
 below says "Recipe N", "mechanism N", "Step N", or "this doc", it means
 `debugging.md`.
 
@@ -1036,9 +1036,9 @@ Pitfalls when crafting or reusing a fixture:
 - A fixture with zero message records (an `ai-title`+`mode` stub and nothing else)
   plants no markers: the walker has no boundary or chain to fire on. It must
   contain the actual messages, not just a title.
-- Opening a session is not idempotent on disk. Base Claude Code (the `claude`
-  subprocess, via `generate_session_title` with `persist`, NOT our patches)
-  appends a compact-JSON `ai-title` record to the session's own `.jsonl` on open,
+- Opening a session is not idempotent on disk. Claude Code's own auto-titling
+  (the `claude` subprocess, NOT our patches) appends a compact-JSON `ai-title`
+  record to the session's own `.jsonl` on open,
   so a 7-line seam fixture becomes 8 lines after one open and re-opening keeps
   adding duplicate `ai-title` lines (harmless to the render, the file just grows).
   Verify markers from the rendered DOM (Step 7) or the wire `H` of a fresh walk,
@@ -1271,7 +1271,7 @@ Expected: the fresh tab shows the markers your fixture or session produces (e.g.
 `pfgkAlert >= 1` with the relevant role), and `markerText` reflects your edit. If
 markers are missing, or `markerText` still shows the pre-edit content, the render
 is stale (you skipped Step 6) or the exthost runs old code (reload, re-run), not
-a failed edit. The Steps below explain each piece.
+a failed edit. The Step 0-7 breakdown in `debugging.md` explains each piece.
 
 
 ### Probing the rendered markers (role counts, text, SVGs)
@@ -1499,7 +1499,7 @@ PROJ=~/.claude/projects/-<workspace>
 mv $PROJ/<source-sid>.jsonl     $PROJ/<source-sid>.jsonl.test-disabled
 mv $PROJ/<source-sid>.jsonl.bak $PROJ/<source-sid>.jsonl.test-disabled.bak
 # Reload Window via palette
-# DOM-verify [data-pfgk-role="broken"] count = 1, bodyHasINCOMPLETE === true
+# DOM-verify [data-pfgk-role="broken"] count = 1, bodyHasUNRECOVERABLE === true
 # Cleanup: rename back
 ```
 
@@ -1525,12 +1525,12 @@ JSON.stringify({
 
 Predictions:
 - Baseline (no fixture): 4 markers (1 bookend + 2 seams + 1 bridge),
-  0 broken, no AMBIG, no INCOMPLETE.
+  0 broken, no AMBIG, no UNRECOVERABLE.
 - Test #1 (clone present): SAME marker counts but `bodyHasAMBIG ===
   true`, bookend + at least one seam contain "AMBIGUOUS
   RECONSTRUCTION:" prefix.
 - Test #5 (source renamed away): `bookend` count = 0, `broken`
-  count = 1, `bodyHasINCOMPLETE === true`. Total `msgs` drops by
+  count = 1, `bodyHasUNRECOVERABLE === true`. Total `msgs` drops by
   ~size of the missing source's pre-content.
 
 ### "K detected" vs "K succeeded": gate downstream logic on attempt, not effect

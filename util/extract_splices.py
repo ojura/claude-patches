@@ -111,9 +111,10 @@ def find_next_long_match(a, b, a_start, b_start, a_end, b_end):
     starting at >= a_start and b starting at >= b_start. Return
     (a_pos, b_pos, length) or None.
 
-    Uses a small heuristic: pick the first GAP_THRESHOLD-byte chunk from
-    a starting at a_start, find its next occurrence in b[b_start:b_end],
-    if found extend the match in both directions and return."""
+    Uses a small heuristic: try successive GAP_THRESHOLD-byte anchors at
+    a_start, a_start+1, ... (capped at min(2000, region - GAP_THRESHOLD + 1)
+    offsets), return the first that also occurs in b[b_start:b_end], then
+    extend the match in both directions."""
     if a_end - a_start < GAP_THRESHOLD:
         return None
     # Try anchors at a_start, a_start+1, ..., until we find one that exists in b

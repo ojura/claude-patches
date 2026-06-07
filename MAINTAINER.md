@@ -97,8 +97,7 @@ patched live extension dir          maintainer tool             new prebuilt
   `webview/index.js`, 1 in `webview/index.css` (~24 total at v1.8).
   Counts can drift slightly across bundles because adjacent diff hunks
   sometimes merge or split depending on the surrounding context window
-  in the new minified output (observed: 19 vs 18 in `extension.js`
-  across 2.1.126 and 2.1.132, no functional difference). A *large*
+  in the new minified output. A *large*
   proportional drop (e.g. losing a third or more of `extension.js`'s
   splices) means the bundle restructured or the patches applied
   wrong; investigate before pushing. The byte-stability check is the
@@ -270,8 +269,8 @@ can omit an earlier transformation (e.g. `return createElement(...)` →
 already baked into that `.bak`). Applying such a splice to a fresh
 install leaves the wrap as dead code after the `return` statement while
 still passing every byte-stability check. See
-[`docs/patches.md`](docs/patches.md#verifying-and-debugging-the-recovery-markers) "Byte-stability check is
-necessary but not sufficient" gotcha.
+[`docs/patches.md`](docs/patches.md#byte-stability-check-is-necessary-but-not-sufficient-for-splice-correctness) "Byte-stability check is
+necessary but not sufficient for splice correctness" gotcha.
 
 **Invariant: `.bak` is always the pristine pre-patch baseline.**
 
@@ -346,8 +345,8 @@ just the K message text.
 
 If the wrap counts are zero but the message text is in the DOM
 (`document.body.textContent.includes("PATCH K · ")` returns true),
-the splice produced dead code. See [`docs/debugging.md`'s
-"Case study: dead K wrap from non-pristine .bak synthesis"](docs/debugging.md)
+the splice produced dead code. See [`docs/patches.md`'s
+"Case study: dead K wrap from non-pristine .bak synthesis"](docs/patches.md#case-study-dead-k-wrap-from-non-pristine-bak-synthesis-2132)
 for the empirical diagnosis walkthrough.
 
 The full CDP toolkit + recipes live in

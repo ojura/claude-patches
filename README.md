@@ -35,8 +35,9 @@ See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 (why, locate, patch, verify, test). For *how* to introspect the running
 extension via CDP (set conditional breakpoints, walk the React fiber
 tree, dispatch RPCs from outside, etc.), see
-[`docs/debugging.md`](docs/debugging.md). The Patch K case study at the
-end of that doc walks through using all the recipes end-to-end.
+[`docs/debugging.md`](docs/debugging.md). The Patch K case studies in
+[`docs/patches.md`](docs/patches.md#verifying-and-debugging-the-recovery-markers)
+walk through using those recipes end-to-end.
 
 ## Layout
 
@@ -67,7 +68,7 @@ claude-patches/
 │   ├── patches.md           # detailed per-patch documentation
 │   └── debugging.md         # CDP introspection reference for the bundled
 │                            # extension: port roles, BP-with-condition,
-│                            # fiber walk, RPC dispatch, gotchas, case study
+│                            # fiber walk, RPC dispatch, gotchas, iteration loop
 ├── util/                    # maintainer tools; see MAINTAINER.md
 ├── MAINTAINER.md            # how to synthesize and push a new prebuilt
 └── README.md                # this file
