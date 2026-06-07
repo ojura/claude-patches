@@ -650,6 +650,90 @@ def main():
             'E1 aggregator wrap',
         )
 
+        # X1: instrument the user-interrupt-on-submit site. Anchor on the
+        # debug log string '[interrupt] Aborting current turn:' which is
+        # unique. Inject a marker line before the existing tengu_cancel
+        # telemetry call so we can see when an interrupt fires. The
+        # surrounding stream-thinking state shows up via the adjacent L1/C2
+        # render logs (correlate by timestamp); X1 itself fires once per
+        # interrupt to make the moment greppable in the log.
+        splice(
+            'N(`[interrupt] Aborting current turn: streamMode=${H.streamMode}`);',
+            'N(`[interrupt] Aborting current turn: streamMode=${H.streamMode}`);\n'
+            '  /* pfg-instr X1: fires at the moment user-input interrupt is processed. */\n'
+            + logwrite(
+                '`[pfg-instr X1 interrupt source=submit streamMode=${H.streamMode}]\\n`'
+            )
+            + '  ',
+            'X1 interrupt-on-submit',
+        )
+
+        # X2.a: wrap pOA = filterTrailingThinkingFromLastAssistant. The
+        # function strips trailing thinking blocks from the last assistant
+        # message before the next request. Anchored on the unique telemetry
+        # name. Logs the input message count, the trim count, and whether
+        # the last assistant ended with a thinking block (i.e. whether the
+        # filter actually did something on this call).
+        ptt_match = re.search(
+            r'function ([A-Za-z_$][\w$]*)\(H\)\{let \$=H\.at\(-1\);'
+            r'if\(!\$\|\|\$\.type!=="assistant"\)return H;'
+            r'let q=\$\.message\.content,K=q\.at\(-1\);'
+            r'if\(!K\|\|!Oh\$\(K\)\)return H;'
+            r'let _=q\.length-1;while\(_>=0\)\{let f=q\[_\];'
+            r'if\(!f\|\|!Oh\$\(f\)\)break;_--\}'
+            r'l\("tengu_filtered_trailing_thinking_block"',
+            js,
+        )
+        if ptt_match is None:
+            raise SystemExit('[X2.a] filterTrailingThinking anchor not found')
+        ptt_name = ptt_match.group(1)
+        ptt_old = f'function {ptt_name}(H){{let $=H.at(-1);'
+        ptt_new = (
+            f'function {ptt_name}(H){{\n'
+            '  /* pfg-instr X2.a: filterTrailingThinkingFromLastAssistant entry. */\n'
+            + logwrite(
+                '`[pfg-instr X2.a filterTrailing entry inMsgs=${H?.length ?? 0} ` +\n'
+                '      `lastIsAssistant=${(H?.at(-1)?.type === "assistant") ? "y" : "n"} ` +\n'
+                '      `lastEndsThinking=${(()=>{ try { const m = H.at(-1); '
+                'if (m?.type !== "assistant") return "n"; const c = m.message?.content; '
+                'if (!Array.isArray(c)) return "n"; const t = c.at(-1); '
+                'return (t?.type === "thinking" || t?.type === "redacted_thinking") ? "y" : "n"; } '
+                'catch (e) { return "?"; } })()}]\\n`'
+            )
+            + '  let $=H.at(-1);'
+        )
+        splice(ptt_old, ptt_new, f'X2.a filterTrailing entry ({ptt_name})')
+
+        # X2.b: wrap QN$ = filterOrphanedThinkingOnlyMessages. Anchored on
+        # the unique telemetry name. Logs the input message count and how
+        # many orphaned-thinking-only messages the filter dropped.
+        qno_match = re.search(
+            r'function ([A-Za-z_$][\w$]*)\(H\)\{let \$=new Set;'
+            r'for\(let K of H\)\{if\(K\.type!=="assistant"\)continue;'
+            r'let _=K\.message\.content;if\(!Array\.isArray\(_\)\)continue;'
+            r'if\(_\.some\([\s\S]{0,200}?\)&&K\.message\.id\)'
+            r'\$\.add\(K\.message\.id\)\}let q;for\(let K=0;K<H\.length;K\+\+\)',
+            js,
+        )
+        if qno_match is None:
+            raise SystemExit('[X2.b] filterOrphaned anchor not found')
+        qno_name = qno_match.group(1)
+        qno_old = f'function {qno_name}(H){{let $=new Set;'
+        qno_new = (
+            f'function {qno_name}(H){{\n'
+            '  /* pfg-instr X2.b: filterOrphanedThinkingOnlyMessages entry. */\n'
+            + logwrite(
+                '`[pfg-instr X2.b filterOrphaned entry inMsgs=${H?.length ?? 0} ` +\n'
+                '      `orphanedThinkingOnly=${(()=>{ try { let count = 0; '
+                'for (const m of H) { if (m?.type !== "assistant") continue; '
+                'const c = m.message?.content; if (!Array.isArray(c) || c.length === 0) continue; '
+                'if (c.every((b) => b?.type === "thinking" || b?.type === "redacted_thinking")) count++; } '
+                'return count; } catch (e) { return -1; } })()}]\\n`'
+            )
+            + '  let $=new Set;'
+        )
+        splice(qno_old, qno_new, f'X2.b filterOrphaned entry ({qno_name})')
+
     new_data = bun_handler.repack_with_js(data, js.encode('utf-8', errors='surrogateescape'))
     print(f"\nfinal JS: {len(js)} bytes")
     print(f"binary:   {len(new_data)} bytes (delta {len(new_data) - len(data):+d})")
