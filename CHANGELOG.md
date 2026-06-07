@@ -14,24 +14,41 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` (that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`).
 
-## v1.9-dev: seamClean becomes its own marker kind
+## v1.9-dev: recovery markers redesigned as cards
 
-The clean in-file compaction now renders as its own marker kind, `seamClean`,
-distinct from the phantom-reattach `seam`.
+The Patch K recovery markers, previously colored text, now render as cards: a
+header with the state badge and a counter you can click to cycle between
+markers, a small diagram of where the conversation chain broke or was stitched
+back together, the supporting figures, and a written explanation. All five
+markers (bookend, broken, seam, seamClean, bridge) now share one diagram style,
+and the judgment that decides which marker to show was made more accurate.
 
-- **Own role and prefix.** A resolved same-file crossing mints a
-  `pfgk-seamClean-` ghost and renders `data-pfgk-role="seamClean"` / class
-  `pfgk-seamClean` with the slate `◇ IN-FILE COMPACTION` badge. It previously
-  folded under `role="seam"`, which left the `[data-pfgk-role="seamClean"]`
-  probe permanently empty and conflated the two crossings outside the badge.
-- **`kind` payload field.** The opaque PFGK1 field `dg` ("diagram") is renamed
-  `kind`, and the duplicate render vars `_dge`/`_dg` collapse into one `_kind`.
-  camelCase throughout, which keeps the uuid prefix-match unambiguous.
+- **A diagram on every marker, in one style.** Each marker draws the shape of
+  the chain it describes (the lost run trailing off, the reattachment, the
+  cross-file link), and all five are drawn the same way so they read consistently
+  from card to card.
+- **Fewer false "incomplete transcript" warnings.** A transcript used to be
+  called incomplete whenever its first record was not an ordinary message, which
+  wrongly flagged sessions that begin with a slash command and ordinary in-file
+  compactions. It is now called incomplete only when the history actually
+  dead-ends at a missing ancestor.
+- **Cross-file compactions judged by where the parent lives.** A compaction is
+  marked as reaching across files only when its pre-compaction parent genuinely
+  lives in a different file, which stops a pulled-in sibling's own compactions
+  from being mislabeled.
+- **The clean in-file compaction is its own marker, `seamClean`.** A healthy
+  compaction whose history is all in one file now shows in calm slate with a
+  neutral "in-file compaction" badge, plainly distinct from the amber "in-file
+  reattach" warning it used to be lumped under. (The payload field that selects
+  the marker was renamed from `dg` to `kind`.)
+- **The seam no longer overstates completeness.** It marks one in-file
+  compaction and no longer claims "no persisted message is dropped"; only the
+  fully-recovered bookend can honestly say that.
+- **Smaller fixes.** The stitching wall-clock moved to its own line; the
+  seamClean diagram's crowded labels were spaced out; a dead color key and a
+  stray layout gap were removed.
 
-`prebuilt/2.1.159` regenerated, byte-stable (24 splices, unchanged count).
-DOM-verified end-to-end over CDP: a clean-crossing fixture renders
-`data-pfgk-role="seamClean"` with the slate badge, distinct from the amber
-`⚠ IN-FILE REATTACH` seam, and a payload nonce confirms a fresh re-walk.
+Verified live in the IDE, and checked against several hundred existing sessions.
 
 ## v1.8 (2026-06-02): more robust data-loss indication
 

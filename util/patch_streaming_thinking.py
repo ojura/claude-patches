@@ -650,22 +650,35 @@ def main():
             'E1 aggregator wrap',
         )
 
-        # X1: instrument the user-interrupt-on-submit site. Anchor on the
-        # debug log string '[interrupt] Aborting current turn:' which is
-        # unique. Inject a marker line before the existing tengu_cancel
-        # telemetry call so we can see when an interrupt fires. The
-        # surrounding stream-thinking state shows up via the adjacent L1/C2
-        # render logs (correlate by timestamp); X1 itself fires once per
-        # interrupt to make the moment greppable in the log.
+        # X1: instrument the bare-Escape chat:cancel useCallback handler.
+        # Earlier attempts anchored on the interrupt-on-submit path, which
+        # is gated behind H.hasInterruptibleToolInProgress and only fires
+        # when a TOOL is in flight; bare Escape during text streaming
+        # takes a different path that bypasses that gate. The chat:cancel
+        # handler builds a telemetry payload with source:"escape", and
+        # that literal is unique to this handler (verified empirically).
+        # Discover the cancel-source-converter function name (commonly
+        # minified as `P$`) so the splice survives release-to-release
+        # minified-name drift. Inject a self-logging IIFE that wraps the
+        # P$("escape") call, preserving the original semantics while
+        # firing X1 on every chat:cancel invocation.
+        cancel_src_match = re.search(
+            r'source:([A-Za-z_$][\w$]*)\("escape"\),streamMode:',
+            js,
+        )
+        if cancel_src_match is None:
+            raise SystemExit('[X1] chat:cancel source anchor not found')
+        cancel_src_fn = cancel_src_match.group(1)
         splice(
-            'N(`[interrupt] Aborting current turn: streamMode=${H.streamMode}`);',
-            'N(`[interrupt] Aborting current turn: streamMode=${H.streamMode}`);\n'
-            '  /* pfg-instr X1: fires at the moment user-input interrupt is processed. */\n'
+            f'source:{cancel_src_fn}("escape"),streamMode:',
+            f'source:(() => {{\n'
+            '    /* pfg-instr X1: chat:cancel useCallback fired (bare Escape during streaming). */\n'
             + logwrite(
-                '`[pfg-instr X1 interrupt source=submit streamMode=${H.streamMode}]\\n`'
+                '`[pfg-instr X1 cancel handler=chat-cancel source=escape]\\n`'
             )
-            + '  ',
-            'X1 interrupt-on-submit',
+            + f'    return {cancel_src_fn}("escape");\n'
+            '  })(),streamMode:',
+            f'X1 chat:cancel handler ({cancel_src_fn})',
         )
 
         # X2.a: wrap pOA = filterTrailingThinkingFromLastAssistant. The
