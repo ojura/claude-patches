@@ -14,6 +14,25 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` (that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`).
 
+## v1.9-dev: seamClean becomes its own marker kind
+
+The clean in-file compaction now renders as its own marker kind, `seamClean`,
+distinct from the phantom-reattach `seam`.
+
+- **Own role and prefix.** A resolved same-file crossing mints a
+  `pfgk-seamClean-` ghost and renders `data-pfgk-role="seamClean"` / class
+  `pfgk-seamClean` with the slate `◇ IN-FILE COMPACTION` badge. It previously
+  folded under `role="seam"`, which left the `[data-pfgk-role="seamClean"]`
+  probe permanently empty and conflated the two crossings outside the badge.
+- **`kind` payload field.** The opaque PFGK1 field `dg` ("diagram") is renamed
+  `kind`, and the duplicate render vars `_dge`/`_dg` collapse into one `_kind`.
+  camelCase throughout, which keeps the uuid prefix-match unambiguous.
+
+`prebuilt/2.1.159` regenerated, byte-stable (24 splices, unchanged count).
+DOM-verified end-to-end over CDP: a clean-crossing fixture renders
+`data-pfgk-role="seamClean"` with the slate badge, distinct from the amber
+`⚠ IN-FILE REATTACH` seam, and a payload nonce confirms a fresh re-walk.
+
 ## v1.8 (2026-06-02): more robust data-loss indication
 
 Refactors the recovery markers (Patch D walker, Patch K markers).
