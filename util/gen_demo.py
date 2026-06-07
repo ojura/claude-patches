@@ -58,6 +58,24 @@ seam=[title_rec(sid_s,"PFGK DEMO seam: in-file phantom reattach marker (syntheti
  asst_rec(s_a2,s_u2,sid_s,CWD,"Continuing after the in-file compaction boundary."),
  leaf_rec(sid_s,s_a2)]
 ps=write(PROJ_DIR,sid_s,seam)
+
+# SEAMCLEAN: compact_boundary whose logicalParentUuid resolves to an IN-FILE
+#   predecessor in the same .jsonl => kind:"seamClean" (clean in-file crossing,
+#   no phantom). A unique NONCE in the message text lets a render probe assert
+#   the transcript actually re-rendered fresh (not a stale/rehydrated tab).
+NONCE="PFGKNONCE"+uuid.uuid4().hex[:12]
+sid_sc=u()
+sc_u1,sc_a1,sc_cb,sc_u2,sc_a2=u(),u(),u(),u(),u()
+seamclean=[title_rec(sid_sc,"PFGK DEMO seamClean: clean in-file compaction marker (synthetic)"),
+ user_rec(sc_u1,None,sid_sc,CWD,"PFGK DEMO (seamClean) "+NONCE+". In-file compaction whose logical parent IS persisted in this file, to exercise the clean in-file crossing marker."),
+ asst_rec(sc_a1,sc_u1,sid_sc,CWD,"Acknowledged, synthetic clean in-file compaction. "+NONCE),
+ compact_rec(sc_cb,sc_a1,sid_sc,[sc_u1,sc_a1]),
+ user_rec(sc_u2,sc_cb,sid_sc,CWD,"Continue after the clean compaction. "+NONCE),
+ asst_rec(sc_a2,sc_u2,sid_sc,CWD,"Continuing after the clean in-file compaction boundary.")]
+seamclean.append(leaf_rec(sid_sc,sc_a2))
+psc=write(PROJ_DIR,sid_sc,seamclean)
+
 print("project dir:",os.path.expanduser("~/.claude/projects/"+PROJ_DIR))
-print("BROKEN:",sid_b,"->",pb)
-print("SEAM:  ",sid_s,"->",ps)
+print("BROKEN:   ",sid_b,"->",pb)
+print("SEAM:     ",sid_s,"->",ps)
+print("SEAMCLEAN:",sid_sc,"-> NONCE",NONCE,"->",psc)
