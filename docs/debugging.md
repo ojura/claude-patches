@@ -786,6 +786,12 @@ one session:
 
 ### Preact signals everywhere, even fields that look like primitives
 
+These are `@preact/signals-react` signals layered on a React 18 root (the webview
+mounts with `createRoot` from `react-dom`), NOT Preact-the-framework: the `.value`
+/ `.peek()` API and the equality traps below are real, but the renderer is React
+(the fiber-walk recipes use `__reactContainer$`, not Preact's `__k`), so don't go
+hunting for a Preact reconciler that isn't there.
+
 All reactive state is `{value: T, peek(), subscribe(...)}`. To read:
 
 ```js
@@ -1066,7 +1072,10 @@ then can overrun the ws message-size limit on the inline profile and never retur
 `Tracing.tracingComplete` (Chrome serializing the whole buffer to JSON) and can
 hang for minutes or never return, independent of buffer fill. Proto serializes
 fast: a 247MB full-render trace finalized instantly and drained in ~8s. Decode
-it with the standalone shell (the `perfetto` pip lib is blocked by PEP 668 here):
+it with the standalone shell (the `perfetto` pip lib is blocked by PEP 668 here).
+The curl below fetches a ~10KB launcher shim; the first `trace_processor` run
+network-fetches the real binary, so decode needs network and an offline first run
+looks like a hang there:
 
 ```sh
 curl -sL https://get.perfetto.dev/trace_processor -o /tmp/trace_processor && chmod +x /tmp/trace_processor
@@ -1106,10 +1115,14 @@ report is the only heartbeat during the freeze.
 fresh-relaunch startup does NOT auto-render a large session within the window
 (the threads sit idle). So: start the trace, THEN remount the open tab (Step 6b)
 or open the session via the panel (Step 6a), THEN poll bodyLen to detect
-completion. The bodyLen poll blocking for the whole render IS the proof that it
-is one synchronous main-thread block. Settle-guard before a remount: wait for the
-tab's bodyLen to stabilize-high first, so close+reopen does not race a render
-already in progress.
+completion. The bodyLen poll blocking for the whole render proves the main thread
+is continuously busy (it cannot service even an idle eval), which is why the
+browser-socket buffer report is the only heartbeat; it does NOT prove a single
+synchronous JS statement, since the cost is ~8,850 forced native layouts (see the
+parentage decode below), not one JS call. Corroborate single-versus-many task with
+a `toplevel` / `RunTask` slice count, not the poll. Settle-guard before a remount:
+wait for the tab's bodyLen to stabilize-high first, so close+reopen does not race a
+render already in progress.
 
 **Open the RIGHT session: the panel row is not the tab title.** The tab shows a
 custom name (`[main] claude-patches session-rename: ...`); the panel shows the
@@ -1169,14 +1182,17 @@ conversations panel and chat tabs failed to mount, and it SURVIVED a normal rest
 because the bad state is on disk, not in memory. That `InvalidStateError` log line
 is the specific signal; a bare `panel_ready` -> `PANEL_NOT_FOUND` is not (the panel
 fails to mount for other reasons too). What cleared it, IDE down, was moving the
-Service Worker dir aside (whichever product-name dir has one) and relaunching so the
-IDE regenerates a clean one:
+Service Worker dir aside and relaunching so the IDE regenerates a clean one. Do
+NOT hardcode the product dir (VS Code / Cursor / VSCodium differ, and a hardcoded
+miss silently no-ops, looking like success); find it under the user-data root:
 
 ```sh
 # IDE must be down first. mv aside, not rm: restorable if it doesn't help.
-for D in "$HOME/.config/Antigravity" "$HOME/.config/Antigravity IDE"; do
-  [ -d "$D/Service Worker" ] && mv "$D/Service Worker" "$D/Service Worker.bak.$(date +%s)"
+find "$HOME/.config" -maxdepth 2 -type d -name 'Service Worker' | while read -r D; do
+  mv "$D" "$D.bak.$(date +%s)"
 done
+# After relaunch, VERIFY: panel mounts AND the InvalidStateError is gone from the
+# new webview log. If it recurs, the moved dir was not the live one; widen the search.
 ```
 
 **Quit gracefully; don't hard-kill to restart.** `File -> Quit` (Ctrl+Q via
