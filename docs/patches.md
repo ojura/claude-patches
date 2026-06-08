@@ -11,6 +11,18 @@ Each patch is described with:
 For the literal patch text and step-by-step locator instructions, see
 [`../skill/SKILL.md`](../skill/SKILL.md).
 
+**Verifying patches are loaded.** The `/*pfg-vN*/` signature comment marks the
+extension-host bundle (`extension.js`); grep it there to confirm the exthost
+patches. The webview patches (B, I, K) carry NO `pfg-v` comment, so an exthost
+grep reads them as "not installed" even when they are live. The one stable
+greppable webview witness is Patch K's `pfgk-` marker prefix (an injected
+constant, not a vendor symbol, so it does not drift). Patches B and I leave no
+signature comment and no stable token, CSS-module hashes (the message-row class)
+and minified function names (the render-cap fn) both drift per build, so verify
+those by structure per each patch's Fix shape (Patch I: the render cap is neutered
+to an identity that returns its argument). A non-empty exthost signature with no
+webview `pfgk-` marker is the normal, fully-applied state.
+
 ---
 
 ## Patch A: `forkSession` writes a `custom-title` rescue
@@ -501,11 +513,18 @@ The bundled function name (`OD`) and the constants (`g20`, `u20`) drift
 between releases, so locate by structure (the `slice($.length - u20)`
 shape is distinctive).
 
-**Caveat**: rendering 10K+ messages takes a few seconds at first paint.
-The bottleneck is React reconciliation, not the patch. If first-paint
-latency becomes painful, partial mitigation: keep a generous cap (e.g.
-`if ($.length > 10000) return $.slice(-10000)`, much higher than 500
-but still bounded).
+**Caveat**: rendering 10K+ messages is slow at first paint (1-2 minutes for a
+16.8K-message session). The cost is native Blink style+layout forced
+synchronously, NOT React reconciliation: a CDP trace shows ~155s of ~164s in
+`Layout` + `UpdateLayoutTree` with the V8 CPU profile mostly `(program)`/`(idle)`,
+and the `Layout` slices nested under JS `FunctionCall` parents (~8,850 forced
+reflows). Mitigations are at the render layer (default-collapse old tool groups,
+CSS `content-visibility` containment, or windowing), not React-level memoization.
+A lower cap (`if ($.length > 10000) return $.slice(-10000)`) reduces N roughly
+linearly but reintroduces the silent truncation this patch removes and still
+leaves a multi-second forced reflow at 10K rows, so prefer collapse/containment.
+See the forced-layout finding and the render-trace recipe in
+[debugging.md](debugging.md#performance-profiling-a-render-via-cdp).
 
 **Upstream issue**: [#55701](https://github.com/anthropics/claude-code/issues/55701)
 

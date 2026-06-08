@@ -1036,6 +1036,167 @@ the patch-claude skill uses.
 
 ---
 
+## Performance profiling a render via CDP
+
+The webview's render of a large chat session can freeze the main thread for
+minutes. To find where the time goes, capture a Chrome trace across the render
+and decode it with perfetto's `trace_processor`. (The Profiler note under the
+`scriptParsed` gotcha is for coverage, not perf; this is the perf workflow.)
+Each point below was a wall hit first. The runnable capture + decode scripts live
+next to this doc in [recipes/render-trace/](recipes/render-trace/); on the 2.1.159
+transcript render they measured forced synchronous layout (~8,850 JS-triggered
+reflows, ~155s of ~164s style+layout), the finding the parentage split below
+proves.
+
+**Drive Tracing from the BROWSER socket, never a per-target Profiler.** A long
+synchronous render BLOCKS the webview's main thread, and any CDP command routed
+to that target (`Profiler.stop`, an `IO.read` on the target, even an idle
+`Runtime.evaluate`) queues behind the block; the per-target ws can also
+idle-close during the freeze. The browser-level endpoint stays responsive
+throughout, so `Tracing.start`/`Tracing.end` and the result stream survive it:
+
+```sh
+BROWSER=$(curl -s http://127.0.0.1:9222/json/version | python3 -c 'import sys,json;print(json.load(sys.stdin)["webSocketDebuggerUrl"])')
+```
+
+A per-target `Profiler.stop` does not survive: it queues until the thread frees,
+then can overrun the ws message-size limit on the inline profile and never return.
+
+**Use `streamFormat: 'proto'`, not `'json'`.** A large JSON trace stalls at
+`Tracing.tracingComplete` (Chrome serializing the whole buffer to JSON) and can
+hang for minutes or never return, independent of buffer fill. Proto serializes
+fast: a 247MB full-render trace finalized instantly and drained in ~8s. Decode
+it with the standalone shell (the `perfetto` pip lib is blocked by PEP 668 here):
+
+```sh
+curl -sL https://get.perfetto.dev/trace_processor -o /tmp/trace_processor && chmod +x /tmp/trace_processor
+```
+
+**Size the buffer with `traceConfig.traceBufferSizeInKb`.** It lives in the
+legacy `traceConfig`, so you do NOT need a `perfettoConfig` just to enlarge it.
+With JSON, Chrome will not finalize a near-full buffer (tracingComplete hangs), and
+the default is small (CDP documents 200MB), so a long trace hits that wall; an
+over-large 800MB buffer instead makes finalize slow. With proto the buffer stops
+driving the hang, so ~500-600MB (what the capture scripts pass) is comfortable.
+
+**Categories:** `disabled-by-default-v8.cpu_profiler` (JS samples),
+`devtools.timeline` (Layout / UpdateLayoutTree / Paint / FunctionCall, the LEAF
+work), `v8` (GC), `toplevel` (task tree). For a layout-bound render the
+cpu_profiler is mostly `(program)`/`(idle)` (the main thread is in native Blink
+layout, not JS); the `devtools.timeline` slices hold the real answer.
+
+**Stream chunks straight to a file descriptor; never build the trace in a JS
+string.** `data += chunk` over a >~500MB trace throws `Invalid string length`
+(V8 caps strings near 512MB) and writes nothing. `fs.openSync(out,'w')` then
+`fs.writeSync(fd, buf)` per `IO.read` chunk handles any size.
+
+**Detect a stall, do not hang on it.** Wrap the `tracingComplete` wait and every
+`IO.read` in `Promise.race([call, timeout(ms,'STUCK_...')])` and exit non-zero on
+the timeout. A wedged capture otherwise looks identical to a slow one (you stare
+at a static file).
+
+**Keep it live.** Pass `bufferUsageReportingInterval` and print
+`Tracing.bufferUsage.percentFull`; print drained MB during the `IO.read` loop. A
+`document.body.innerText.length` poll (bodyLen below) cannot be your liveness
+signal: it BLOCKS behind the synchronous
+render and returns nothing until the block ends, so the browser-socket buffer
+report is the only heartbeat during the freeze.
+
+**Trigger the render INSIDE the trace.** The render only runs on a (re)mount; a
+fresh-relaunch startup does NOT auto-render a large session within the window
+(the threads sit idle). So: start the trace, THEN remount the open tab (Step 6b)
+or open the session via the panel (Step 6a), THEN poll bodyLen to detect
+completion. The bodyLen poll blocking for the whole render IS the proof that it
+is one synchronous main-thread block. Settle-guard before a remount: wait for the
+tab's bodyLen to stabilize-high first, so close+reopen does not race a render
+already in progress.
+
+**Open the RIGHT session: the panel row is not the tab title.** The tab shows a
+custom name (`[main] claude-patches session-rename: ...`); the panel shows the
+auto-summary, and the panel search tokenizes (searching `rename` misses
+`session-rename`; search a prefix). Map reliably by reading the manager's session
+list off the fiber, then 6a-click the row by a distinctive needle:
+
+```js
+// inner active-frame: BFS the fiber for memoizedProps.sessions (the session manager)
+const root=document.querySelector('#root');
+const fk=Object.keys(root).find(k=>k.startsWith('__reactContainer$'));
+let q=[root[fk]],found=null;
+while(q.length&&!found){const f=q.shift();if(!f)continue;
+  if(f.memoizedProps&&f.memoizedProps.sessions)found=f.memoizedProps.sessions;
+  else{if(f.child)q.push(f.child);if(f.sibling)q.push(f.sibling);}}
+// `found` is the session MANAGER, not the list; its `.sessions` is a signal:
+//   const list = found.sessions.peek ? found.sessions.peek() : found.sessions.value;
+// list -> array of {sessionId, summary, ...}
+```
+
+**Decode one query per load.** Invoke as `trace_processor <trace-file> -q
+<queries.sql>` (trace file positional, SQL file after `-q`); it errors with "only
+the final statement is a SELECT" if the SQL file holds several row-returning
+queries, so run them separately. Leaf breakdown: `select name, count(*), sum(dur) from slice
+group by name order by sum(dur) desc`. `AnimationFrame` / `RunTask` /
+`v8.callFunction` are PARENT slices containing everything nested; compare LEAF
+slices (`Layout`, `UpdateLayoutTree`, `Paint`) for the real apportionment.
+
+**Leaf totals tell you it is layout-bound; slice PARENTAGE tells you it is
+FORCED**, and that is the cause-level measurement. A `Layout` leaf whose parent is
+a JS `FunctionCall` / `v8.callFunction` is a forced synchronous reflow (layout
+thrashing); one whose parent is `ThreadControllerImpl::RunTask` is a natural
+lifecycle layout. Split them: `select p.name parent, count(*) n, sum(s.dur)/1e9
+sec from slice s join slice p on s.parent_id=p.id where s.name='Layout' group by
+p.name order by sec desc`. On the 2.1.159 transcript render this returned ~88.9s
+of `Layout` under `FunctionCall` (~8,852 forced reflows) versus ~5.5s under
+`RunTask`, a 16:1 forced:natural split that proves forced synchronous layout, not
+intrinsic big-DOM cost. Do NOT infer the mechanism from leaf totals or from a
+time-bin `max(dur)` climb: that climb is real here only because this render is one
+monotonic non-yielding pass, and a generic `max(dur)` without `where name='Layout'`
+is polluted by parent `RunTask` slices. The forcing function is in the
+`FunctionCall` args (`debug.data.url`, `debug.data.lineNumber`); the per-reflow
+scope is in the `Layout` args (`beginData.totalObjects`, `partialLayout`,
+`layoutRoots[0].nodeName`, where `#document` plus `partialLayout=0` is a
+full-document reflow). For per-Layout invalidation reasons add the
+`disabled-by-default-devtools.timeline.invalidationTracking` category.
+
+---
+
+## Recovering a wedged IDE / broken webview
+
+**Hard kills can corrupt the webview service worker.** Seen once after repeated
+SIGKILL / racing relaunch cycles: the on-disk webview service-worker state went
+invalid and the webview logged `Could not register service worker:
+InvalidStateError: ... document is in an invalid state`. With the SW wedged, the
+conversations panel and chat tabs failed to mount, and it SURVIVED a normal restart
+because the bad state is on disk, not in memory. That `InvalidStateError` log line
+is the specific signal; a bare `panel_ready` -> `PANEL_NOT_FOUND` is not (the panel
+fails to mount for other reasons too). What cleared it, IDE down, was moving the
+Service Worker dir aside (whichever product-name dir has one) and relaunching so the
+IDE regenerates a clean one:
+
+```sh
+# IDE must be down first. mv aside, not rm: restorable if it doesn't help.
+for D in "$HOME/.config/Antigravity" "$HOME/.config/Antigravity IDE"; do
+  [ -d "$D/Service Worker" ] && mv "$D/Service Worker" "$D/Service Worker.bak.$(date +%s)"
+done
+```
+
+**Quit gracefully; don't hard-kill to restart.** `File -> Quit` (Ctrl+Q via
+`Input.dispatchKeyEvent`, modifiers `Ctrl=2`, key `Q` keyCode 81) shuts the
+window down cleanly and flushes the SW state; a SIGKILL is what corrupts it.
+Reserve process kills for a truly hung IDE.
+
+**The real Electron binary sits at the install root** (alongside `resources/` and
+`locales/`), not at `bin/antigravity-ide`, which is a launcher wrapper; a
+`pgrep`/kill matching `bin/...` never hits the main process. Kill by the process
+owning the debug port, or by the full install-root binary path excluding your own
+pid. And do NOT `pgrep -f <string>` when your own command line contains that
+string: `pgrep -f tracer8.mjs` inside a script whose body runs `node tracer8.mjs`
+lists your own shell's pid, and the `kill` that consumes that list then signals
+your own shell, so the run dies mid-script. (pgrep only prints pids; the following
+`kill` is what sends the signal.) Same self-match the "never pkill -f" rule warns
+about.
+
+---
+
 ## Patch development iteration loop
 
 The canonical loop for editing live extension files and verifying the result
@@ -1978,10 +2139,12 @@ conn.outstandingRequests.clear();
 
 After clearing, fresh `sendRequest` calls work normally.
 
-Prevention: kill cleanly with `pkill -f eval_in_inner_frame.mjs`
-before retrying; finalize-on-exit cancels the request.
-Alternatively wrap `eval_in_inner_frame.mjs` invocations in
-`timeout <N>` to bound their lifetime.
+Prevention: prefer the in-frame `cancelRequest` clean path above, or wrap
+`eval_in_inner_frame.mjs` invocations in `timeout <N>` to bound their lifetime. Do
+NOT `pkill -f eval_in_inner_frame.mjs`: it self-matches any wrapper shell whose
+command line contains that string (the same self-match the "never pkill -f" rule
+warns about, see the self-`pgrep` note in the performance section); if a kill is
+truly needed, target the specific child pid.
 
 ### Don't clear the `>` prefix when typing into command palette
 
