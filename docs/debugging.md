@@ -1294,81 +1294,7 @@ for t in json.load(sys.stdin):
 echo "workbench page: $PAGE"
 
 # Write and run the reload script
-cat > /tmp/reload_go.mjs << 'EOF'
-const wsUrl = `ws://127.0.0.1:9222/devtools/page/${process.argv[2]}`;
-const ws = new WebSocket(wsUrl);
-let nextId = 1; const pending = new Map();
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-ws.addEventListener('message', ev => {
-  const msg = JSON.parse(ev.data);
-  if (msg.id && pending.has(msg.id)) {
-    const {resolve, reject} = pending.get(msg.id); pending.delete(msg.id);
-    if (msg.error) reject(msg.error); else resolve(msg.result);
-  }
-});
-function call(method, params={}) {
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    pending.set(id, {resolve, reject});
-    ws.send(JSON.stringify({id, method, params}));
-  });
-}
-await new Promise(r => ws.addEventListener('open', r));
-// FOCUS RECOVERY first: a broken chrome-error iframe (from an earlier botched
-// reload) captures focus and silently swallows the later Enter, so the reload
-// no-ops. Escape, then a REAL mouse click on workbench chrome (titlebar or
-// statusbar rect, never an iframe), restores focus to the workbench.
-await call('Input.dispatchKeyEvent', {type:'rawKeyDown', key:'Escape', code:'Escape', keyCode:27, windowsVirtualKeyCode:27});
-await call('Input.dispatchKeyEvent', {type:'keyUp', key:'Escape', code:'Escape', keyCode:27, windowsVirtualKeyCode:27});
-await sleep(120);
-const _rc = JSON.parse((await call('Runtime.evaluate', {expression:
-  '(()=>{const s=document.querySelector(".part.titlebar")||document.querySelector(".statusbar");const r=s?s.getBoundingClientRect():{left:300,top:6,width:0,height:0};return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)})})()',
-  returnByValue:true})).result.value);
-await call('Input.dispatchMouseEvent', {type:'mousePressed', x:_rc.x, y:_rc.y, button:'left', clickCount:1});
-await call('Input.dispatchMouseEvent', {type:'mouseReleased', x:_rc.x, y:_rc.y, button:'left', clickCount:1});
-await sleep(200);
-// Open command palette with Ctrl+Shift+P (modifiers: Ctrl=2, Shift=8 → 10)
-await call('Input.dispatchKeyEvent', {type:'rawKeyDown', modifiers:10,
-  key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
-await call('Input.dispatchKeyEvent', {type:'keyUp', modifiers:10,
-  key:'P', code:'KeyP', keyCode:80, windowsVirtualKeyCode:80});
-await sleep(400);
-// Verify palette opened
-const after = JSON.parse((await call('Runtime.evaluate', {expression:
-  '(()=>{const w=document.querySelector(".quick-input-widget");return JSON.stringify({open:!!w,val:(w&&w.querySelector("input"))?.value})})()',
-  returnByValue:true})).result.value);
-if (!after.open) { console.log("ABORT: palette did not open"); ws.close(); process.exit(1); }
-// Type the command without clearing the ">" prefix
-await call('Input.insertText', {text: 'Developer: Reload Window'});
-await sleep(400);
-// Verify the SELECTED row (.monaco-list-row.focused), not just the first row,
-// IS the command, AND that the palette input still holds focus. A broken
-// chrome-error iframe steals focus and silently swallows the Enter, so the
-// reload no-ops (see the Focus-lost-to-broken-iframe gotcha; recover focus
-// with a real mouse click on workbench chrome first).
-const st = JSON.parse((await call('Runtime.evaluate', {expression:
-  '(()=>{const w=document.querySelector(".quick-input-widget");const f=w&&w.querySelector(".quick-input-list .monaco-list-row.focused");const a=document.activeElement;return JSON.stringify({active:a?a.tagName+"/"+(a.className||"").slice(0,30):null,selected:f?f.textContent.slice(0,60).trim():null})})()',
-  returnByValue:true})).result.value);
-if (!/INPUT/.test(st.active||'')) {
-  console.log('ABORT: focus on', st.active, '(broken iframe; recover then retry)'); ws.close(); process.exit(1);
-}
-if (!st.selected || !st.selected.startsWith('Developer: Reload Window')) {
-  console.log('ABORT: selected row is', st.selected); ws.close(); process.exit(1);
-}
-console.log('selected row:', st.selected);
-try {
-  await call('Input.dispatchKeyEvent', {type:'rawKeyDown', key:'Enter',
-    code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
-  await call('Input.dispatchKeyEvent', {type:'keyUp', key:'Enter',
-    code:'Enter', keyCode:13, windowsVirtualKeyCode:13});
-  // Enter was DISPATCHED. That is NOT confirmation the window reloaded: if a
-  // broken iframe still had focus, or the row was not actually selected, this
-  // is a silent no-op. Confirm separately (Step 5: the chat iframe target id
-  // changes; Step 3: the exthost comes back fresh). Never treat this as success.
-  console.log('ENTER DISPATCHED (NOT confirmed; verify via Step 5 + Step 3)');
-} catch (e) { console.log('enter dispatch error:', e && e.message); }
-ws.close();
-EOF
+cp docs/recipes/misc/reload_go.mjs /tmp/
 node /tmp/reload_go.mjs "$PAGE"
 ```
 
@@ -1542,45 +1468,7 @@ not need to reload the window for the panel to list a brand-new session.
 ```sh
 # Open the activity-bar panel, search a title, dump matching rows.
 # WB = the workbench top-level page (NOT an iframe, NOT Launchpad).
-cat > /tmp/panel_ready.mjs <<'EOF'
-import http from 'node:http';
-const WB=process.argv[2];                       // ws://127.0.0.1:9222/devtools/page/<workbench-page-id>
-const NEEDLE=process.argv[3]||'';               // title substring to search/list
-const getJSON=p=>new Promise((res,rej)=>{http.get('http://127.0.0.1:9222'+p,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(JSON.parse(d)));}).on('error',rej);});
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function withWS(wsUrl,fn){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl);let nid=1;const pend=new Map();const ctx=[];ws.addEventListener('message',ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(m.error):res(m.result);}else if(m.method==='Runtime.executionContextCreated')ctx.push(m.params.context);});const call=(method,params={})=>{const id=nid++;return new Promise((res,rej)=>{pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}));});};ws.addEventListener('open',async()=>{try{const r=await fn(call,ctx);ws.close();resolve(r);}catch(e){ws.close();reject(e);}});ws.addEventListener('error',e=>reject(e));setTimeout(()=>{try{ws.close();}catch(_){}reject(new Error('to'));},7000);});}
-const wbEval=expr=>withWS(WB,async call=>{await call('Runtime.enable');const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true});return r.result.value;});
-async function inActive(wsUrl,expr){return withWS(wsUrl,async(call,ctx)=>{await call('Page.enable');await call('Runtime.enable');await sleep(600);const tree=await call('Page.getFrameTree');const fr=[];(function w(n){if(n.frame)fr.push(n.frame);(n.childFrames||[]).forEach(w);})(tree.frameTree);const inner=fr.find(f=>f.name==='active-frame');if(!inner)return {__noframe:1};const c=ctx.find(x=>x.auxData&&x.auxData.frameId===inner.id&&!x.name&&x.origin);if(!c)return {__noctx:1};const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true,contextId:c.id});return r.result.value;}).catch(e=>({__err:String(e.message||e)}));}
-// 1. wait for the workbench to be back (activity-bar present)
-let ready=false;
-for(let i=0;i<30;i++){try{if(await wbEval(`document.querySelectorAll('.activitybar [aria-label="Claude Code"]').length`)>0){ready=true;break;}}catch(e){}await sleep(1500);}
-if(!ready){console.log('WB_NOT_READY');process.exit(1);}
-// 2-3. Open the panel ONLY if it is not already open, then bind its iframe.
-// The activity-bar click is a TOGGLE: clicking it while the view is already
-// active CLOSES the panel and clobbers the user's open panel. So probe for the
-// panel iframe (the index.html iframe with a Search box) FIRST, and click the
-// activity-bar to open it ONLY when it is absent.
-const findPanel=async()=>{
-  for(const f of (await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'))){
-    if(await inActive(f.webSocketDebuggerUrl,`!!document.querySelector('input[placeholder*="Search" i]')`)===true) return f.webSocketDebuggerUrl;
-  }
-  return null;
-};
-let panelWs=await findPanel();
-if(!panelWs){                                   // panel closed -> open it (single click)
-  await wbEval(`(function(){var t=document.querySelector('.activitybar .action-item a[aria-label="Claude Code"],.activitybar [aria-label="Claude Code"]');if(t)t.click();return !!t;})()`);
-  await sleep(2000);
-  for(let i=0;i<12 && !panelWs;i++){ panelWs=await findPanel(); if(!panelWs) await sleep(1200); }
-}
-if(!panelWs){console.log('PANEL_NOT_FOUND');process.exit(1);}
-// 4. set the search box (native setter + input event so React sees it)
-await inActive(panelWs,`(function(){var inp=document.querySelector('input.search,.filterInput_90gk3A,input[placeholder*="Search" i]');var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'');inp.dispatchEvent(new Event('input',{bubbles:true}));s.call(inp,${JSON.stringify(NEEDLE)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.focus();return inp.value;})()`);
-await sleep(900);
-// 5. dump matching rows (and click the first exact-ish match)
-const rows=await inActive(panelWs,`(function(){var out=[],seen={};for(var e of document.querySelectorAll('div,li,a,button')){var t=(e.innerText||'').replace(/\\s+/g,' ').trim();if(t.length>10&&t.length<170&&t.indexOf(${JSON.stringify(NEEDLE)})>=0&&e.children.length<=8&&!seen[t]){seen[t]=1;out.push(t.slice(0,95));}}return out;})()`);
-console.log('PANEL_WS='+panelWs);
-console.log('ROWS='+JSON.stringify(rows));
-EOF
+cp docs/recipes/panel-open/panel_ready.mjs /tmp/
 
 # Discover the workbench page id, then run. Capture PANEL_WS from the output
 # (panel_ready.mjs PRINTS it; it is not exported), since the next block needs it:
@@ -1599,22 +1487,7 @@ must be set in the SAME shell, or re-derive it (the one-shot block above threads
 it for you):
 
 ```sh
-cat > /tmp/click_convo.js <<'JS'
-(function(){
-  var needle=NEEDLE, rows=[...document.querySelectorAll('div,li,a,button')], target=null;
-  for(var e of rows){var t=(e.innerText||'').replace(/\s+/g,' ').trim();
-    if(t.indexOf(needle)>=0 && t.length<220 && e.children.length<=8) target=e;}
-  if(!target) return {found:false};
-  var el=target;
-  for(var k=0;k<6 && el && el.parentElement;k++){
-    var c=String(el.className||'');
-    if(/row|item|session|card|listItem/i.test(c)||(el.getAttribute&&el.getAttribute('role')==='button')) break;
-    el=el.parentElement;
-  }
-  (el||target).click();
-  return {found:true, text:(target.innerText||'').replace(/\s+/g,' ').trim().slice(0,60)};
-})()
-JS
+cp docs/recipes/panel-open/click_convo.js /tmp/
 sed -i 's/NEEDLE/"PFGK DEMO seam"/' /tmp/click_convo.js
 # PANEL_WS printed by panel_ready.mjs above:
 node /tmp/eval_in_inner_frame.mjs "$PANEL_WS" @/tmp/click_convo.js

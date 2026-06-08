@@ -1110,134 +1110,19 @@ NEEDLE="PFGK DEMO seam"          # session title to open + verify
 R=http://127.0.0.1:9222          # renderer CDP HTTP endpoint (DOM side)
 
 # ---- helper: cdp-eval.mjs (one-shot Runtime.evaluate against any target) ----
-cat > /tmp/cdp-eval.mjs <<'EOF'
-const wsUrl = process.argv[2], exprArg = process.argv[3];
-const expression = exprArg.startsWith('@')
-  ? await (async () => { const fs = await import('node:fs/promises'); return fs.readFile(exprArg.slice(1), 'utf8'); })()
-  : exprArg;
-const ws = new WebSocket(wsUrl);
-let nextId = 1;
-const pending = new Map();
-ws.addEventListener('open', () => {
-  send('Runtime.enable', {}).then(() =>
-    send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true,
-                               allowUnsafeEvalBlockedByCSP: true, includeCommandLineAPI: true })
-  ).then(r => { console.log(JSON.stringify(r, null, 2)); ws.close(); });
-});
-ws.addEventListener('message', ev => {
-  const msg = JSON.parse(ev.data);
-  if (msg.id && pending.has(msg.id)) {
-    const { resolve, reject } = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(msg.error); else resolve(msg.result);
-  }
-});
-function send(method, params) {
-  const id = nextId++;
-  return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
-}
-EOF
+cp docs/recipes/lib/cdp-eval.mjs /tmp/
 
 # ---- helper: eval_in_inner_frame.mjs (drill into the active-frame React app) -
-cat > /tmp/eval_in_inner_frame.mjs <<'EOF'
-const wsUrl = process.argv[2];
-const expression = process.argv[3].startsWith('@')
-  ? await (async () => { const fs = await import('node:fs/promises'); return fs.readFile(process.argv[3].slice(1), 'utf8'); })()
-  : process.argv[3];
-const ws = new WebSocket(wsUrl);
-let nextId = 1, pending = new Map();
-const ctxEvents = [];
-ws.addEventListener('message', ev => {
-  const msg = JSON.parse(ev.data);
-  if (msg.id && pending.has(msg.id)) {
-    const { resolve, reject } = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(msg.error); else resolve(msg.result);
-  } else if (msg.method === 'Runtime.executionContextCreated') {
-    ctxEvents.push(msg.params.context);
-  }
-});
-function call(method, params={}) {
-  const id = nextId++;
-  return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
-}
-await new Promise(r => ws.addEventListener('open', r));
-await call('Page.enable');
-await call('Runtime.enable');
-await new Promise(r => setTimeout(r, 800));
-const tree = await call('Page.getFrameTree');
-function findInner(node, acc=[]) { if (node.frame) acc.push(node.frame); (node.childFrames||[]).forEach(c => findInner(c, acc)); return acc; }
-const allFrames = findInner(tree.frameTree);
-const innerFrame = allFrames.find(f => f.name === 'active-frame');
-if (!innerFrame) { console.error('FAIL: no name=active-frame'); process.exit(1); }
-const mainCtx = ctxEvents.find(c => c.auxData?.frameId === innerFrame.id && !c.name && c.origin);
-if (!mainCtx) { console.error('FAIL: no main-world context'); process.exit(1); }
-const r = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, contextId: mainCtx.id, includeCommandLineAPI: true });
-console.log(JSON.stringify(r, null, 2));
-ws.close();
-EOF
+cp docs/recipes/lib/eval_in_inner_frame.mjs /tmp/
 
 # ---- helper: pfg_markers.js (general marker probe) -------------------------
-cat > /tmp/pfg_markers.js <<'EOF'
-JSON.stringify({
-  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
-  bookend:   document.querySelectorAll('[data-pfgk-role="bookend"]').length,
-  seam:      document.querySelectorAll('[data-pfgk-role="seam"]').length,
-  seamClean: document.querySelectorAll('[data-pfgk-role="seamClean"]').length,
-  bridge:    document.querySelectorAll('[data-pfgk-role="bridge"]').length,
-  broken:    document.querySelectorAll('[data-pfgk-role="broken"]').length,
-  markerText:(() => { const c = document.querySelector(".pfgkAlert"); return c ? c.textContent.replace(/\s+/g, " ").trim().slice(0, 400) : null; })()
-})
-EOF
+cp docs/recipes/markers/pfg_markers.js /tmp/
 
 # ---- helper: click_convo.js (click a panel row by title needle) ------------
-cat > /tmp/click_convo.js <<'EOF'
-(function(){
-  var needle=NEEDLE;
-  var rows=[...document.querySelectorAll('div,li,a,button')],target=null;
-  for(var i=0;i<rows.length;i++){
-    var t=(rows[i].innerText||'').replace(/\s+/g,' ').trim();
-    if(t.indexOf(needle)>=0 && t.length<220 && rows[i].children.length<=8) target=rows[i];
-  }
-  if(!target) return {found:false};
-  var el=target;
-  for(var k=0;k<6 && el && el.parentElement;k++){
-    var c=String(el.className||'');
-    if(/row|item|session|card|listItem/i.test(c)||(el.getAttribute&&el.getAttribute('role')==='button')) break;
-    el=el.parentElement;
-  }
-  (el||target).click();
-  return {found:true, text:(target.innerText||'').replace(/\s+/g,' ').trim().slice(0,60)};
-})()
-EOF
+cp docs/recipes/panel-open/click_convo.js /tmp/
 
 # ---- helper: panel_ready.mjs (open activity-bar panel, search, print WS) ----
-cat > /tmp/panel_ready.mjs <<'EOF'
-import http from 'node:http';
-const WB=process.argv[2];
-const NEEDLE=process.argv[3]||'';
-const getJSON=p=>new Promise((res,rej)=>{http.get('http://127.0.0.1:9222'+p,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(JSON.parse(d)));}).on('error',rej);});
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function withWS(wsUrl,fn){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl);let nid=1;const pend=new Map();const ctx=[];ws.addEventListener('message',ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(m.error):res(m.result);}else if(m.method==='Runtime.executionContextCreated')ctx.push(m.params.context);});const call=(method,params={})=>{const id=nid++;return new Promise((res,rej)=>{pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}));});};ws.addEventListener('open',async()=>{try{const r=await fn(call,ctx);ws.close();resolve(r);}catch(e){ws.close();reject(e);}});ws.addEventListener('error',e=>reject(e));setTimeout(()=>{try{ws.close();}catch(_){}reject(new Error('to'));},7000);});}
-const wbEval=expr=>withWS(WB,async call=>{await call('Runtime.enable');const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true});return r.result.value;});
-async function inActive(wsUrl,expr){return withWS(wsUrl,async(call,ctx)=>{await call('Page.enable');await call('Runtime.enable');await sleep(600);const tree=await call('Page.getFrameTree');const fr=[];(function w(n){if(n.frame)fr.push(n.frame);(n.childFrames||[]).forEach(w);})(tree.frameTree);const inner=fr.find(f=>f.name==='active-frame');if(!inner)return {__noframe:1};const c=ctx.find(x=>x.auxData&&x.auxData.frameId===inner.id&&!x.name&&x.origin);if(!c)return {__noctx:1};const r=await call('Runtime.evaluate',{expression:expr,returnByValue:true,contextId:c.id});return r.result.value;}).catch(e=>({__err:String(e.message||e)}));}
-let ready=false;
-for(let i=0;i<20;i++){try{if(await wbEval(`document.querySelectorAll('.activitybar [aria-label="Claude Code"]').length`)>0){ready=true;break;}}catch(e){}await sleep(1000);}
-if(!ready){console.log('WB_NOT_READY');process.exit(1);}
-await wbEval(`(function(){var t=document.querySelector('.activitybar .action-item a[aria-label="Claude Code"],.activitybar [aria-label="Claude Code"]');if(t)t.click();return !!t;})()`);
-await sleep(2000);
-let panelWs=null;
-for(let i=0;i<12 && !panelWs;i++){
-  for(const f of (await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'))){
-    if(await inActive(f.webSocketDebuggerUrl,`!!document.querySelector('input[placeholder*="Search" i]')`)===true){panelWs=f.webSocketDebuggerUrl;break;}
-  }
-  if(!panelWs)await sleep(1200);
-}
-if(!panelWs){console.log('PANEL_NOT_FOUND');process.exit(1);}
-await inActive(panelWs,`(function(){var inp=document.querySelector('input.search,.filterInput_90gk3A,input[placeholder*="Search" i]');var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'');inp.dispatchEvent(new Event('input',{bubbles:true}));s.call(inp,${JSON.stringify(NEEDLE)});inp.dispatchEvent(new Event('input',{bubbles:true}));inp.focus();return inp.value;})()`);
-await sleep(900);
-console.log('PANEL_WS='+panelWs);
-EOF
+cp docs/recipes/panel-open/panel_ready.mjs /tmp/
 
 # A. workbench top-level page id (9222, NOT an iframe, NOT Launchpad)
 WB_PAGE=$(curl -s "$R/json/list" | python3 -c '
@@ -1330,17 +1215,7 @@ iteration. Write the probe to a file so the poll loop in Step 6
 (`@/tmp/pfg_markers.js`) and ad-hoc probes share one definition:
 
 ```sh
-cat > /tmp/pfg_markers.js <<'EOF'
-JSON.stringify({
-  pfgkAlert: document.querySelectorAll(".pfgkAlert").length,
-  bookend:   document.querySelectorAll('[data-pfgk-role="bookend"]').length,
-  seam:      document.querySelectorAll('[data-pfgk-role="seam"]').length,
-  seamClean: document.querySelectorAll('[data-pfgk-role="seamClean"]').length,
-  bridge:    document.querySelectorAll('[data-pfgk-role="bridge"]').length,
-  broken:    document.querySelectorAll('[data-pfgk-role="broken"]').length,
-  markerText:(() => { const c = document.querySelector(".pfgkAlert"); return c ? c.textContent.replace(/\s+/g, " ").trim().slice(0, 400) : null; })()
-})
-EOF
+cp docs/recipes/markers/pfg_markers.js /tmp/
 node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" @/tmp/pfg_markers.js
 ```
 
@@ -1380,17 +1255,7 @@ node /tmp/eval_in_inner_frame.mjs "$WS_CHAT" '(function(){
 To eyeball the marker (screenshot the whole workbench page):
 
 ```sh
-cat > /tmp/shot.mjs <<'JS'
-const ws=new WebSocket(process.argv[2]);          // ws://127.0.0.1:9222/devtools/page/<workbench-page-id>
-let id=1;const p=new Map();
-ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id&&p.has(m.id)){p.get(m.id)(m.result);p.delete(m.id);}});
-const call=(method,params={})=>new Promise(r=>{const i=id++;p.set(i,r);ws.send(JSON.stringify({id:i,method,params}));});
-await new Promise(r=>ws.addEventListener('open',r));
-await call('Page.enable');
-const sc=await call('Page.captureScreenshot',{format:'png'});
-const fs=await import('node:fs');fs.writeFileSync('/tmp/wb_now.png',Buffer.from(sc.data,'base64'));
-console.log('saved /tmp/wb_now.png');ws.close();
-JS
+cp docs/recipes/misc/shot.mjs /tmp/
 node /tmp/shot.mjs "ws://127.0.0.1:9222/devtools/page/$WB_PAGE"   # then Read /tmp/wb_now.png
 ```
 
@@ -1400,40 +1265,7 @@ render): iterate the chat iframes, find the active-frame that has
 and write them to an HTML file you can headless-screenshot.
 
 ```sh
-cat > /tmp/extract_live_svgs.mjs <<'EOF'
-import http from 'node:http';
-import fs from 'node:fs';
-const extract=`(function(){var els=document.querySelectorAll('[data-pfgk-role]');var seen={},out=[];for(var i=0;i<els.length;i++){var e=els[i],role=e.getAttribute('data-pfgk-role'),svg=e.querySelector('svg'),t=svg?svg.outerHTML:'';var cap=(t.match(/(in-file reattach|in-file link|cross-file link)/)||[''])[0];var key=role+'|'+cap;if(!seen[key]){seen[key]=1;out.push({role:role,cap:cap,svg:t});}}return out;})()`;
-const getJSON=p=>new Promise((res,rej)=>{http.get('http://127.0.0.1:9222'+p,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(JSON.parse(d)));}).on('error',rej);});
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function withWS(wsUrl,fn){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl);let nid=1;const pend=new Map();const ctx=[];ws.addEventListener('message',ev=>{const m=JSON.parse(ev.data);if(m.id&&pend.has(m.id)){const{res,rej}=pend.get(m.id);pend.delete(m.id);m.error?rej(m.error):res(m.result);}else if(m.method==='Runtime.executionContextCreated')ctx.push(m.params.context);});const call=(method,params={})=>{const id=nid++;return new Promise((res,rej)=>{pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}));});};ws.addEventListener('open',async()=>{try{const r=await fn(call,ctx);ws.close();resolve(r);}catch(e){ws.close();reject(e);}});ws.addEventListener('error',e=>reject(e));setTimeout(()=>{try{ws.close();}catch(_){}reject(new Error('ws timeout'));},8000);});}
-// Loop ALL index iframes; merge + dedupe by role|caption. (After a tab switch the
-// stale iframe may still be listed; only the active one returns marker nodes. For
-// multiple open chats this collects markers across all of them.)
-const ifs=(await getJSON('/json/list')).filter(t=>t.type==='iframe'&&(t.url||'').includes('index'));
-let arr=[];const _seen={};
-for(const wv of ifs){
-  const r=await withWS(wv.webSocketDebuggerUrl,async(call,ctx)=>{
-    await call('Page.enable');await call('Runtime.enable');await sleep(700);
-    const tree=await call('Page.getFrameTree');const frames=[];(function w(n){if(n.frame)frames.push(n.frame);(n.childFrames||[]).forEach(w);})(tree.frameTree);
-    const inner=frames.find(f=>f.name==='active-frame');if(!inner)return [];
-    const c=ctx.find(x=>x.auxData&&x.auxData.frameId===inner.id&&!x.name&&x.origin);if(!c)return [];
-    const r=await call('Runtime.evaluate',{expression:extract,returnByValue:true,contextId:c.id});
-    return r.result.value||[];
-  }).catch(()=>[]);
-  for(const it of (r||[])){const k=it.role+'|'+(it.cap||'');if(!_seen[k]){_seen[k]=1;arr.push(it);}}
-}
-const bgs={bookend:'#142a35',broken:'#3a1818',seam:'#3a2c14',seamClean:'#181d28',bridge:'#3a2418'};
-let html='<html><body style="margin:0;background:#0a0a0c;font-family:monospace">';
-for(const it of arr){
-  let bg=it.cap==='in-file link'?bgs.seamClean:it.cap==='cross-file link'?bgs.bridge:it.cap==='in-file reattach'?bgs.seam:(bgs[it.role]||'#222');
-  let svg=it.svg.replace('width:100%;height:124px','width:860px;height:auto');
-  html+='<div style="color:#999;padding:11px 24px 3px;font-size:13px">live: '+it.role+' / '+(it.cap||'(no caption)')+'</div><div style="background:'+bg+';margin:0 24px 14px;padding:16px;border-radius:8px">'+svg+'</div>';
-}
-html+='</body></html>';
-fs.writeFileSync('/tmp/live_extracted.html',html);
-console.log('extracted '+arr.length+' unique live SVGs: '+arr.map(a=>a.role+'/'+(a.cap||'-')).join(', '));
-EOF
+cp docs/recipes/markers/extract_live_svgs.mjs /tmp/
 node /tmp/extract_live_svgs.mjs
 # Render the extracted SVGs to a PNG you can Read:
 google-chrome --headless=new --disable-gpu --force-device-scale-factor=2 \
