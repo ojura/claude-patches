@@ -62,10 +62,20 @@ the launch flags and IDE-product paths differ.
 > rendered iframe** counting the elements your change renders, plus a
 > `document.body.textContent.includes(...)` text check.
 > When the change is exercised by a fixture, embed a unique **nonce** in
-> that fixture's payload and assert the nonce appears in the rendered DOM:
-> a stale or rehydrated tab will not contain it, so it cannot pass as a
-> fresh render (byte-size or resource-timing guesses do not prove this).
-> The DOM is the user's view of truth; everything else is internal
+> that fixture's payload and assert the nonce appears in the rendered DOM.
+> The nonce is a **witness, not a freshness charm**: present means the DOM
+> was produced by rendering a payload that held this exact string, and that
+> is all it certifies. Absent, or a different/older nonce than the one you
+> just wrote, means a concrete link is broken. Do not write it off as "a
+> stale tab". Localize it: the fixture is not in the project dir the loader
+> reads (wrong open-workspace dir); the file on disk does not contain the
+> nonce (wrong file / unsaved edit); you are reading a different iframe; the
+> editor webview was never disposed, so you are seeing a prior render (the
+> "rehydration" case, itself concrete, checkable from the tab's mount state,
+> never assumed); or the loader errored. A missing nonce is a fault to
+> find, exactly like a fixture that will not list, never a cache to shrug
+> at (byte-size or resource-timing guesses do not prove a fresh render
+> either). The DOM is the user's view of truth; everything else is internal
 > model agreement.
 >
 > If pushing requires action you don't have (e.g., reload to
