@@ -1570,6 +1570,7 @@ Use the bash orchestration pattern: BP script in background, post
 `get_session_request` for Session B in foreground, read `__caps` after.
 
 ```sh
+cp docs/recipes/breakpoints/bp_ez4_capture.mjs /tmp/
 node /tmp/bp_ez4_capture.mjs "$WS_TARGET" 25 > /tmp/cap.log 2>&1 &
 sleep 8
 node /tmp/cdp-eval.mjs "$WS_RENDERER_PAGE" \

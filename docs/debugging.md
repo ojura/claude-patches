@@ -449,7 +449,8 @@ The BP is removed when its CDP session disconnects. So the BP-setting
 script must HOLD its WebSocket open across the trigger-and-read window.
 
 ```sh
-# 1. Background: set BP, hold connection N seconds
+# 1. Background: set BP, hold connection N seconds (source in docs/recipes/breakpoints/)
+cp docs/recipes/breakpoints/bp_setup.mjs /tmp/
 node /tmp/bp_setup.mjs "$WS_TARGET" 25 > /tmp/bp.log 2>&1 &
 BP_PID=$!
 sleep 8                          # let BP arm
