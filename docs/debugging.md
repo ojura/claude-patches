@@ -273,37 +273,7 @@ license to deviate; the Node scripts are the path.
 
 ### `/tmp/cdp-eval.mjs`: one-shot Runtime.evaluate
 
-```js
-// usage: node cdp-eval.mjs <ws-url> <expression-or-@file>
-const wsUrl = process.argv[2], exprArg = process.argv[3];
-const expression = exprArg.startsWith('@')
-  ? await (async () => { const fs = await import('node:fs/promises'); return fs.readFile(exprArg.slice(1), 'utf8'); })()
-  : exprArg;
-const ws = new WebSocket(wsUrl);
-let nextId = 1;
-const pending = new Map();
-ws.addEventListener('open', () => {
-  send('Runtime.enable', {}).then(() =>
-    send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true,
-                               allowUnsafeEvalBlockedByCSP: true, includeCommandLineAPI: true })
-  ).then(r => { console.log(JSON.stringify(r, null, 2)); ws.close(); });
-});
-ws.addEventListener('message', ev => {
-  const msg = JSON.parse(ev.data);
-  if (msg.id && pending.has(msg.id)) {
-    const { resolve, reject } = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(msg.error); else resolve(msg.result);
-  }
-});
-function send(method, params) {
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
-```
+Source: [`recipes/lib/cdp-eval.mjs`](recipes/lib/cdp-eval.mjs) (`cp docs/recipes/lib/cdp-eval.mjs /tmp/`).
 
 Critical flags:
 
@@ -339,66 +309,7 @@ top-level CDP target. To eval against it, you have to enumerate the
 parent's frame tree and Run`Runtime.evaluate` against the inner frame's
 main-world execution context.
 
-```js
-// usage: node eval_in_inner_frame.mjs <outer-ws-url> '<expr-or-@file>'
-const wsUrl = process.argv[2];
-const expression = process.argv[3].startsWith('@')
-  ? await (async () => { const fs = await import('node:fs/promises'); return fs.readFile(process.argv[3].slice(1), 'utf8'); })()
-  : process.argv[3];
-
-const ws = new WebSocket(wsUrl);
-let nextId = 1, pending = new Map();
-const ctxEvents = [];
-ws.addEventListener('message', ev => {
-  const msg = JSON.parse(ev.data);
-  if (msg.id && pending.has(msg.id)) {
-    const { resolve, reject } = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(msg.error); else resolve(msg.result);
-  } else if (msg.method === 'Runtime.executionContextCreated') {
-    ctxEvents.push(msg.params.context);
-  }
-});
-function call(method, params={}) {
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
-await new Promise(r => ws.addEventListener('open', r));
-await call('Page.enable');
-await call('Runtime.enable');
-await new Promise(r => setTimeout(r, 800));   // drain executionContextCreated
-
-const tree = await call('Page.getFrameTree');
-function findInner(node, acc=[]) {
-  if (node.frame) acc.push(node.frame);
-  (node.childFrames||[]).forEach(c => findInner(c, acc));
-  return acc;
-}
-const allFrames = findInner(tree.frameTree);
-
-// Discriminator: name === "active-frame". URLs are NOT reliable
-// (the inner's loaded URL is also index.html, same as outer, even
-// though its src attribute pointed at fake.html).
-const innerFrame = allFrames.find(f => f.name === 'active-frame');
-if (!innerFrame) { console.error('FAIL: no name=active-frame'); process.exit(1); }
-
-// Pick MAIN-world context (origin matches webview, name is empty).
-// Reject __playwright_utility_world_*; those are isolated worlds that
-// CANNOT see the page's globals or React state.
-const mainCtx = ctxEvents.find(c =>
-  c.auxData?.frameId === innerFrame.id && !c.name && c.origin);
-if (!mainCtx) { console.error('FAIL: no main-world context'); process.exit(1); }
-
-const r = await call('Runtime.evaluate', {
-  expression, returnByValue: true, awaitPromise: true,
-  contextId: mainCtx.id, includeCommandLineAPI: true,
-});
-console.log(JSON.stringify(r, null, 2));
-ws.close();
-```
+Source: [`recipes/lib/eval_in_inner_frame.mjs`](recipes/lib/eval_in_inner_frame.mjs) (`cp docs/recipes/lib/eval_in_inner_frame.mjs /tmp/`).
 
 The two non-obvious things this script handles:
 
@@ -1251,9 +1162,9 @@ conversations panel) is the make-or-break one.
 ### Step 0: ensure helpers are on disk
 
 ```sh
-# Write cdp-eval.mjs if not present
+# ensure the shared CDP helpers are on disk (sources in docs/recipes/lib/)
 ls /tmp/cdp-eval.mjs /tmp/eval_in_inner_frame.mjs 2>/dev/null \
-  || echo "MISSING: write them from the Tooling section above"
+  || cp docs/recipes/lib/cdp-eval.mjs docs/recipes/lib/eval_in_inner_frame.mjs /tmp/
 ```
 
 Both scripts require Node 22+ (built-in `WebSocket`). See the Tooling section
