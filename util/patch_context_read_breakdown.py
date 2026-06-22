@@ -57,15 +57,18 @@ Transcript-mode collapse (Ctrl+O), driven by a model-excluded data field:
      ``globalThis.__pcbForceUbo`` at the bundle tail.
   8a/8b/8c. ``/context`` mounts + emit handler: attach the analysis on a
      message-level ``contextDetailData`` field (content render unchanged).
-  9. ``UserTextMessage`` local-command-stdout branch: when the message carries
-     ``contextDetailData``, re-mount ``ubo`` live from it, collapsed by default and
-     expanded on ``verbose || isTranscriptMode``. Force the lazy parent module
-     mid-render (React is up, so its compiler-runtime resolves) and fall back to
-     the frozen content if the component is unavailable -- so it never renders
+  9. ``UserTextMessage`` local-command-stdout branch: on ``verbose || isTranscriptMode``
+     (Ctrl+O), re-mount ``ubo`` live from ``contextDetailData`` to show the EXPANDED
+     sections; otherwise render the stored string, which already holds the right default
+     (collapsed for ``/context``, full for ``/context all``, matching upstream). Force the
+     lazy parent module mid-render (React is up, so its compiler-runtime resolves) and fall
+     back to the frozen content if the component is unavailable -- so it never renders
      ``undefined``, and works in-session and after a resume.
-  10a/10b. persist ``contextDetailData`` (jsonl write conditional-spread + both
-     deserialize mappings). It is a message-level property, not a content block,
-     so it survives persistence but stays out of the request body (measured).
+  10a. persist ``contextDetailData`` (jsonl write conditional-spread). Interactive
+     ``--resume`` reads the raw jsonl row as-is (no whitelisting rebuild), so the
+     field round-trips with no read-side map. It is a message-level property, not a
+     content block, so it survives persistence but stays out of the request body
+     (measured).
 
 Conventions
 ===========
@@ -291,17 +294,26 @@ CAT_SPLIT = (
 # Behaviour is byte-identical (in the produced string VALUES) to the previous
 # open-coded versions, so the existing runtime verification still holds.
 # Live display re-mount injected into the Message.tsx local_command branch (site 9).
-# When the /context message carries the persisted ContextData (contextDetailData),
-# mount the live ubo from it -- collapsed by default, full in transcript mode (Ctrl+O)
-# or when verbose -- instead of rendering the frozen string. The collapse flag is the
-# component's own collapseDetailSections prop, driven here off verbose/isTranscriptMode,
-# so the in-component sections (incl. our sites 6/11) react with no further change. Any
-# other local_command message (no contextDetailData) falls through to the original
-# string render. @MSG@/@VB@/@TR@/@OR@ are the branch's message / verbose / transcript /
-# React vars; @MGECALL@ is the original createElement(mGe,...) call this wraps.
+# When the /context message carries the persisted ContextData (contextDetailData) AND the
+# view is verbose or transcript-mode (Ctrl+O), re-mount the live ubo from it to show the
+# EXPANDED sections. Otherwise -- the default view -- render the frozen stored string,
+# which already has the right collapse state for the command that produced it: collapsed
+# for /context, full for /context all (matching upstream). The re-mount is purely the
+# expand mechanism and must NOT override the default, or /context all regresses to
+# collapsed. The collapse flag is the component's own collapseDetailSections prop, and the
+# in-component sections (incl. our sites 6/11) react with no further change. Any other
+# local_command message (no contextDetailData) falls through to the original string render.
+# @MSG@/@VB@/@TR@/@OR@ are the branch's message / verbose / transcript / React vars;
+# @MGECALL@ is the original createElement(mGe,...) call this wraps.
 DISPLAY_REMOUNT = (
     '(() => {\n'
     '          if (@MSG@.contextDetailData === void 0 || @MSG@.contextDetailData === null) return @MGECALL@;\n'
+    '          /* Default view: render the frozen stored string. It already carries the right\n'
+    '             collapse state for the command that produced it -- collapsed for /context,\n'
+    '             FULL for /context all -- matching upstream. The live re-mount below exists\n'
+    '             ONLY to EXPAND on Ctrl+O (transcript) or verbose; if it ran unconditionally\n'
+    '             it would force every /context (incl. /context all) to the collapsed default. */\n'
+    '          if (!(@VB@ || @TR@)) return @MGECALL@;\n'
     '          /* ubo lives in a LAZY bundle module. If it has not loaded yet (e.g. on resume,\n'
     '             where a stored /context renders before anything else loads its module), force\n'
     '             that module HERE -- mid-render, so the React runtime is up and the module\'s\n'
@@ -316,7 +328,7 @@ DISPLAY_REMOUNT = (
     '          return globalThis.__pcbUbo\n'
     '            ? @OR@.createElement(globalThis.__pcbUbo, {\n'
     '                data: @MSG@.contextDetailData,\n'
-    '                /* collapsed by default; expanded in transcript mode (Ctrl+O) or verbose */\n'
+    '                /* only reached when verbose/transcript, so this resolves to expanded */\n'
     '                collapseDetailSections: !(@VB@ || @TR@),\n'
     '              })\n'
     '            : @MGECALL@;\n'
@@ -689,16 +701,14 @@ def main():
         '10a persist write: contextDetailData conditional-spread',
     )
 
-    # 10b. READ: the deserializer reconstructs the message via Rn({content,...}). Map
-    #      contextDetailData back from the stored row. This Rn({content:n,...}) shape
-    #      appears twice (two deserialize branches); both must carry the field.
-    splice(
-        'Rn({content:n,toolUseResult:e.tool_use_result,uuid:e.uuid,timestamp:e.timestamp})',
-        'Rn({content:n,toolUseResult:e.tool_use_result,'
-        'contextDetailData:e.contextDetailData,uuid:e.uuid,timestamp:e.timestamp})',
-        '10b persist read: map contextDetailData back (x2)',
-        expected=2,
-    )
+    # 10b. READ: no read-side map is needed. Interactive --resume loads the raw jsonl
+    #      rows as-is -- the line reader does JSON.parse and renders the internal-shape
+    #      row directly, with no whitelisting rebuild -- so contextDetailData round-trips
+    #      untouched from 10a's write straight to the site-9 re-mount. (The Rn/QAt
+    #      converter IS a whitelisting rebuild that drops unknown fields, but it serves
+    #      the SDK / --print / control-stream path, which the interactive feature never
+    #      uses and which has no Ctrl+O to expand anyway -- it falls to the native frozen
+    #      content. Confirmed by a without-this-map cold --resume: still expands.)
 
     # ------------------------------------------------------------------
     new_data = bun_handler.repack_with_js(
