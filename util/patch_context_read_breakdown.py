@@ -64,11 +64,11 @@ Transcript-mode collapse (Ctrl+O), driven by a model-excluded data field:
      lazy parent module mid-render (React is up, so its compiler-runtime resolves) and fall
      back to the frozen content if the component is unavailable -- so it never renders
      ``undefined``, and works in-session and after a resume.
-  10a. persist ``contextDetailData`` (jsonl write conditional-spread). Interactive
-     ``--resume`` reads the raw jsonl row as-is (no whitelisting rebuild), so the
-     field round-trips with no read-side map. It is a message-level property, not a
-     content block, so it survives persistence but stays out of the request body
-     (measured).
+  10. persist ``contextDetailData``: no splice. It is attached to the message object
+     at emit (8c); the native jsonl writer serializes the whole object, so it
+     round-trips to disk and is read back as-is on resume (raw rows, no whitelisting
+     rebuild). It is a message-level property, not a content block, so it persists but
+     stays out of the request body (measured).
 
 Conventions
 ===========
@@ -138,7 +138,7 @@ TOOL_TARGET_FN = r'''(function pcbToolTarget(input) {
             const path = pick("file_path") || pick("notebook_path");
             if (path) {
               const home = process.env.HOME;
-              let p = home && path.indexOf(home) === 0 ? "~" + path.slice(home.length) : path;
+              let p = home && (path === home || path.indexOf(home + "/") === 0) ? "~" + path.slice(home.length) : path;
               /* cap from the tail so the filename stays visible (paths are the longest labels) */
               if (p.length > 80) p = "..." + p.slice(p.length - 77);
               return clean(p);
@@ -191,7 +191,7 @@ MD_SECTION = (
     '          pcbCut = Math.max(15, pcbRows.filter((r) => r.tokens >= 300).length),\n'
     '          pcbBig = pcbRows.slice(0, pcbCut),\n'
     '          pcbSmall = pcbRows.slice(pcbCut),\n'
-    '          pcbSmallTokens = pcbSmall.reduce((a, b) => a + b.tokens, 0), pcbEsc = (s) => String(s).split("|").join(String.fromCharCode(92) + "|"), pcbLabel = (r) => r.toolName === r.target ? r.toolName : r.toolName + " " + r.target;\n'
+    '          pcbSmallTokens = pcbSmall.reduce((a, b) => a + b.tokens, 0), pcbEsc = (s) => { const bs = String.fromCharCode(92); return String(s).split(bs).join(bs + bs).split("|").join(bs + "|"); }, pcbLabel = (r) => r.toolName === r.target ? r.toolName : r.toolName + " " + r.target;\n'
     '    @OUT@ += `### Tool results by source\\n\\n`;\n'
     '    @OUT@ += `| Source | Count | Tokens |\\n`;\n'
     '    @OUT@ += `|--------|-------|--------|\\n`;\n'
@@ -199,7 +199,7 @@ MD_SECTION = (
     '      @OUT@ += `| ${pcbEsc(pcbLabel(r))} | ${r.count} | ${@FMT@(r.tokens)} |\\n`;\n'
     '    }\n'
     '    if (pcbSmall.length > 0) {\n'
-    '      @OUT@ += `| ${pcbSmall.length} more sources | | ${@FMT@(pcbSmallTokens)} |\\n`;\n'
+    '      @OUT@ += `| ${pcbSmall.length} more ${pcbSmall.length === 1 ? "source" : "sources"} | | ${@FMT@(pcbSmallTokens)} |\\n`;\n'
     '    }\n'
     '    @OUT@ += `\\n`;\n'
     '  }'
@@ -226,7 +226,7 @@ INK_RENDER = (
     '            if (small.length > 0) {\n'
     '              const tot = small.reduce((a, b) => a + b.tokens, 0);\n'
     '              children.push(@OR@.createElement(@TREE@.Node, { key: "more" },\n'
-    '                @OR@.createElement(@TXT@, { dimColor: !0 }, "+" + small.length + " more sources: ", @FMT@(tot), " tokens")));\n'
+    '                @OR@.createElement(@TXT@, { dimColor: !0 }, "+" + small.length + " more " + (small.length === 1 ? "source" : "sources") + ": ", @FMT@(tot), " tokens")));\n'
     '            }\n'
     '            return @OR@.createElement(@BOX@, { flexDirection: "column", marginTop: 1 },\n'
     '              @OR@.createElement(@BOX@, null,\n'
@@ -268,9 +268,13 @@ MCP_COLLAPSED = (
 CAT_SPLIT = (
     'if (@X@ > 0) {\n'
     '    /* pcb: split tool-result tokens out of Messages into their own red grid\n'
-    '       category, placed before the Messages remainder. The total is\n'
-    '       preserved (Messages keeps the remainder), so Free space is unchanged. */\n'
-    '    const pcbSub = (@V@.toolResultTokens || 0) + (@V@.toolCallTokens || 0) + (@V@.attachmentTokens || 0) + (@V@.assistantMessageTokens || 0) + (@V@.userMessageTokens || 0); const pcbTr = pcbSub > 0 ? Math.min(@X@, Math.round(@X@ * (@V@.toolResultTokens || 0) / pcbSub)) : 0; const pcbMsg = @X@ - pcbTr;\n'
+    '       category, placed before the Messages remainder. Show the RAW tool-result\n'
+    '       total, capped at the bucket X, so the bar matches the per-source tree\n'
+    '       below it; Messages keeps the remainder, so the total and Free space are\n'
+    '       unchanged even when X is API-reconciled above the raw char estimate.\n'
+    '       (Scaling X by the raw ratio inflated the bar past the tree whenever\n'
+    '       cache tokens pushed X over the estimate -- the common mid-session case.) */\n'
+    '    const pcbTr = Math.min(@X@, @V@.toolResultTokens || 0); const pcbMsg = @X@ - pcbTr;\n'
     '    if (pcbTr > 0) @NE@.push({ name: "Tool results", tokens: pcbTr, color: "error" });\n'
     '    if (pcbMsg > 0) @NE@.push({ name: "Messages", tokens: pcbMsg, color: "purple_FOR_SUBAGENTS_ONLY" });\n'
     '  }'
@@ -321,11 +325,13 @@ DISPLAY_REMOUNT = (
     '             bootstrap runs the factory before React init and permanently poisons the\n'
     '             cached module.) The 0a stash sets globalThis.__pcbUbo when the module loads. */\n'
     '          if (!globalThis.__pcbUbo && typeof globalThis.__pcbForceUbo === "function") {\n'
-    '            try { globalThis.__pcbForceUbo(); } catch (pcbE) {}\n'
+    '            try { globalThis.__pcbForceUbo(); } catch (pcbE) { try { globalThis.__pcbForceError = String(pcbE); } catch (pcbE2) {} }\n'
     '          }\n'
-    '          /* guard: if the module still has not exposed ubo, render the frozen stored\n'
-    '             content rather than createElement(undefined) (React #130). */\n'
-    '          return globalThis.__pcbUbo\n'
+    '          /* guard: mount only a FULLY-initialized module. __pcbUbo is set when the ubo\n'
+    '             body runs, but __pcbNqnReady only once the parent assigns Nqn, so requiring\n'
+    '             BOTH rejects a half-loaded module (parent threw between the two) that would\n'
+    '             otherwise crash on undefined Nqn (React #130); fall back to frozen content. */\n'
+    '          return (globalThis.__pcbUbo && globalThis.__pcbNqnReady)\n'
     '            ? @OR@.createElement(globalThis.__pcbUbo, {\n'
     '                data: @MSG@.contextDetailData,\n'
     '                /* only reached when verbose/transcript, so this resolves to expanded */\n'
@@ -398,15 +404,17 @@ def main():
         r'(\w+)=E\(\(\)=>\{(?:(?!\bE\(\(\)=>\{).)*?function ubo\(',
         'ubo module thunk (the var <uboThunk>=E(()=>{...function ubo...}))',
     ).group(1)
-    # The PARENT module: its factory calls <uboThunk>() then sets Nqn=$(rt(),1). Discover
-    # it (and the Nqn var) by that exact shape so a re-minify fails loud.
+    # The PARENT module: its factory calls <uboThunk>() then sets Nqn=$(rt(),1),Or=$(be(),1).
+    # Discover it and BOTH React-import vars (ubo reads Nqn=useMemoCache AND Or=React) by that
+    # exact shape so a re-minify fails loud. The generic two-import shape recurs ~18x, so the
+    # uboThunk()-call prefix is what makes this match unique.
     parent_m = find1(
         r';var (\w+)=E\(\(\)=>\{(?:(?!=E\(\(\)=>\{).)*?'
-        + re.escape(ubo_thunk) + r'\(\);\w+\(\);(\w+)=\$\(rt\(\),1\)',
-        'parent module (forces ubo thunk + assigns Nqn=$(rt()))',
+        + re.escape(ubo_thunk) + r'\(\);\w+\(\);(\w+)=\$\(rt\(\),1\),(\w+)=\$\(be\(\),1\)',
+        'parent module (forces ubo thunk + assigns Nqn=$(rt()),Or=$(be()))',
     )
-    parent_thunk, nqn_var = parent_m.group(1), parent_m.group(2)
-    print(f"  ubo module thunk: {ubo_thunk}; parent (Nqn-setter) thunk: {parent_thunk}; Nqn var: {nqn_var}")
+    parent_thunk, nqn_var, or_var = parent_m.group(1), parent_m.group(2), parent_m.group(3)
+    print(f"  ubo module thunk: {ubo_thunk}; parent (Nqn-setter) thunk: {parent_thunk}; Nqn var: {nqn_var}; Or var: {or_var}")
     # 0a. Stash ubo at the module-body top.
     splice(
         ubo_thunk + '=E(()=>{',
@@ -432,6 +440,21 @@ def main():
         'try { globalThis.__pcbForceUbo = ' + parent_thunk + '; } catch (pcbE) {}\n'
         'JWf();})',
         '0b ubo bridge: stash parent (Nqn-setting) thunk for lazy force',
+    )
+    # 0c. Mark readiness once the parent has assigned BOTH of ubo's React imports, so site
+    #     9 mounts only a FULLY initialized module. 0a sets __pcbUbo when ubo's body runs --
+    #     BEFORE the parent assigns Nqn (useMemoCache) and Or (React, for createElement). If
+    #     the parent's factory throws in that gap, __pcbUbo is set while those are undefined,
+    #     and a guard checking only __pcbUbo would mount ubo onto them -> crash -> E() caches
+    #     the half-built module and poisons it for the whole session. Setting __pcbNqnReady
+    #     ONLY here (a try appended after the hll tail assigns Nqn,Or -- so any throw up to and
+    #     including Or leaves it unset, and a poisoned E()-re-call never re-runs the body) lets
+    #     the site-9 guard reject that half-loaded state and fall back to the frozen content.
+    #     The `Nqn=...,Or=...;` tail is a unique anchor; a re-minify fails loud.
+    splice(
+        nqn_var + '=$(rt(),1),' + or_var + '=$(be(),1);',
+        nqn_var + '=$(rt(),1),' + or_var + '=$(be(),1);try{globalThis.__pcbNqnReady=1;}catch(pcbE){}',
+        '0c ubo bridge: mark __pcbNqnReady once Nqn+Or are assigned',
     )
 
     print("\n--- data layer (feeds both surfaces) ---")
@@ -692,14 +715,18 @@ def main():
     # BOTH. ContextData round-trips cleanly (audited: no Maps/Sets/functions/circular).
     # The field is model-excluded (measured), so persisting ~31KB is disk-only.
 
-    # 10a. WRITE: append a conditional spread of contextDetailData alongside
-    #      toolUseResult in the message serializer (unique anchor).
-    splice(
-        '...f.toolUseResult!==void 0&&{toolUseResult:f.toolUseResult}',
-        '...f.toolUseResult!==void 0&&{toolUseResult:f.toolUseResult},'
-        '...f.contextDetailData!==void 0&&{contextDetailData:f.contextDetailData}',
-        '10a persist write: contextDetailData conditional-spread',
-    )
+    # 10. PERSIST: no write-side splice needed. contextDetailData is attached to the
+    #      message OBJECT at emit (site 8c); the native jsonl writer serializes the
+    #      whole message object, so the field round-trips to disk and is read back
+    #      as-is on resume (raw rows). Verified by a without-this-splice /context: the
+    #      field still persists in the jsonl. A prior 10a splice added the field to a
+    #      conditional toolUseResult spread, but that anchor is NOT the writer -- it lands
+    #      in the /feedback transcript reconstructor, which skips type:system rows AND only
+    #      spreads the field on its user-row branch. Since contextDetailData lives ONLY on
+    #      the type:system /context message (8c), that spread was inert (it could never
+    #      reach a bug-report payload) -- pure dead code; removed (also defense-in-depth:
+    #      the one line that could forward the field if a future change put it on a user
+    #      message).
 
     # 10b. READ: no read-side map is needed. Interactive --resume loads the raw jsonl
     #      rows as-is -- the line reader does JSON.parse and renders the internal-shape
