@@ -50,11 +50,14 @@ Transcript-mode collapse (Ctrl+O), driven by a model-excluded data field:
   The message content stays the single native render (what the model sees,
   unchanged from stock); the collapsed/expanded views are produced at render
   time and on reload from a side field that never enters the model prompt.
-  0a/0b. bridge the live ``ubo`` component to the message renderer, which lives
-     in a different bundle closure: stash ``globalThis.__pcbUbo`` in ubo's module
-     body, and stash ubo's ``Nqn``-setting PARENT module (``hll``, not ``All`` --
-     ``All`` defines ubo but the parent assigns the React compiler-runtime) as
-     ``globalThis.__pcbForceUbo`` at the bundle tail.
+  0a/0b/0c. bridge the live ``ubo`` component to the message renderer, which lives in
+     a different bundle closure. ``ubo`` is a top-level hoisted function of module ``hll``
+     (ContextVisualization), which assigns the React imports ubo binds (``Nqn``=useMemoCache,
+     ``Or``=React) and renders the ``All`` (ContextSuggestions) child via ``All()``. 0a stashes
+     ``globalThis.__pcbUbo`` in hll's IIFE (NOT the child's -- the ubo-anchored discovery
+     returns ``All`` as a regex artifact); 0b stashes ``hll`` as ``globalThis.__pcbForceUbo``
+     at the bundle tail for the mid-render force; 0c sets ``globalThis.__pcbNqnReady`` once hll
+     has assigned both imports, so site 9 mounts only a fully-initialized module.
   8a/8b/8c. ``/context`` mounts + emit handler: attach the analysis on a
      message-level ``contextDetailData`` field (content render unchanged).
   9. ``UserTextMessage`` local-command-stdout branch: on ``verbose || isTranscriptMode``
@@ -384,46 +387,61 @@ def main():
     #    /context's persisted ContextData collapsed/expanded at display time.
     #
     #    Module-load dependency (the load-bearing subtlety, learned the hard way):
-    #    ubo's body reads `Nqn` (the React-Compiler useMemoCache). `Nqn` is assigned NOT
-    #    by ubo's own module but by a PARENT lazy module whose factory is
-    #    `E(()=>{ ...; <uboThunk>(); vte(); Nqn = $(rt(), 1); ... })` -- it loads ubo AND
-    #    then sets Nqn from $(rt()), where rt()/the compiler-runtime reads React's
-    #    CLIENT_INTERNALS off be(). So:
-    #      * forcing ubo's OWN module loads ubo but leaves Nqn undefined -> ubo crashes
-    #        on render reading Nqn.c (this is what bit the earlier attempts);
-    #      * Nqn only resolves when React's client internals are live -- i.e. DURING a
-    #        React render, not at the bundle bootstrap.
-    #    Therefore we force the PARENT (Nqn-setting) module, and only from inside a render
-    #    (site 9), never at bootstrap.
+    #    ubo is a TOP-LEVEL hoisted function of module hll, and its body reads `Nqn` (the
+    #    React-Compiler useMemoCache). hll's OWN init-IIFE assigns it:
+    #    `var hll=E(()=>{ ...; <child>(); vte(); Nqn=$(rt(),1),Or=$(be(),1); ... })` -- it
+    #    renders the child (ContextSuggestions) then sets Nqn/Or, where the compiler-runtime /
+    #    React read CLIENT_INTERNALS off be(). So:
+    #      * Nqn only resolves when React's client internals are live -- i.e. DURING a React
+    #        render, not at the bundle bootstrap. Forcing hll's IIFE at bootstrap leaves Nqn
+    #        undefined and E() caches the poisoned module (this bit the earlier attempts; they
+    #        also forced the WRONG module -- the mislabeled child <child> -- which loads the
+    #        child without ever setting hll's Nqn).
+    #    Therefore we force hll (ubo's OWN module, the Nqn-setter), and only from inside a
+    #    render (site 9), never at bootstrap.
     #
-    #    Splices: (0a) stash ubo at ITS module-body top (runs when ubo's module loads, via
-    #    the parent's factory). (0b) stash the PARENT module thunk for an on-demand,
-    #    mid-render force from site 9. Site 9 calls it during render (React up -> valid
-    #    Nqn), then the guard mounts ubo or falls back to the frozen content.
-    ubo_thunk = find1(
+    #    Splices: (0a) stash ubo at hll's IIFE top (fires on hll load; ubo is top-level
+    #    hoisted, in scope there). (0b) stash the hll thunk for an on-demand, mid-render force
+    #    from site 9. (0c) flag readiness once hll has assigned Nqn,Or. Site 9 forces hll during
+    #    render (React up -> valid Nqn), then the guard mounts ubo (only when __pcbUbo AND
+    #    __pcbNqnReady) or falls back to the frozen content.
+    # This regex returns NOT ubo's own module but the module whose init-IIFE immediately
+    # PRECEDES the hoisted `function ubo`. bun lays each module out as [functions][init-IIFE],
+    # so the lazy body spans that preceding IIFE + the inter-function gap until it hits
+    # `function ubo`. ubo is actually a top-level fn of the NEXT module (the Nqn/Or setter,
+    # hll, below) -- confirmed by closure: ubo binds hll's Nqn/Or and ZERO of THIS module's
+    # fll/UP imports. THIS module is the ContextSuggestions-side child that hll renders via
+    # <child>(); we discover it only as the unique anchor to locate hll.
+    child_thunk = find1(
         r'(\w+)=E\(\(\)=>\{(?:(?!\bE\(\(\)=>\{).)*?function ubo\(',
-        'ubo module thunk (the var <uboThunk>=E(()=>{...function ubo...}))',
+        'rendered-child module thunk (the <child>=E(()=>{}) whose IIFE precedes function ubo)',
     ).group(1)
-    # The PARENT module: its factory calls <uboThunk>() then sets Nqn=$(rt(),1),Or=$(be(),1).
-    # Discover it and BOTH React-import vars (ubo reads Nqn=useMemoCache AND Or=React) by that
-    # exact shape so a re-minify fails loud. The generic two-import shape recurs ~18x, so the
-    # uboThunk()-call prefix is what makes this match unique.
+    # hll = ubo's ACTUAL module (the Nqn/Or setter; also holds SWt=formatContextAsMarkdownTable).
+    # Its init-IIFE calls <child>() then assigns Nqn=$(rt(),1),Or=$(be(),1) -- the React imports
+    # ubo binds. Discover it and both import vars by that exact shape so a re-minify fails loud.
+    # The generic two-import shape recurs ~18x; the <child>()-call prefix makes this unique.
     parent_m = find1(
         r';var (\w+)=E\(\(\)=>\{(?:(?!=E\(\(\)=>\{).)*?'
-        + re.escape(ubo_thunk) + r'\(\);\w+\(\);(\w+)=\$\(rt\(\),1\),(\w+)=\$\(be\(\),1\)',
-        'parent module (forces ubo thunk + assigns Nqn=$(rt()),Or=$(be()))',
+        + re.escape(child_thunk) + r'\(\);\w+\(\);(\w+)=\$\(rt\(\),1\),(\w+)=\$\(be\(\),1\)',
+        'hll module (ubo\'s own module: calls child thunk + assigns Nqn=$(rt()),Or=$(be()))',
     )
     parent_thunk, nqn_var, or_var = parent_m.group(1), parent_m.group(2), parent_m.group(3)
-    print(f"  ubo module thunk: {ubo_thunk}; parent (Nqn-setter) thunk: {parent_thunk}; Nqn var: {nqn_var}; Or var: {or_var}")
-    # 0a. Stash ubo at the module-body top.
+    print(f"  rendered-child thunk: {child_thunk}; hll (ubo's module / Nqn-setter): {parent_thunk}; Nqn var: {nqn_var}; Or var: {or_var}")
+    # 0a. Stash ubo at hll's (ubo's actual module) body top. ubo is a top-level hoisted fn of
+    #     hll, so it is in scope at hll's IIFE top; inject into hll's OWN IIFE, NOT the child's.
+    #     (Stashing in the child's IIFE -- what child_thunk returns -- only fired because hll
+    #     calls <child>() before assigning Nqn; a build that short-circuited that render edge
+    #     would silently never set __pcbUbo. hll's IIFE fires on hll load, before <child>()/Nqn=,
+    #     independent of the child render. The widened __pcbUbo-set-before-Nqn gap is covered by
+    #     0c's __pcbNqnReady gate, which is unchanged.)
     splice(
-        ubo_thunk + '=E(()=>{',
-        ubo_thunk + '=E(()=>{'
-        '/* pcb: expose the live ContextVisualization to the message renderer (a different\n'
-        '   bundle closure), so /context can re-render collapsed/expanded from persisted\n'
-        '   ContextData. Runs at module-load so it is set before resume renders. */\n'
+        parent_thunk + '=E(()=>{',
+        parent_thunk + '=E(()=>{'
+        '/* pcb: expose the live ContextVisualization (ubo) to the message renderer (a\n'
+        '   different bundle closure). ubo is a top-level fn of THIS (hll) module; stash it on\n'
+        '   hll load so /context can re-render collapsed/expanded from persisted ContextData. */\n'
         'try { globalThis.__pcbUbo = ubo; } catch (pcbE) {}\n',
-        '0a ubo bridge: stash at module-body top',
+        '0a ubo bridge: stash at hll module-body top',
     )
     # 0b. Stash the PARENT (Nqn-setting) module thunk for an on-demand, mid-render force
     #     from site 9. We stash the reference only -- NOT a call -- because calling the
@@ -441,12 +459,13 @@ def main():
         'JWf();})',
         '0b ubo bridge: stash parent (Nqn-setting) thunk for lazy force',
     )
-    # 0c. Mark readiness once the parent has assigned BOTH of ubo's React imports, so site
-    #     9 mounts only a FULLY initialized module. 0a sets __pcbUbo when ubo's body runs --
-    #     BEFORE the parent assigns Nqn (useMemoCache) and Or (React, for createElement). If
-    #     the parent's factory throws in that gap, __pcbUbo is set while those are undefined,
-    #     and a guard checking only __pcbUbo would mount ubo onto them -> crash -> E() caches
-    #     the half-built module and poisons it for the whole session. Setting __pcbNqnReady
+    # 0c. Mark readiness once hll has assigned BOTH of ubo's React imports, so site 9 mounts
+    #     only a FULLY initialized module. 0a captures the ubo REFERENCE at hll's IIFE top --
+    #     BEFORE hll assigns Nqn (useMemoCache) and Or (React, for createElement). (Stashing
+    #     the reference early is safe; the danger is only RENDERING ubo before Nqn/Or exist.)
+    #     If hll's factory throws in that gap, __pcbUbo is set while those are undefined, and a
+    #     guard checking only __pcbUbo would mount ubo onto them -> crash -> E() caches the
+    #     half-built module and poisons it for the whole session. Setting __pcbNqnReady
     #     ONLY here (a try appended after the hll tail assigns Nqn,Or -- so any throw up to and
     #     including Or leaves it unset, and a poisoned E()-re-call never re-runs the body) lets
     #     the site-9 guard reject that half-loaded state and fall back to the frozen content.
