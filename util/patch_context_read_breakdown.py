@@ -46,14 +46,26 @@ Render layer:
   11. collapsed MCP-tools section: show the top tools (loaded-first, tokens-desc)
      plus an "N more tools" rollup instead of the bare one-line count.
 
-Transcript-mode collapse (Ctrl+O):
-  8a/8b. ``/context`` mounts: bake a collapsed and an expanded snapshot and join
-     them with a U+001E-wrapped delimiter for a live component to choose between.
-  9. ``UserTextMessage`` local-command-stdout branch: split on the delimiter and
-     show the expanded half when ``verbose || isTranscriptMode``, re-balancing the
-     wrapper tags so the receiver parses a well-formed block.
-  12. ``GVn`` (SDK / external-viewer converter): strip the delimiter, showing the
-     collapsed half rather than the raw combined string.
+Transcript-mode collapse (Ctrl+O), driven by a model-excluded data field:
+  The message content stays the single native render (what the model sees,
+  unchanged from stock); the collapsed/expanded views are produced at render
+  time and on reload from a side field that never enters the model prompt.
+  0a/0b. bridge the live ``ubo`` component to the message renderer, which lives
+     in a different bundle closure: stash ``globalThis.__pcbUbo`` in ubo's module
+     body, and stash ubo's ``Nqn``-setting PARENT module (``hll``, not ``All`` --
+     ``All`` defines ubo but the parent assigns the React compiler-runtime) as
+     ``globalThis.__pcbForceUbo`` at the bundle tail.
+  8a/8b/8c. ``/context`` mounts + emit handler: attach the analysis on a
+     message-level ``contextDetailData`` field (content render unchanged).
+  9. ``UserTextMessage`` local-command-stdout branch: when the message carries
+     ``contextDetailData``, re-mount ``ubo`` live from it, collapsed by default and
+     expanded on ``verbose || isTranscriptMode``. Force the lazy parent module
+     mid-render (React is up, so its compiler-runtime resolves) and fall back to
+     the frozen content if the component is unavailable -- so it never renders
+     ``undefined``, and works in-session and after a resume.
+  10a/10b. persist ``contextDetailData`` (jsonl write conditional-spread + both
+     deserialize mappings). It is a message-level property, not a content block,
+     so it survives persistence but stays out of the request body (measured).
 
 Conventions
 ===========
@@ -278,28 +290,37 @@ CAT_SPLIT = (
 #
 # Behaviour is byte-identical (in the produced string VALUES) to the previous
 # open-coded versions, so the existing runtime verification still holds.
-PCB_HELPER = (
-    'globalThis.__pcb ??= {\n'
-    '  /* U+001E-wrapped sentinel: null-free, never appears in ANSI output. */\n'
-    '  D: @D@,\n'
-    '  /* combined string the /context bakes emit */\n'
-    '  join(collapsed, expanded) { return collapsed + this.D + expanded; },\n'
-    '  /* live-renderer select: pass through unless this is a <local-command-stdout>\n'
-    '     wrapper carrying the delimiter, then re-balance the tags and return the\n'
-    '     wanted half as a valid wrapper. */\n'
-    '  pick(text, wantExpanded) {\n'
-    '    if (typeof text !== "string") return text;\n'
-    '    const parts = text.split(this.D);\n'
-    '    if (parts.length > 1 && text.startsWith("<local-command-stdout")) {\n'
-    '      return wantExpanded\n'
-    '        ? "<local-command-stdout>" + parts[1]\n'
-    '        : parts[0] + "</local-command-stdout>";\n'
-    '    }\n'
-    '    return text;\n'
-    '  },\n'
-    '  /* external-viewer collapse (GVn): the part before the delimiter. */\n'
-    '  strip(text) { return typeof text === "string" ? text.split(this.D)[0] : text; },\n'
-    '};'
+# Live display re-mount injected into the Message.tsx local_command branch (site 9).
+# When the /context message carries the persisted ContextData (contextDetailData),
+# mount the live ubo from it -- collapsed by default, full in transcript mode (Ctrl+O)
+# or when verbose -- instead of rendering the frozen string. The collapse flag is the
+# component's own collapseDetailSections prop, driven here off verbose/isTranscriptMode,
+# so the in-component sections (incl. our sites 6/11) react with no further change. Any
+# other local_command message (no contextDetailData) falls through to the original
+# string render. @MSG@/@VB@/@TR@/@OR@ are the branch's message / verbose / transcript /
+# React vars; @MGECALL@ is the original createElement(mGe,...) call this wraps.
+DISPLAY_REMOUNT = (
+    '(() => {\n'
+    '          if (@MSG@.contextDetailData === void 0 || @MSG@.contextDetailData === null) return @MGECALL@;\n'
+    '          /* ubo lives in a LAZY bundle module. If it has not loaded yet (e.g. on resume,\n'
+    '             where a stored /context renders before anything else loads its module), force\n'
+    '             that module HERE -- mid-render, so the React runtime is up and the module\'s\n'
+    '             `Nqn = useMemoCache-import` resolves correctly. (Forcing it at the bundle\n'
+    '             bootstrap runs the factory before React init and permanently poisons the\n'
+    '             cached module.) The 0a stash sets globalThis.__pcbUbo when the module loads. */\n'
+    '          if (!globalThis.__pcbUbo && typeof globalThis.__pcbForceUbo === "function") {\n'
+    '            try { globalThis.__pcbForceUbo(); } catch (pcbE) {}\n'
+    '          }\n'
+    '          /* guard: if the module still has not exposed ubo, render the frozen stored\n'
+    '             content rather than createElement(undefined) (React #130). */\n'
+    '          return globalThis.__pcbUbo\n'
+    '            ? @OR@.createElement(globalThis.__pcbUbo, {\n'
+    '                data: @MSG@.contextDetailData,\n'
+    '                /* collapsed by default; expanded in transcript mode (Ctrl+O) or verbose */\n'
+    '                collapseDetailSections: !(@VB@ || @TR@),\n'
+    '              })\n'
+    '            : @MGECALL@;\n'
+    '        })()'
 )
 
 
@@ -339,22 +360,66 @@ def main():
             )
         return ms[0]
 
-    print("\n--- sentinel helper (one owner of the /context collapse handshake) ---")
-    # The /context collapse delimiter, defined once on the Python side. The injected
-    # helper (PCB_HELPER) is the single JS-side owner; every other site references
-    # globalThis.__pcb, never the literal. DELIM is the JS string literal (with quotes).
-    DELIM = '"\\u001E__PCBX__\\u001E"'  # U+001E RS delimiter (null-free, never in output)
-    # 0. Define globalThis.__pcb once at module-load time, before any render runs.
-    #    Anchored on the bun CJS wrapper prologue so it executes at the very top of
-    #    the module, guaranteeing mGe (render) / GVn (SDK) / t6p (command) all reach
-    #    it regardless of which fires first (e.g. a resumed transcript renders before
-    #    the user ever runs /context).
+    print("\n--- ubo bridge (reach the live component from the message renderer) ---")
+    # 0. Bridge the ContextVisualization component (ubo) onto globalThis so the
+    #    message-render path (a different bundle closure) can mount it LIVE to re-render
+    #    /context's persisted ContextData collapsed/expanded at display time.
+    #
+    #    Module-load dependency (the load-bearing subtlety, learned the hard way):
+    #    ubo's body reads `Nqn` (the React-Compiler useMemoCache). `Nqn` is assigned NOT
+    #    by ubo's own module but by a PARENT lazy module whose factory is
+    #    `E(()=>{ ...; <uboThunk>(); vte(); Nqn = $(rt(), 1); ... })` -- it loads ubo AND
+    #    then sets Nqn from $(rt()), where rt()/the compiler-runtime reads React's
+    #    CLIENT_INTERNALS off be(). So:
+    #      * forcing ubo's OWN module loads ubo but leaves Nqn undefined -> ubo crashes
+    #        on render reading Nqn.c (this is what bit the earlier attempts);
+    #      * Nqn only resolves when React's client internals are live -- i.e. DURING a
+    #        React render, not at the bundle bootstrap.
+    #    Therefore we force the PARENT (Nqn-setting) module, and only from inside a render
+    #    (site 9), never at bootstrap.
+    #
+    #    Splices: (0a) stash ubo at ITS module-body top (runs when ubo's module loads, via
+    #    the parent's factory). (0b) stash the PARENT module thunk for an on-demand,
+    #    mid-render force from site 9. Site 9 calls it during render (React up -> valid
+    #    Nqn), then the guard mounts ubo or falls back to the frozen content.
+    ubo_thunk = find1(
+        r'(\w+)=E\(\(\)=>\{(?:(?!\bE\(\(\)=>\{).)*?function ubo\(',
+        'ubo module thunk (the var <uboThunk>=E(()=>{...function ubo...}))',
+    ).group(1)
+    # The PARENT module: its factory calls <uboThunk>() then sets Nqn=$(rt(),1). Discover
+    # it (and the Nqn var) by that exact shape so a re-minify fails loud.
+    parent_m = find1(
+        r';var (\w+)=E\(\(\)=>\{(?:(?!=E\(\(\)=>\{).)*?'
+        + re.escape(ubo_thunk) + r'\(\);\w+\(\);(\w+)=\$\(rt\(\),1\)',
+        'parent module (forces ubo thunk + assigns Nqn=$(rt()))',
+    )
+    parent_thunk, nqn_var = parent_m.group(1), parent_m.group(2)
+    print(f"  ubo module thunk: {ubo_thunk}; parent (Nqn-setter) thunk: {parent_thunk}; Nqn var: {nqn_var}")
+    # 0a. Stash ubo at the module-body top.
     splice(
-        '(function(exports, require, module, __filename, __dirname) {',
-        '(function(exports, require, module, __filename, __dirname) {\n'
-        '/* pcb: single owner of the /context collapse sentinel; see patcher PCB_HELPER. */\n'
-        + sub(PCB_HELPER, D=DELIM) + '\n',
-        '0 sentinel helper: globalThis.__pcb',
+        ubo_thunk + '=E(()=>{',
+        ubo_thunk + '=E(()=>{'
+        '/* pcb: expose the live ContextVisualization to the message renderer (a different\n'
+        '   bundle closure), so /context can re-render collapsed/expanded from persisted\n'
+        '   ContextData. Runs at module-load so it is set before resume renders. */\n'
+        'try { globalThis.__pcbUbo = ubo; } catch (pcbE) {}\n',
+        '0a ubo bridge: stash at module-body top',
+    )
+    # 0b. Stash the PARENT (Nqn-setting) module thunk for an on-demand, mid-render force
+    #     from site 9. We stash the reference only -- NOT a call -- because calling the
+    #     factory at the bundle bootstrap runs it before React's client internals exist,
+    #     so $(rt()) yields an undefined Nqn that E() then caches permanently (poisons ubo
+    #     for every render). Site 9 calls this DURING a render, when React is up and
+    #     $(rt()) resolves. The thunk is wrapper-top-level, in scope at the bootstrap tail.
+    splice(
+        'JWf();})',
+        '/* pcb: expose the parent (Nqn-setting) module thunk so the message renderer can\n'
+        '   force it DURING a render (React up -> valid Nqn). Forcing ubo\'s own module here\n'
+        '   would load ubo but leave Nqn undefined; forcing anything at bootstrap runs before\n'
+        '   React init and poisons the cached module. So we stash the reference, never call. */\n'
+        'try { globalThis.__pcbForceUbo = ' + parent_thunk + '; } catch (pcbE) {}\n'
+        'JWf();})',
+        '0b ubo bridge: stash parent (Nqn-setting) thunk for lazy force',
     )
 
     print("\n--- data layer (feeds both surfaces) ---")
@@ -506,120 +571,85 @@ def main():
     ).group(1)
     splice(msg.group(0), sub(CAT_SPLIT, X=x_var, NE=ne_var, V=v_var), '7 grid: split Tool results out of Messages')
 
-    print("\n--- transcript-mode collapse (Ctrl+O) ---")
-    # /context bakes its output to a static ANSI string via hat(); it can't react
-    # to anything afterward. So pre-render BOTH a collapsed and an expanded snapshot,
-    # join them with a delimiter, and let a live component (which receives
-    # verbose/isTranscriptMode) choose which half to show. Transcript mode (Ctrl+O)
-    # re-renders messages with verbose=true, so it shows the expanded half. The same
-    # happens for free when /config verbose is on, because that setting is exactly
-    # the `verbose` prop the renderer already keys on -- no special-casing.
+    print("\n--- render-time collapse via persisted ContextData (Ctrl+O) ---")
+    # /context bakes its output to a STATIC ANSI string via hat() (the local-command
+    # contract is onDone(string)); that frozen string can't react to Ctrl+O. So instead
+    # of baking a second copy + a sentinel, the command attaches the structured
+    # ContextData (`data`, the same object it passes to ubo) to the message on a NEW
+    # message-LEVEL field, contextDetailData. The display path then re-mounts the LIVE
+    # ubo from that field, deriving collapse from verbose/isTranscriptMode, so collapse/
+    # expand is produced purely at render time -- in-session AND after resume (the field
+    # is persisted to + rehydrated from the jsonl).
     #
-    # The render path (confirmed by runtime profiling, PCB-gated probes driven
-    # through an interactive /context + Ctrl+O run): the combined string is emitted
-    # via e(content, {display:"system"}), which the command dispatcher WRAPS as
-    # `<local-command-stdout>${content}</local-command-stdout>` before storing it as
-    # a local_command system message. Message.tsx renders local_command via
-    # UserTextMessage, whose `startsWith("<local-command-stdout")` branch hands the
-    # whole wrapped string to UserLocalCommandOutputMessage (which extractTag()s the
-    # inner stdout). So the split/select belongs in UserTextMessage's
-    # local-command-stdout branch (site 9), where verbose + isTranscriptMode are in
-    # scope -- NOT in SystemTextMessage (never reached) and NOT in
-    # UserLocalCommandOutputMessage (no verbose/transcript props).
+    # Why a message-level field (not a content block or a second string): measured with a
+    # real capture (cap_server + ANTHROPIC_BASE_URL) that message-level fields are NOT
+    # serialized into the /v1/messages body -- only role+content blocks are -- so the
+    # ContextData is model-EXCLUDED while still persisting. (metaMessages, by contrast,
+    # become a content block and DO reach the model; that is native and stays as-is.)
+    # ContextData was audited as cleanly JSON round-tripping (no Maps/Sets/functions/
+    # circular; the 3 keys it drops -- deferredBuiltinTools/systemTools/systemPromptSections
+    # -- are undefined-valued and ubo defaults/ignores them), so the raw object is
+    # persisted directly (~31KB, disk-only since model-excluded).
     #
-    # Two delimiter constraints the first cut got wrong, both fixed here:
-    #   1. NO null bytes. A "\0"-bearing message renders fine in transcript mode but
-    #      blanks out in the live scrollback render; use a printable-but-inert
-    #      control char (U+001E RECORD SEPARATOR) that never appears in ANSI output.
-    #   2. The delimiter sits INSIDE the single <local-command-stdout> wrapper, so a
-    #      naive split leaves parts[0] with an open tag but no close, parts[1] with a
-    #      close but no open. Site 9 re-balances: the collapsed half keeps the open
-    #      tag and gets the close re-appended; the expanded half gets the open tag
-    #      re-prepended and keeps the close. Each half is then a valid wrapper.
-    #      (The delimiter + the split/join/strip/re-balance now live in one place:
-    #      globalThis.__pcb, defined at site 0; the sites below just call it.)
-    argv = find1(r'\w+=\$s\(\)&&(\w+)\.trim\(\)\.toLowerCase\(\)!=="all"',
-                 'context command arg var').group(1)
+    # The content the model + jsonl-fallback see stays the native single render
+    # (collapseDetailSections: r, i.e. native-parity collapsed default) -- one full
+    # version, no sentinel.
 
-    # 8a. /context remote mount. The default render (A) stays collapsed; we add an
-    #     expanded copy and emit "<default>DELIM<expanded>". "/context all" makes the
-    #     default expanded; anything else defaults to collapsed.
+    # 8. Command emit (local + remote mounts): thread contextDetailData onto the e()
+    #    options so it lands on the /context message. Content render is unchanged
+    #    (collapseDetailSections: r). NOTE: f= / A= are mid-declaration in a
+    #    `let ...,f=await...` comma-list, so we do NOT inject a statement there; we only
+    #    extend the e(...) OPTIONS object (a statement-level expression after the ;),
+    #    where p / m (the ContextData) are in scope.
     splice(
-        'A=await hat(EWt.createElement(ubo,{data:m,isRemote:!0,collapseDetailSections:r}));'
         'e(A,{display:"system",metaMessages:[SWt(m,{skipCollapseStatus:!0})]})',
-        'A = await hat(EWt.createElement(ubo, { data: m, isRemote: true, collapseDetailSections: r })),\n'
-        '    /* pcb: expanded copy for transcript mode (Ctrl+O) / verbose, baked only when the default is collapsed (else reuse the default render); a render error never masquerades as a remote-fetch failure. The default half keeps native collapseDetailSections: r, so screen-reader / no-alt-screen / tmux-CC / context-all still default to expanded. */\n'
-        '    __pcbExpanded = A; if (r) { try { __pcbExpanded = await hat(EWt.createElement(ubo, { data: m, isRemote: true, collapseDetailSections: false })); } catch (pcbErr) { __pcbExpanded = A; } }\n'
-        'e(\n'
-        '  globalThis.__pcb.join(A, __pcbExpanded),\n'
-        '  { display: "system", metaMessages: [SWt(m, { skipCollapseStatus: true })] }\n'
-        ')',
-        '8a /context remote: bake collapsed+expanded',
+        'e(A,{display:"system",metaMessages:[SWt(m,{skipCollapseStatus:!0})],'
+        '/* pcb: persist ContextData (model-excluded message-level field) for the live re-render */'
+        'contextDetailData:m})',
+        '8a /context remote: attach contextDetailData',
     )
-
-    # 8b. /context local mount.
     splice(
-        'f=await hat(EWt.createElement(ubo,{data:p,collapseDetailSections:r}));'
         'return e(f,{display:"system",metaMessages:[SWt(p)]}),null',
-        'f = await hat(EWt.createElement(ubo, { data: p, collapseDetailSections: r })),\n'
-        '    /* pcb: native default half (collapseDetailSections: r); expanded copy baked only when the default is collapsed, else reuse f. See 8a. */\n'
-        '    __pcbExpanded = f; if (r) { try { __pcbExpanded = await hat(EWt.createElement(ubo, { data: p, collapseDetailSections: false })); } catch (pcbErr) { __pcbExpanded = f; } }\n'
-        'return e(\n'
-        '  globalThis.__pcb.join(f, __pcbExpanded),\n'
-        '  { display: "system", metaMessages: [SWt(p)] }\n'
-        '), null',
-        '8b /context local: bake collapsed+expanded',
+        'return e(f,{display:"system",metaMessages:[SWt(p)],'
+        '/* pcb: persist ContextData (model-excluded message-level field) for the live re-render */'
+        'contextDetailData:p}),null',
+        '8b /context local: attach contextDetailData',
     )
 
-    # 9. UserTextMessage local-command-stdout branch: pick the collapsed or expanded
-    #    half before handing the wrapped string to UserLocalCommandOutputMessage.
-    #
-    #    /context's combined output arrives here as a single
-    #    `<local-command-stdout>COLLAPSED<DELIM>EXPANDED</local-command-stdout>` string
-    #    (param.text). Splitting on the delimiter alone would tear the wrapper tags, so
-    #    we re-balance: the collapsed half keeps the leading "<local-command-stdout>"
-    #    and we re-append the closing tag; the expanded half gets the opening tag
-    #    re-prepended and keeps the trailing "</local-command-stdout>". UserLocalCommand-
-    #    OutputMessage then extractTag()s a well-formed wrapper either way. verbose and
-    #    isTranscriptMode are in scope here (the component's own props); transcript mode
-    #    (Ctrl+O) and /config verbose both flip verbose, so either reveals the expanded
-    #    half. Any local-command-stdout WITHOUT the delimiter (every other local command)
-    #    has parts.length === 1 and passes through byte-identically.
-    #
-    #    Discover the param var + verbose/isTranscriptMode vars and the memo cache var
-    #    structurally so a re-minify fails loud rather than mis-patching.
-    m9 = find1(
-        r'function mGe\(\w+\)\{let \w+=\w+\.c\(\d+\),\{addMargin:\w+,param:(\w+),'
-        r'verbose:(\w+),planContent:\w+,isTranscriptMode:(\w+),timestamp:\w+\}',
-        'UserTextMessage (mGe) signature: param/verbose/isTranscriptMode vars',
-    )
-    param_var, verbose_var, transcript_var = m9.group(1), m9.group(2), m9.group(3)
-    branch = find1(
-        r'if\(' + re.escape(param_var) + r'\.text\.startsWith\("<local-command-stdout"\)\|\|'
-        + re.escape(param_var) + r'\.text\.startsWith\("<local-command-stderr"\)\)\{'
-        r'let (\w+);if\((\w+)\[(\d+)\]!==' + re.escape(param_var) + r'\.text\)'
-        r'\1=(\w+)\.createElement\((\w+),\{content:' + re.escape(param_var) + r'\.text\}\),'
-        r'\2\[\3\]=' + re.escape(param_var) + r'\.text,\2\[(\d+)\]=\1;else \1=\2\[\6\];',
-        'UserTextMessage local-command-stdout branch',
-    )
-    out_var, cache_var, slot1, react_var, comp_var, slot2 = (branch.group(i) for i in range(1, 7))
+    # 8c. Emit handler: the dispatcher builds the /context message via
+    #     _I(`<local-command-stdout>${m}</...>`). Copy contextDetailData off the e()
+    #     options (var A in that scope) onto the message object so it persists + reaches
+    #     the renderer. Other commands pass no contextDetailData -> Object.assign no-ops.
     splice(
-        branch.group(0),
-        'if(' + param_var + '.text.startsWith("<local-command-stdout")||'
-        + param_var + '.text.startsWith("<local-command-stderr")){\n'
-        '  /* pcb: /context bakes COLLAPSED<DELIM>EXPANDED inside one\n'
-        '     <local-command-stdout> wrapper. __pcb.pick selects the half by\n'
-        '     verbose/transcript and re-balances the wrapper tags (and passes any\n'
-        '     non-/context local-command output straight through). */\n'
-        '  let __pcbText = globalThis.__pcb.pick(' + param_var + '.text, '
-        + verbose_var + ' || ' + transcript_var + ');\n'
-        '  let ' + out_var + ';'
-        'if(' + cache_var + '[' + slot1 + ']!==__pcbText)'
-        + out_var + '=' + react_var + '.createElement(' + comp_var + ',{content:__pcbText}),'
-        + cache_var + '[' + slot1 + ']=__pcbText,' + cache_var + '[' + slot2 + ']=' + out_var + ';'
-        'else ' + out_var + '=' + cache_var + '[' + slot2 + '];',
-        '9 UserTextMessage local-command-stdout: pick + re-balance wrapper',
+        '_I(`<local-command-stdout>${m}</local-command-stdout>`)',
+        'Object.assign(_I(`<local-command-stdout>${m}</local-command-stdout>`),'
+        '/* pcb: carry the ContextData field onto the /context message */'
+        'A&&A.contextDetailData!==void 0?{contextDetailData:A.contextDetailData}:{})',
+        '8c emit handler: attach contextDetailData to the message',
     )
+
+    # 9. Display re-mount: Message.tsx local_command branch. When the message carries
+    #    contextDetailData, mount the LIVE ubo (bridged at site 0) from it -- collapsed
+    #    by default, full in transcript mode (Ctrl+O) / verbose -- instead of the frozen
+    #    string. Discover the branch's message / verbose / transcript / React vars + the
+    #    original createElement(mGe,...) call structurally so a re-minify fails loud.
+    m9 = find1(
+        r'if\((\w+)\.subtype==="local_command"\)\{let \w+;if\(\w+\[\d+\]!==\1\.content\)'
+        r'\w+=\{type:"text",text:\1\.content\},[\s\S]{0,140}?'
+        r'(\w+)\.createElement\(\w+,\{addMargin:\w+,param:\w+,verbose:(\w+),isTranscriptMode:(\w+)\}\)',
+        'Message.tsx local_command branch (message/React/verbose/transcript vars)',
+    )
+    msg_var, react_var, verbose_var, transcript_var = m9.group(1), m9.group(2), m9.group(3), m9.group(4)
+    # The exact createElement(mGe,...) call we wrap as the else-branch.
+    mge_call = find1(
+        re.escape(react_var) + r'\.createElement\((\w+),\{addMargin:(\w+),param:(\w+),'
+        r'verbose:' + re.escape(verbose_var) + r',isTranscriptMode:' + re.escape(transcript_var) + r'\}\)',
+        'Message.tsx local_command createElement(mGe,...) call',
+    ).group(0)
+    remount = sub(DISPLAY_REMOUNT, MSG=msg_var, VB=verbose_var, TR=transcript_var,
+                  OR=react_var, MGECALL=mge_call)
+    splice(mge_call, '(\n      ' + remount + '\n    )', '9 display: live ubo re-mount from contextDetailData')
+
     print("\n--- MCP tools collapse ---")
     # 11. Collapsed MCP-tools section: show 5 tools + "+N more tools" instead of the
     #     bare one-line count. The MCP section's collapsed branch is `<i> ? <Oqn count>
@@ -642,36 +672,33 @@ def main():
         '11 MCP tools: collapsed shows 5 + rollup',
     )
 
-    print("\n--- external session viewers (GVn) ---")
-    # 12. GVn (localCommandOutputToSDKAssistantMessage) is the external-viewer display
-    #     path: it strips the <local-command-stdout> wrapper but keeps the inner text,
-    #     so a /context message would show COLLAPSED + the raw U+001E delimiter +
-    #     EXPANDED. Route the unwrapped text through __pcb.strip so external viewers
-    #     (SDK/claude.ai/mobile) get the collapsed half (matching the local default);
-    #     other local-command output has no delimiter and passes through.
+    print("\n--- persistence (jsonl write + resume read) for contextDetailData ---")
+    # The display re-mount (site 9) reads contextDetailData off the message. To make
+    # Ctrl+O expansion work AFTER a reload too, the field must survive the jsonl
+    # round-trip. The serializer spreads known message-level fields conditionally and
+    # the deserializer maps named fields (it does NOT spread unknowns), so we extend
+    # BOTH. ContextData round-trips cleanly (audited: no Maps/Sets/functions/circular).
+    # The field is model-excluded (measured), so persisting ~31KB is disk-only.
+
+    # 10a. WRITE: append a conditional spread of contextDetailData alongside
+    #      toolUseResult in the message serializer (unique anchor).
     splice(
-        'local-command-stderr>([\\s\\S]*?)<\\/local-command-stderr>/,"$1").trim();'
-        'return{type:"assistant",message:SS({content:n})',
-        'local-command-stderr>([\\s\\S]*?)<\\/local-command-stderr>/,"$1").trim();'
-        'n=globalThis.__pcb.strip(n);'
-        'return{type:"assistant",message:SS({content:n})',
-        '12 GVn: external viewers show collapsed half (strip delimiter)',
+        '...f.toolUseResult!==void 0&&{toolUseResult:f.toolUseResult}',
+        '...f.toolUseResult!==void 0&&{toolUseResult:f.toolUseResult},'
+        '...f.contextDetailData!==void 0&&{contextDetailData:f.contextDetailData}',
+        '10a persist write: contextDetailData conditional-spread',
     )
 
-    # NOTE on model context: the combined "<local-command-stdout>COLLAPSED<DELIM>
-    # EXPANDED</local-command-stdout>" string is persisted to the session JSONL
-    # verbatim, matching how upstream persists local-command output, so a resume
-    # reconstructs the exact combined string and the renderer (site 9) still offers
-    # collapse/expand. This does NOT leak into model context: the model prompt is
-    # built by selectableUserMessagesFilter (src/components/MessageSelector.tsx),
-    # which excludes any message containing <local-command-stdout> -- and /context's
-    # message is type:"system" besides. Verified empirically: ANTHROPIC_LOG capture
-    # of the outbound /v1/messages body on --continue contains no delimiter, no
-    # local-command-stdout, no "Context Usage". The GVn unwrap-to-assistant
-    # converter (localCommandOutputToSDKAssistantMessage) is the SDK/RC/mobile DISPLAY
-    # path for external session viewers, not the model prompt; site 12 strips the
-    # delimiter there too, so those viewers show the collapsed half rather than the raw
-    # COLLAPSED<DELIM>EXPANDED string.
+    # 10b. READ: the deserializer reconstructs the message via Rn({content,...}). Map
+    #      contextDetailData back from the stored row. This Rn({content:n,...}) shape
+    #      appears twice (two deserialize branches); both must carry the field.
+    splice(
+        'Rn({content:n,toolUseResult:e.tool_use_result,uuid:e.uuid,timestamp:e.timestamp})',
+        'Rn({content:n,toolUseResult:e.tool_use_result,'
+        'contextDetailData:e.contextDetailData,uuid:e.uuid,timestamp:e.timestamp})',
+        '10b persist read: map contextDetailData back (x2)',
+        expected=2,
+    )
 
     # ------------------------------------------------------------------
     new_data = bun_handler.repack_with_js(
