@@ -14,7 +14,27 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` (that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`).
 
-## v1.9-dev: recovery markers redesigned as cards
+## v1.10-dev: retire former Patch L (thinking-display)
+
+Former Patch L forced `--thinking-display summarized` onto the IDE-spawned CLI
+so Opus 4.7+ thinking summaries would render in the chat panel instead of
+coming back as empty stubs. Anthropic fixed the underlying bug in extension
+`2.1.176`: `spawnClaude` now reads `showThinkingSummaries` from `settings.json`
+and passes the flag itself ([#59844](https://github.com/anthropics/claude-code/issues/59844)).
+With `"showThinkingSummaries": true` set, the documented path works on its own,
+so the patch is retired and the set is now eleven patches (A through K).
+
+- **Live + prebuilt.** The 2.1.195 prebuilt is re-synthesized at v1.10 (the
+  thinking-display splice is gone; 18 extension splices instead of 19).
+- **Archived.** The v1.9 2.1.159 prebuilt still carried Patch L and can't be
+  rebuilt without that bundle on disk, so it moves to
+  `prebuilt/archive/v1.9/2.1.159/`. A 2.1.159 install now falls through to
+  manual application of A through K.
+- **Keep the setting.** Thinking summaries on Opus 4.7+ now depend on
+  `"showThinkingSummaries": true` in `~/.claude/settings.json`, the official
+  knob, rather than on an unconditional flag.
+
+## v1.9: recovery markers redesigned as cards
 
 The Patch K recovery markers, previously colored text, now render as cards: a
 header with the state badge and a counter you can click to cycle between

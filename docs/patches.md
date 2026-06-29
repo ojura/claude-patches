@@ -904,58 +904,20 @@ true canonical origin, sourced from a sibling fork that retained it.
 
 ---
 
-## Patch L: force `--thinking-display summarized` on the IDE-spawned CLI
+## Patch L (retired in v1.10): thinking-display on the IDE-spawned CLI
 
-For `claude-opus-4-7[1m]` (and any 4.7+ model), Anthropic flipped the API
-default for `thinking.display` from `"summarized"` to `"omitted"`
-(documented in their Opus 4.7 migration guide). With `display: "omitted"`,
-the API returns thinking content blocks with an empty `thinking` field and
-a multi-KB `signature` only, so the webview renders the static
-`<div class="thinkingStatic">Thinking</div>` stub, since its `thinking.length > 0`
-branch can never fire. Thinking summaries vanish from the IDE chat panel.
+Former Patch L forced `--thinking-display summarized` onto the IDE-spawned CLI so
+Opus 4.7+ thinking summaries rendered instead of an empty `Thinking` stub. The old
+splice changed the argv gate `if(U.type!=="disabled"&&U.display)...` to push the
+flag unconditionally with a `summarized` default.
 
-The bundled CLI *has* a gate that sets `display = "summarized"` when
-`settings.json` carries `showThinkingSummaries: true`, but the gate is
-`!getIsNonInteractiveSession() && showThinkingSummaries === true`. The IDE
-spawns the CLI subprocess with `--print --input-format stream-json
---output-format stream-json`, which makes the session non-interactive, so
-the gate never fires for IDE chat panels, so the user's setting is silently
-ignored where it matters most.
+Retired because Anthropic fixed the underlying bug in extension `2.1.176`:
+`spawnClaude` now reads `showThinkingSummaries` from `settings.json` and passes
+`--thinking-display summarized` itself, so the original gate works. Keep
+`"showThinkingSummaries": true` in `~/.claude/settings.json` for summaries on Opus
+4.7+; no patch needed.
 
-The CLI also accepts an explicit `--thinking-display <mode>` flag that
-bypasses the non-interactive gate. The IDE's SDK-side spawn code already
-knows how to pass it, but only when `thinkingConfig.display` is set on the
-spawn-time options, and the chat-panel caller never sets it, so the flag
-never reaches argv.
-
-### Patch shape
-
-In `extension.js`, find the argv assembly that gates the flag on `U.display`
-being truthy:
-
-```js
-if(U.type!=="disabled"&&U.display)i.push("--thinking-display",U.display)
-```
-
-Replace with an unconditional push that defaults the mode to `summarized`:
-
-```js
-if(U.type!=="disabled")i.push("--thinking-display",U.display||"summarized")
-```
-
-Dropping `&&U.display` stops the empty-display case from suppressing the
-flag; `||"summarized"` supplies the fallback value. Every IDE-spawned CLI
-subprocess now receives `--thinking-display summarized`, the CLI's first
-display-gate branch fires regardless of interactive state, and the API
-returns real thinking summaries again. The local symbols (`U`, `i`) drift
-between releases; locate by the distinctive `"--thinking-display"` string
-literal.
-
-If/when upstream lands either option in [#59844](https://github.com/anthropics/claude-code/issues/59844)
-(dropping the `!getIsNonInteractiveSession()` gate from the CLI, or this
-same extension splice as the fallback), Patch L can be retired.
-
-**Upstream issue**: [#59844](https://github.com/anthropics/claude-code/issues/59844) (fix proposal); it closes the gap described by [#49902](https://github.com/anthropics/claude-code/issues/49902) / [#49322](https://github.com/anthropics/claude-code/issues/49322) / [#49268](https://github.com/anthropics/claude-code/issues/49268) / [#8477](https://github.com/anthropics/claude-code/issues/8477) and several more.
+**Upstream issue**: [#59844](https://github.com/anthropics/claude-code/issues/59844).
 
 ## Verifying and debugging the recovery markers
 

@@ -29,7 +29,8 @@ F + G); the rest just kept getting added.
 | **I** | Neutralize the webview's 500-message render cap | Sessions with > 600 messages silently truncate to last 500 in the chat panel; no UI feedback | [#55701](https://github.com/anthropics/claude-code/issues/55701) |
 | **J** | Resolve cross-file `logicalParentUuid` at session load (load sibling JSONLs to bridge fork boundaries) | Forks of compacted sessions can't scroll back into the source session's history; chain walker stops at the cross-file stitch | [#48937 (cross-file)](https://github.com/anthropics/claude-code/issues/48937) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
 | **K** | `lost+found`-style read-side recovery for sessions with dangling `logicalParentUuid`: add visible markers in the chat that recover lost earlier messages from the same file | Sessions where the compactor's lpu was never persisted (write-side bug at `compact.ts:598`) silently truncate the chain at the boundary; user thinks pre-compact work was lost | [#55818](https://github.com/anthropics/claude-code/issues/55818) / [#46603](https://github.com/anthropics/claude-code/issues/46603) |
-| **L** | Force `--thinking-display summarized` on the IDE-spawned CLI subprocess | Thinking renders as a dead "Thinking" stub instead of a summary for Opus 4.7+: Anthropic flipped the API default to `omitted`, and the CLI's `summarized` gate never fires for the non-interactive IDE subprocess, so `showThinkingSummaries` is silently ignored | [#59844](https://github.com/anthropics/claude-code/issues/59844) |
+
+Patch **L** (force `--thinking-display summarized` on the IDE-spawned CLI) was retired in v1.10: Anthropic fixed it in extension `2.1.176` ([#59844](https://github.com/anthropics/claude-code/issues/59844)), where `spawnClaude` reads `showThinkingSummaries` and passes the flag itself. Set `"showThinkingSummaries": true` in `~/.claude/settings.json` for thinking summaries on Opus 4.7+.
 
 See [`docs/patches.md`](docs/patches.md) for the full per-patch breakdown
 (why, locate, patch, verify, test). For *how* to introspect the running
@@ -99,7 +100,7 @@ applies the patches, end to end. The skill:
   globbing across `~/.<ide>/extensions/` if the env var isn't set.
 - **Fetches and runs the prebuilt** for your installed version from
   this repo. The prebuilt is idempotent (detects an embedded
-  `pfg-v1.9` signature and no-ops if patches are already applied) and
+  `pfg-v1.10` signature and no-ops if patches are already applied) and
   byte-stable verified at synthesis time.
 - **Falls back to manual per-patch synthesis** if no prebuilt exists
   yet for your version.
