@@ -154,8 +154,22 @@ RULES = [
     ),
     (
         "F-s3 (sidebar q8 ctor wires onSessionStateChanged)",
-        re.compile(r',void 0,\(\)=>this\.broadcastUsageUpdate\(\)\)'),
-        ',void 0,()=>this.broadcastUsageUpdate(),!1,(H,D,O)=>{this.updateSessionState(H,D,O)})',
+        # The sidebar resolver's `new Ks(...)` ctor passes void 0 for both the
+        # panelTab slot AND the onSessionStateChanged slot. Newer bundles grew
+        # two trailing ctor params (isFullEditor flag, notifyPeersLoggedIn cb)
+        # after the usage-broadcast callback, so the old "...broadcastUsageUpdate())"
+        # tail no longer ends the call. Match by the structural shape instead:
+        #   ,void 0, <usage-cb> , <isFullEditor-flag> , void 0 , <notify-cb> )
+        # The middle `void 0` is the unwired onSessionStateChanged we replace.
+        # This is unique: the full-editor (resolveWebviewView) ctor already wires
+        # a real callback there, and setupPanel passes a real panelTab (not void 0).
+        re.compile(
+            r',void 0,(?P<usage>\(\)=>this\.' + _ID + r'\(\)),'
+            r'(?P<full>!{1,2}[A-Za-z_$0-9]+),'
+            r'void 0,'
+            r'(?P<notify>\((?P<na>' + _ID + r')\)=>this\.' + _ID + r'\((?P=na)\))\)'
+        ),
+        r',void 0,\g<usage>,\g<full>,(H,D,O)=>{this.updateSessionState(H,D,O)},\g<notify>)',
     ),
     (
         "G.1 (panel ctor callback supports skip-bookkeeping flag)",
