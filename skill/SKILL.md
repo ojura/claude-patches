@@ -682,6 +682,24 @@ grep -cE '[A-Za-z_$]{1,3}=[A-Za-z_$]{1,3}\.parentUuid\?[A-Za-z_$]{1,3}\.get\([A-
 
 Expect 2 patched walkers and 0 remaining old forms.
 
+**When Patch K co-applies (the shipped config) this count is 1, not 2, and a
+count of 2 means the up-walk is BROKEN.** Patch D installs the fallback on the
+STANDALONE walker only; the chain-builder up-walk belongs to K, converted
+straight from pristine `:void 0` to
+`<X>=<X>.parentUuid?<MAP>.get(<X>.parentUuid):(<X>.logicalParentUuid?(_recovered=!0,<MAP>.get(<X>.logicalParentUuid)):void 0)`.
+That K form already contains D's fallback plus the `_recovered` flag, so the
+up-walk must stay pristine for K's splice to anchor and must NOT be separately
+plain-D'd. The grep above does not match K's `(_recovered=!0,...)` form, so a
+correct D+K bundle returns 1; a bundle with two plain-D walkers returns 2 and
+PASSES, the broken state where the up-walk never sets `_recovered`. With K in
+play, verify the two walkers separately:
+
+```
+grep -c '<X>.logicalParentUuid?<MAP>.get(<X>.logicalParentUuid)' $EXT/extension.js  # standalone (plain-D): 1
+grep -c '_recovered=!0,<MAP>.get(<X>.logicalParentUuid)' $EXT/extension.js          # up-walk (K-owned): 1
+grep -c ':(<X>.logicalParentUuid?<MAP>.get(<X>.logicalParentUuid):void 0)}return <arr>.reverse' $EXT/extension.js  # leftover plain-D up-walk: 0
+```
+
 ### Test
 
 After reload, open a session that has been auto-compacted. Pre-compact
@@ -738,12 +756,15 @@ Confirm exactly one occurrence of each old string before replacing.
 
 ```
 # Both new orderings present
-grep -cE '[A-Za-z_$]{1,3}=H\|\|[A-Za-z_$0-9]+\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)' $EXT/extension.js
+grep -cE '[A-Za-z_$]{1,3}=[A-Za-z_$0-9]+\|\|[A-Za-z_$0-9]+\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)' $EXT/extension.js
 grep -cE '\|\|[A-Za-z_$0-9]+\([^)]+\)\|\|[A-Za-z_$0-9]+\([^)]+,"summary"\)\|\|[A-Za-z_$0-9]+\([^)]+,"lastPrompt"\)' $EXT/extension.js
 ```
 
 Both should be `>= 1` (site 1 + site 2). Old `lastPrompt`-then-`summary`
-ordering should not appear.
+ordering should not appear. The site-1 first operand is matched generically
+(`=[A-Za-z_$0-9]+`), not pinned to a literal symbol, since it drifts per bundle;
+if site 1 still reports 0, fall back to a literal grep for the new
+`summary`-then-`lastPrompt` order with the extractor names you resolved.
 
 ## Steps 8 & 9: Patches F and G: USE THE SCRIPT
 
@@ -876,6 +897,18 @@ doesn't need any of that.
 Constructor parameter order is verified by reading the class body
 (`this.isFullEditor=I;this.onSessionStateChanged=F`; last two params
 are isFullEditor then onSessionStateChanged in that order).
+
+**Drift: the ctor can grow, so the `broadcastUsageUpdate())` tail may no longer
+exist.** A newer bundle can already pass an `isFullEditor` flag AND a
+`notifyPeersLoggedIn` callback after the usage-broadcast cb, so the sidebar
+`new <Comm>(...)` ends `...,()=>this.<broadcast>(),<flag>,void 0,<notifyCb>)`,
+with the `onSessionStateChanged` slot already present as `void 0`. The fix is
+then not "append two args" but "replace that middle `void 0` with the
+forwarder", matched structurally: the `,void 0,` between the isFullEditor flag
+and the notify cb is unique to the sidebar resolver (the full-editor resolver
+already wires a real callback there, and setupPanel passes a real panelTab).
+`apply-patch-fg.py`'s F-s3 regex absorbs this; the manual note is for when its
+regex needs re-deriving against a yet-newer shape.
 
 ### Verify
 
@@ -1154,10 +1187,14 @@ function OD($){if($.length>g20){let Z=$.length-u20;return $.slice(Z)}return $}
 Where `g20 = 600` and `u20 = 500`. Discover via:
 
 ```
-grep -oE 'function [A-Za-z_$]+\(\$\)\{if\(\$\.length>[A-Za-z0-9]+\)\{let [A-Za-z_$]+=\$\.length-[A-Za-z0-9]+;return \$\.slice\([A-Za-z_$]+\)\}return \$\}' $EXT/webview/index.js
+grep -oE 'function [A-Za-z_$0-9]+\([A-Za-z_$]\)\{if\([A-Za-z_$]\.length>[A-Za-z0-9]+\)\{let [A-Za-z_$]+=[A-Za-z_$]\.length-[A-Za-z0-9]+;return [A-Za-z_$]\.slice\([A-Za-z_$]+\)\}return [A-Za-z_$]\}' $EXT/webview/index.js
 ```
 
-Replace with the identity function:
+The param and the two length constants drift per bundle, so match the param
+generically (above) rather than pinning it; no backreference, so it stays
+portable to ugrep / `-G`-wrapped greps. If that misses, search for the
+`.length-` then `.slice(` shape. Replace with the identity
+`function <FN>(<param>){return <param>}` using the observed names.
 
 Old:
 ```
@@ -1455,6 +1492,14 @@ by their `require` target, and do NOT assume they are two distinct symbols:
   one carrying `.readFile`) and sometimes dedups them to one. Map both block
   members onto whatever symbol(s) the current bundle uses; one name serving
   both is correct, not a mistake.
+- **The loader's fs symbol is NOT Patch A's fs symbol.** Patch A reaches the
+  filesystem through the callback-style `fs` module's `.promises` sub-namespace
+  (`<FS>.promises.readFile`/`.appendFile`), while the loader and K block call
+  `fs/promises` directly (`<FS_RAW>.readFile`, `<FS_PROMISES>.readdir`). They do
+  not interchange and fail SILENTLY when crossed: `fs/promises` has no
+  `.promises`, and an awaited callback-style `<FS>.readFile`/`.readdir` resolves
+  to `undefined` (no throw). Resolve each patch's fs symbol from its own call
+  shape; never reuse one across patches.
 
 Substitute these in the prebuilt's `new` string and apply. Confirm
 exactly one occurrence of the `old` anchor before replacing. (Warning:
@@ -1494,6 +1539,14 @@ the parsed array. Treat K and D as a single behavioral unit. If you
 ever want to ship K standalone, the seam must also rewrite
 `parentUuid`, which the canonical does not.
 
+The division of labor: D installs the fallback on the STANDALONE walker; the
+up-walk is K's, converted from pristine `:void 0` (K's form subsumes D's
+fallback and adds `_recovered`). With K co-applied, do NOT plain-D the up-walk;
+keep it pristine for K's anchor. Step 6's "expect 2 walkers" check is the
+D-only count: it under-reports the correct D+K state (returns 1) and waves
+through the broken two-plain-D state (returns 2), so use Step 6's D+K verify
+(the three separate greps there) once K is in play.
+
 Verified empirically by an independent from-scratch reconstruction of
 K from the prose alone: working on a D-less pristine file, the
 reconstruction deduced this dependency and defensively wrote both
@@ -1532,12 +1585,33 @@ parse argument is the head's buffer local, not a leftover:
 ```
 grep -c 'await <READ_BUF>(<find>.filePath,<find>.fileSize)' $EXT/extension.js  # expect 1
 grep -c 'await 0('       $EXT/extension.js                                     # expect 0
-grep -c '_parsed=<PARSE>(<buf>)' $EXT/extension.js                             # expect 1 (<buf> = the head's local)
+grep -cE '_parsed=(await )?<PARSE>\(<buf>\)' $EXT/extension.js                  # expect 1 (<buf>=head's local; `await` on async-parse bundles, see point 3)
 # and: the only standalone single-letter free var in the loader body should be <buf>/<find>, nothing else
 ```
 
 Neither guard nor `node --check` substitutes for reading the loader
 head once with your own eyes; it is the cheapest catch.
+
+3. **The parse may be async, the render-filter must stay sync, and the
+   chain-builder may yield.** If `<PARSE>` returns a promise, the head reads
+   `let <buf>=await <READ_BUF>(...); ... let _parsed=await <PARSE>(<buf>)` and
+   every sibling re-parse is `await <PARSE>(...)`; a synchronous `<PARSE>(<buf>)`
+   carried from an older bundle hands a Promise to array-expecting code. That
+   tell is LOUD wherever the result is consumed eagerly (a `.map(...)` or
+   `for...of` on it throws `TypeError: ... is not a function` / "not iterable"
+   the instant a conversation loads, and the loader's caller does not catch it,
+   so the load rejects), and genuinely SILENT only on a missed-await SIBLING
+   re-parse (a Promise's `.length` is `undefined`, so the index loop skips and
+   backfill quietly finds nothing). Second, if the chain-builder ends its
+   up-walk with an `await new Promise(<setImmediate>)` yield between
+   `<arr>.reverse()` and the render-filter call, the marker splice must PRESERVE
+   it. Third, the render-filter must return a SYNCHRONOUS array: the marker
+   block guards on `if(Array.isArray(_ren)&&_term)` where `_ren` is the filter's
+   return, so an async filter makes `_ren` a Promise, fails the guard, and
+   SILENTLY drops every marker (the transcript still renders, since the caller
+   awaits the return). Re-confirm the filter has no `async` and returns an array
+   on every path. All semantics, invisible to `node --check`; match them against
+   the target's actual shape.
 
 ### Critical: the render-wrap needs the `return` -> `let _ws=` binding conversion
 
@@ -1584,6 +1658,39 @@ grep -c 'return <REACT>.createElement(<USER_MSG_COMPONENT>,'  $EXT/webview/index
 
 Reachability, not presence, is the property you are verifying. See
 `prebuilt/archive/broken/` for the two times this shipped.
+
+### Critical: the webview React factory drifts, and the wrap uses TWO bundle vars
+
+Two things in the render-wrap are NOT stable across bundles, despite
+prose elsewhere implying the React var is:
+
+1. **The factory may not be `<REACT>.default.createElement` at all.** A
+   bundle can build elements through a JSX runtime
+   (`<JSX>(type,config,maybeKey)` that copies config props, including
+   `children`, into `props` and reads `key` from `config.key`) with no
+   `createElement` export in scope, so a verbatim
+   `let _h=<REACT>.default.createElement` binds an unbound symbol. Resolve
+   the factory by what the user-message branch actually CALLS; if it is
+   the JSX runtime, define `_h` as a createElement-compatible shim over
+   it:
+   `let _h=(_ty,_pr,..._ch)=><JSX>(_ty,{...(_pr||{}),children:_ch.length===0?void 0:_ch.length===1?_ch[0]:_ch})`
+   (children-in-config; `key` flows through `config.key`). Confirm from
+   the runtime's body that it copies `children` and honors `config.key`.
+
+2. **The wrap references TWO bundle vars, not one.** Both the message
+   object (`<MSG>`) AND the SESSION object (`<SESSION>`, the dispatcher's
+   session param) appear: the marker payload reads
+   `<MSG>.uuid`/`.content`/`.message`/`.type`, and the marker-COUNTER
+   enumerates the session signal via `<SESSION>.messages.peek()`. Remap
+   BOTH. Remapping only the message var leaves `<SESSION>.messages.peek()`
+   pointing at a stale/undefined symbol; the surrounding try/catch
+   swallows it, `_tot` stays 0, and the "Marker N of M" counter never
+   renders while the next/cycle glyph is always wrong, all silently (it
+   survives a markers/role/nonce DOM gate, which is how it shipped once).
+   Find the session param from the branch's
+   `<FACTORY>(<COMPONENT>,{session:<SESSION>,...})`. Guard:
+   `grep -c '<SESSION>.messages.peek()'` is 1 and the wrong-var form is 0
+   after remap.
 
 ### Patch K's behavioral contract (not derivable from the prose above)
 
@@ -1642,6 +1749,19 @@ loader shape), the canonical guarantees the following:
   / `_kTk1` and embeds a "K stitching wall-clock: parse Xms, J
   cross-file prepend Yms, ..." line in the bookend and broken
   essays. There is no side-channel logging.
+- **The marker renderer has two entry points; `_tel` is optional and
+  every `_tel` read must stay guarded.** The chain-builder is reached two
+  ways: a file-load path that passes the telemetry object
+  (`<WALKER>(_parsed,<opts>,_pfgkTel)`), and an in-memory chain-walk path
+  that renders an already-assembled set with no telemetry
+  (`<WALKER>(<msgs>,<opts>)`, i.e. `<CHAIN_BUILDER>(<msgs>,undefined)`).
+  The marker block runs on BOTH, so it cannot assume `_tel` exists: each
+  read is guarded (`_tel&&_tel.timing`, `_tel?_tel.siblingsScanned:0`,
+  ...) and falls back to `0`/`null`/`""`. Bookend and broken markers
+  still emit on the no-telemetry path (zeroed rows, empty wall-clock
+  line); "simplifying" any guard to a bare `_tel.x` throws only on that
+  path, which `node --check` and a file-load-only test both miss.
+  Standing contract, not version drift.
 - **Resolved-boundary detection reads `_seen`, no separate set
   required.** A `compact_boundary` qualifies for a bridge or seamClean
   marker when `!parentUuid && logicalParentUuid && _seen.has(lpu) &&

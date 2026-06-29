@@ -940,6 +940,24 @@ future lookups instead of already-bound references (re-bind the export,
 clear `require.cache`, a `Proxy`) is not something I have ruled out. Slow (~5-15s for the reload). This is what
 the patch-claude skill uses.
 
+> **Caveat: a second open window keeps the extension host alive, so
+> `Reload Window` reloads only the renderer.** Antigravity shares one
+> extension host across windows of the same profile. If another window
+> is open, `Developer: Reload Window` on your window re-creates the
+> renderer (webviews reload patched `webview/index.js` on a fresh tab,
+> so renderer-side patches DO take) but the exthost process survives and
+> keeps running the `extension.js` it loaded at startup, so exthost-side
+> patches (the loader, J/K, the session list) silently run STALE code.
+> Tells: the exthost pid is unchanged across reloads (check via the
+> `--inspect` port, e.g. `9229`); a freshly written session fixture
+> doesn't appear in the panel (the stale exthost's session-list cache
+> predates it); the patched loader produces no markers. Fix: close the
+> other window(s) (or fully quit + relaunch) so the next `Reload Window`
+> actually restarts the exthost; confirm the pid changed. `Developer:
+> Restart Extension Host` is the targeted alternative but did not reliably
+> restart a window-shared host in testing, so the close-other-windows
+> route is the dependable one.
+
 ### Picking which mechanism
 
 - "Test how the extension reacts to a webview message" → mechanism 1
