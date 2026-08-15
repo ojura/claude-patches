@@ -78,8 +78,9 @@ Verify that the inline streaming-thinking restoration applied by
 `util/patch_streaming_thinking.py --instr` survives **sustained streaming
 load**, not just a brief flash of one or two `thinking_delta` events.
 
-The chain (reducer call → `S4` setter → React prop down through `lxH` →
-memo bypass → `QyA` re-render → `MH` useMemo recompute → aggregator merge)
+The chain (reducer call → thinking setter → React prop down through the
+renderer → memo bypass → transcript component re-render → transcript-extras
+useMemo recompute → aggregator merge)
 runs through enough indirection that holding it through a single delta is
 not informative. What matters is whether it stays correct under a real
 high-frequency stream.
@@ -97,7 +98,7 @@ claude --model claude-sonnet-4-6
 
 The thresholds below were calibrated against Sonnet on the
 absorbed-writer build (interleaved canonical prompt at N=1..3). The
-load-bearing assertions (`W1 ≥ 1` shows progressive writer is wired,
+assertions that decide pass/fail (`W1 ≥ 1` shows the progressive writer runs,
 `broken_pairs == 0` shows propagation chain is intact) hold across
 runs regardless of small Sonnet cadence variation.
 
@@ -137,8 +138,8 @@ Why this is canonical, not the simpler "Show your reasoning for each
 step" form: the interleaved variant exercises the full streaming
 state-machine cycle - E.3 (thinking content_block_start init) and
 E.4 (text content_block_start snapshot) fire once per turn rather
-than once per run, the renderer prop chain re-fires through the lxH
-/ QyA / MH path on every turn boundary, and the absorbed writer
+than once per run, the renderer prop chain re-fires through the
+renderer / component / useMemo path on every turn boundary, and the absorbed writer
 (E.7) runs through a fresh accumulator each turn. The simpler form
 covers only the single-turn case and under-tests the lifecycle hooks.
 
@@ -174,7 +175,7 @@ knight be on for N=1,2,3? Show your reasoning for each step.
 ```
 
 Produces one thinking block and one text block - only verifies E.3
-init and E.4 snapshot once each, but the load-bearing assertions
+init and E.4 snapshot once each, but the deciding assertions
 (W1 ≥ 1, broken_pairs == 0) hold the same way and per-delta volume
 is comparable.
 
@@ -186,7 +187,7 @@ whole run even when interleaving works as designed.
 ## Pass thresholds
 
 Calibrated against the 2026-06-07 absorbed-writer build (pristine
-2.1.168 + connoisseur display + Patch S with --instr). Load-bearing
+connoisseur display + Patch S). The deciding
 assertions are `broken_pairs == 0` (prop chain is wired) and `W1 ≥ 1`
 (absorbed writer fires).
 
@@ -197,12 +198,12 @@ one turn instead of three.
 
 | Metric | Threshold (interleaved N=1..3) | What a failure means |
 |---|---|---|
-| `W1` writer fires | ≥ 60 | Absorbed thinking_delta writer (E.7) not firing - A4 only sees finalized writes. **Load-bearing.** |
+| `W1` writer fires | ≥ 60 | The absorbed thinking_delta writer (E.7) is not running, so the setter only ever sees finalized writes. Must hold: without it nothing streams |
 | `thinkLen` peak | ≥ 1200 chars | Either prompt too easy (model retrieved a closed form) or thinking not received |
-| `R2 A4 t=function` | ≥ 60 | Total React useState setter invocations: should approximately equal W1 + finalized writes per turn. R2 ≈ W1 means all writes are progressive (good) |
-| `M2` with `thinkE ≥ 1` | ≥ 60 | MH not folding streaming thinking into transcript |
-| `E1` with `MH ≥ 1` | ≥ 60 | Aggregator dropping the thinking branch |
-| `L1(n) → C2(y)` broken pairs | 0 | streamingThinking prop appeared at QyA without arriving at lxH - propagation bug. **Load-bearing.** |
+| `R2 setThinking t=function` | ≥ 60 | Total React useState setter invocations: should approximately equal W1 + finalized writes per turn. R2 ≈ W1 means all writes are progressive (good) |
+| `M2` with `thinkE ≥ 1` | ≥ 60 | The useMemo is not folding streaming thinking into the transcript |
+| `E1` with `memo ≥ 1` | ≥ 60 | Aggregator dropping the thinking branch |
+| `L1(n) → C2(y)` broken pairs | 0 | The streamingThinking prop reached the transcript component without arriving at the renderer, so the prop chain is broken. Must be zero: any nonzero count means the thinking never renders |
 | `L1(y) → C2(y)` healthy pairs | ≥ 30 | Prop chain propagating through memo enough times |
 | `M1 stMsgs=0` transitions | ≥ 2 (= N-1 turn boundaries) | Each new API turn re-initializes streamingThinking; counts boundaries between turns. If < N-1, the model didn't actually interleave |
 | Distinct `blockIndex` for `blockType=thinking` | ≥ 3 | One content-block index per thinking block; confirms a fresh thinking block per turn |
@@ -308,9 +309,9 @@ diagnostic-rich; blind blocking is neither.
 ## Reading the result
 
 A `PASS` on `W1 ≥ 1` AND `broken_pairs == 0` is the minimal
-load-bearing success - the absorbed progressive writer is firing AND
+success condition - the absorbed progressive writer runs AND
 the prop chain is wired end-to-end. Volume metrics (thinkLen, R2,
-M2/think, E1/MH, healthy_pairs) are advisory; they vary with prompt
+M2/think, E1/memo, healthy_pairs) are advisory; they vary with prompt
 difficulty, model choice, and Anthropic-side streaming cadence.
 
 A `FAIL` on `W1 == 0` with `broken_pairs == 0` means the renderer
@@ -319,7 +320,7 @@ likely the absorbed writer (E.7) didn't land or anchor-drifted on
 this version. Check the patcher's apply log for E.7 status.
 
 A `FAIL` on `broken_pairs ≥ 1` means the propagation chain is wrong
-even if the totals look healthy - **load-bearing**.
+even if the totals look healthy, so this one decides the run.
 
 A `FAIL` on the M1-transitions / distinct-blockIndex rows with the
 volume rows passing means the model didn't actually interleave -

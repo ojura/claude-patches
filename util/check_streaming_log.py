@@ -25,11 +25,11 @@ THRESHOLDS = [
     ('w1_progressive_writes', '>=', 60,
      "count of W1 lines (absorbed writer firing per thinking_delta)"),
     ('r2_setter_calls', '>=', 60,
-     "count of R2 lines (A4 setter invocations: progressive W1 + finalized)"),
+     "count of R2 lines (thinking-setter invocations: progressive W1 + finalized)"),
     ('m2_with_think', '>=', 60,
-     "count of M2 lines whose thinkE >= 1 (MH carried a thinking message)"),
-    ('e1_with_mh', '>=', 60,
-     "count of E1 lines whose MH >= 1 (aggregator received the thinking message)"),
+     "count of M2 lines whose thinkE >= 1 (the useMemo carried a thinking message)"),
+    ('e1_with_memo', '>=', 60,
+     "count of E1 lines whose memo >= 1 (aggregator received the thinking message)"),
     ('broken_pairs', '==', 0,
      "L1(n) -> C2(y) sequences (propagation gap; must be zero)"),
     ('healthy_pairs', '>=', 30,
@@ -51,13 +51,13 @@ def parse(log_text):
     metrics['thinkLen_peak'] = max(thinklens) if thinklens else 0
 
     metrics['r2_setter_calls'] = len(
-        re.findall(r'\[pfg-instr R2 A4 t=function\]', log_text)
+        re.findall(r'\[pfg-instr R2 setThinking t=function', log_text)
     )
 
     # W1 = absorbed thinking_delta writer firing. Each line is one
     # progressive write attributed to the writer body itself, distinct
-    # from finalized writes that go through A4 via the assistant-message
-    # handler in pristine c2H.
+    # from the finalized write the reducer makes through the same setter
+    # when an assistant message lands.
     metrics['w1_progressive_writes'] = len(
         re.findall(r'\[pfg-instr W1 writer=thinking_delta ', log_text)
     )
@@ -67,8 +67,8 @@ def parse(log_text):
         if int(m) >= 1
     )
 
-    metrics['e1_with_mh'] = sum(
-        1 for m in re.findall(r'\[pfg-instr E1 agg MH=(\d+)', log_text)
+    metrics['e1_with_memo'] = sum(
+        1 for m in re.findall(r'\[pfg-instr E1 agg memo=(\d+)', log_text)
         if int(m) >= 1
     )
 
@@ -77,11 +77,11 @@ def parse(log_text):
     last_l1 = None
     broken = healthy = 0
     for line in log_text.split('\n'):
-        m = re.search(r'\[pfg-instr L1 lxH hasST=(.)', line)
+        m = re.search(r'\[pfg-instr L1 render hasST=(.)', line)
         if m:
             last_l1 = m.group(1)
             continue
-        m = re.search(r'\[pfg-instr C2 QyA hasST=(.)', line)
+        m = re.search(r'\[pfg-instr C2 component hasST=(.)', line)
         if m and last_l1 is not None:
             if last_l1 == 'n' and m.group(1) == 'y':
                 broken += 1
@@ -95,7 +95,7 @@ def parse(log_text):
     # (each new turn starts with an empty streamingThinking.messages
     # list before E.3 init repopulates it).
     metrics['m1_stmsgs_zero_transitions'] = len(
-        re.findall(r'\[pfg-instr M1 MH fH=\d+ stMsgs=0\]', log_text)
+        re.findall(r'\[pfg-instr M1 memo tools=\d+ stMsgs=0\]', log_text)
     )
 
     # Distinct content-block indices observed at content_block_start
@@ -106,7 +106,7 @@ def parse(log_text):
     text_indices = set()
     for line in log_text.split('\n'):
         m = re.search(
-            r'\[pfg-instr R1 c2H .*eventType=content_block_start.*'
+            r'\[pfg-instr R1 reducer .*eventType=content_block_start.*'
             r'blockType=(\w+) blockIndex=(-?\d+)\]',
             line,
         )
