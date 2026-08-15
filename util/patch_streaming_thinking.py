@@ -63,9 +63,11 @@ Surfaces
      and push the updated state through the React setter.
   T1. onCancel interrupted-thinking commit (Tier 1): pristine commits the
      streamed thinking summary on Esc as a virtual thinking block. Rewrite
-     that commit to append a cut marker and reuse the streaming preview's
-     uuid, so the block replaces the preview instead of landing beside it,
-     then clear the preview. One gray block, rendered once.
+     that commit to reuse the streaming preview's uuid, so the block
+     replaces the preview instead of landing beside it, then clear the
+     preview. One gray block, rendered once. The committed text is left
+     as-is: the CLI already prints its own interrupted label under the
+     block, so an appended marker read as a second label.
      Display only: the model does not see it. N3 skips virtual messages
      (Edt -> lBr), and atr drops thinking-only assistant messages anyway.
      Feeding the summary back would take a text block, not just dropping
@@ -787,10 +789,14 @@ def main():
 
     # Tier 1: the interrupted-thinking commit in onCancel.
     # Pristine already commits the streamed summary on Esc as a virtual thinking
-    # block (isVirtual:!0, empty signature). Rewrite that one commit to append a
-    # cut marker and reuse the streaming preview's uuid, so the committed block
-    # takes the preview's place instead of landing beside it, then clear the
-    # preview.
+    # block (isVirtual:!0, empty signature). Rewrite that one commit to reuse the
+    # streaming preview's uuid, so the committed block takes the preview's place
+    # instead of landing beside it, then clear the preview.
+    #
+    # The committed text is passed through unchanged. An earlier version appended
+    # "[Interrupted by the user here...]", which rendered as a second label under
+    # a block the CLI already labels itself ("What should Claude do instead?",
+    # a stock 2.1.232 string).
     #
     # This changes rendering only; the block stays virtual and never reaches the
     # model. Two separate exclusions on the request path drop it: N3's message
@@ -811,8 +817,7 @@ def main():
         + logwrite(f'`[pfg-instr X4 tier1-finalize kind=thinking len=${{{T1_TEXT}.length}}]\\n`')
         + f'let __pfg_cur={ST}?.currentMessage,'
         f'__pfg_fin={CREATE_MSG}({{content:[{{type:"thinking",thinking:'
-        f'{T1_TEXT}+"\\n\\n[Interrupted by the user here. The above is my reasoning so '
-        'far, cut off mid-thought.]",signature:""}],isVirtual:!0});'
+        f'{T1_TEXT},signature:""}}],isVirtual:!0}});'
         'if(__pfg_cur&&__pfg_cur.uuid)__pfg_fin.uuid=__pfg_cur.uuid;'
         '/* Tier1 gray-finalize: commit the partial thinking as a real thinking '
         'block reusing the streaming-preview identity, then drop the preview, so '
