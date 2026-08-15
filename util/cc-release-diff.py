@@ -116,7 +116,7 @@ def channel(name):
 
 
 def cmd_fetch(args):
-    """fetch <version|stable|latest> [more...] — download, extract, print paths."""
+    """fetch <version|stable|latest> [more...]: download, extract, print paths."""
     if not args:
         print(f"stable={channel('stable')}  latest={channel('latest')}")
         return 0
@@ -127,12 +127,12 @@ def cmd_fetch(args):
 
 
 def cmd_literals(args):
-    """literals <family> <A.js> <B.js> [keyword] — diff one literal family.
+    """literals <family> <A.js> <B.js> [keyword]: diff one literal family.
 
     Rename-proof: the compared token is the literal itself, so a renamed
     identifier cannot move an entry. An optional case-insensitive keyword keeps
     only literals containing it, which is how the broad `prose` family becomes
-    useful — unfiltered it is thousands of unrelated strings. `prose` without a
+    useful; unfiltered it is thousands of unrelated strings. `prose` without a
     keyword prints a count and a warning rather than the full list.
     """
     if len(args) not in (3, 4) or args[0] not in FAMILIES:
@@ -212,14 +212,14 @@ def _structural_run(ta, tb, ia, ib):
 
 
 def cmd_region(args):
-    """region <anchor> <A.js> <B.js> [pad] — structural compare around a string.
+    """region <anchor> <A.js> <B.js> [pad]: structural compare around a string.
 
     Prints the size of the corresponding span (identifiers mapped one-to-one,
     keywords and pinned names matched literally) and the first text on each side
     where correspondence breaks. There is deliberately no "identical" boolean:
     the matched span always corresponds by construction, and comparing its raw
     text would just report that identifiers were renamed, which they always are.
-    Read the divergence instead — if it falls in code unrelated to what you are
+    Read the divergence instead: if it falls in code unrelated to what you are
     checking (a neighbouring function), the region of interest is unchanged.
     """
     if len(args) not in (3, 4):
@@ -261,7 +261,7 @@ FS_OPS = ["mkdir", "rmdir", "utimes", "stat", "readFile", "writeFile",
 
 
 def cmd_fsops(args):
-    """fs-ops <start> <end> <A.js> <B.js> — count fs calls between two anchors.
+    """fs-ops <start> <end> <A.js> <B.js>: count fs calls between two anchors.
 
     Bound the region precisely with a start and end substring, both present in
     both builds, so the census covers your region and not a neighbouring
