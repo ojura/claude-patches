@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Out-of-tree patches for the anthropic.claude-code extension. This root package.json exists only to pin the invariant test suite; source under src/ is ESM (see src/package.json).",
+  "scripts": {
+    "test": "node --test src/*.test.mjs && python3 -m pytest util/ -q"
+  }
+}
