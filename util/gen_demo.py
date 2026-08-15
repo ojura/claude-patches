@@ -80,7 +80,30 @@ seamclean=[title_rec(sid_sc,"PFGK DEMO seamClean: clean in-file compaction marke
 seamclean.append(leaf_rec(sid_sc,sc_a2))
 psc=write(PROJ_DIR,sid_sc,seamclean)
 
+# RESPLICE (lpu-into-preserved-tail loop, the 4044ab66 class): canonical null-parent
+# boundary whose logicalParentUuid IS the preserved tail. Patch D follows that lpu into
+# already-visited preserved territory => guard #5 fires (_cycleHit) => the loader resplices
+# all unique messages in write order. O,A1 = orphaned pre-compaction prefix (band SUMMARIZED,
+# not in resume context); SUM,PH,PT,L = the working set (band LIVE). Exercises the resplice
+# banner + both band tones + the no-bookend invariant.
+NONCE_R="PFGKNONCE"+uuid.uuid4().hex[:12]
+sid_r=u()
+r_O,r_A1,r_CB,r_SUM,r_PH,r_PT,r_L=u(),u(),u(),u(),u(),u(),u()
+def summary_rec(uid,parent,sid,cwd,text):
+    r=user_rec(uid,parent,sid,cwd,text); r["isCompactSummary"]=True; return r
+resplice=[title_rec(sid_r,"PFGK DEMO resplice: chain-corruption resplice marker (synthetic)"),
+ user_rec(r_O,None,sid_r,CWD,"PFGK DEMO (resplice) "+NONCE_R+". Pre-compaction origin O; orphaned by the corrupt boundary, should band SUMMARIZED (not in the model's context on resume)."),
+ asst_rec(r_A1,r_O,sid_r,CWD,"Pre-compaction A1, summarized-away. "+NONCE_R),
+ compact_rec(r_CB,r_PT,sid_r,[r_PH,r_PT]),
+ summary_rec(r_SUM,r_CB,sid_r,CWD,"Compaction summary (live, in resume context). "+NONCE_R),
+ user_rec(r_PH,r_SUM,sid_r,CWD,"Preserved head PH, live. "+NONCE_R),
+ asst_rec(r_PT,r_PH,sid_r,CWD,"Preserved tail PT, live; CB.lpu points here, closing the loop. "+NONCE_R),
+ asst_rec(r_L,r_PT,sid_r,CWD,"Live leaf L. "+NONCE_R),
+ leaf_rec(sid_r,r_L)]
+pr=write(PROJ_DIR,sid_r,resplice)
+
 print("project dir:",os.path.expanduser("~/.claude/projects/"+PROJ_DIR))
+print("RESPLICE: ",sid_r,"-> NONCE",NONCE_R,"->",pr)
 print("BROKEN:   ",sid_b,"->",pb)
 print("SEAM:     ",sid_s,"->",ps)
 print("SEAMCLEAN:",sid_sc,"-> NONCE",NONCE,"->",psc)

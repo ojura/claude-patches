@@ -100,7 +100,7 @@ applies the patches, end to end. The skill:
   globbing across `~/.<ide>/extensions/` if the env var isn't set.
 - **Fetches and runs the prebuilt** for your installed version from
   this repo. The prebuilt is idempotent (detects an embedded
-  `pfg-v1.10` signature and no-ops if patches are already applied) and
+  `pfg-v1.11` signature and no-ops if patches are already applied) and
   byte-stable verified at synthesis time.
 - **Falls back to manual per-patch synthesis** if no prebuilt exists
   yet for your version.

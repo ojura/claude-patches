@@ -14,6 +14,33 @@ auto-restore + reapply (no `--force` needed).
 > mechanism in `util/build-prebuilt.py` (that's why CHANGELOG.md is
 > deliberately excluded from `SYNC_TARGETS`).
 
+## v1.11-dev: teammate transcripts and preserved-tail cycles
+
+Two lineage cases that the leader-oriented vendor predicates did not handle are
+now reconstructed directly.
+
+- **Teammate turns are local turns.** `teamName` identifies ownership of a
+  teammate transcript; it no longer disqualifies every record from origin,
+  counting, resplice, or final transcript output. `isMeta` and `isSidechain`
+  remain excluded. The final vendor output predicate is patched separately so
+  teammate records survive after the repaired walk.
+- **Preserved-tail cycle repair.** When a compact boundary points to the tail of
+  its own complete preserved-message window and that target walks back to the
+  boundary, d1e restores the recorded preserved order and reconnects its head to
+  the preceding in-file record. A unique verified predecessor gets `seamClean`;
+  an ambiguous positional predecessor gets the warning `seam` and cannot produce
+  a trusted-root verdict. File-start and incomplete-metadata cases remain on the
+  existing sibling/phantom/failure paths.
+- **Upgrade handling.** v1.11 adds one signed extension splice. A complete older
+  patchset with fewer sites is now classified as stale, restored from its
+  pristine backup, and reapplied; a partial current-version installation still
+  fails.
+
+The original failure was reproduced on a team-owned transcript whose LPU pointed
+into nine preserved records under its compact summary. The repaired JavaScript
+and Python loaders produced identical record links and walked 1,178 records to
+the initial team assignment without a cycle.
+
 ## v1.10-dev: retire former Patch L (thinking-display)
 
 Former Patch L forced `--thinking-display summarized` onto the IDE-spawned CLI

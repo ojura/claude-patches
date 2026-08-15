@@ -155,6 +155,29 @@ already has the `K=!1` opt-in fallback used by `forkSession`.
   whenever the walk stops short of a real root. Marker vocabulary and
   rendering are Patch K's.
 
+### v1.11: repair an already-written preserved-tail cycle
+
+The v1.8 rewrite gate prevents the reader from creating a new cycle. Some JSONLs
+already contain the rewritten form on disk: the boundary LPU names the preserved
+tail, while the preserved head is parented under the compact summary, which is
+itself parented to the boundary. UUID presence alone is therefore not evidence
+of a healthy in-file compaction.
+
+Before K2/K3 classification, d1e now repairs only the strict measured shape:
+
+- the complete `preservedMessages.uuids` list is present;
+- the LPU equals its tail and agrees with `preservedSegment.tailUuid`;
+- walking that target returns to the same boundary;
+- a UUID exists immediately before the boundary outside the preserved window.
+
+The preserved list is rebuilt in its recorded order and its head is connected
+to that preceding record through a marker. If the predecessor reaches the
+file's one fork-free origin, the marker is `seamClean`; otherwise it is an
+unproven `seam`, so the turns are visible without a success verdict. A cycle at
+file start, an incomplete preserved list, or a target that does not return to
+that boundary is not guessed onto this repair. K3 also requires its present LPU
+to reach an origin; it no longer calls a merely present cyclic target clean.
+
 **Upstream issue**: [#46603](https://github.com/anthropics/claude-code/issues/46603)
 
 ---
@@ -642,7 +665,7 @@ shape of compaction corruption:
    continues across that sibling. Find the sibling's content before the
    compact boundary (lines from chain root to its first phantom-lpu boundary)
    and prepend that into `_parsed`. This recovers the conversation's
-   true origin from a forked sibling whose chain root is a real user
+   origin from a forked sibling whose chain root is a real user
    message.
 2. **Seam ghosts** (in-file orphan recovery):
    For each compact_boundary whose lpu is still phantom after step 1,
@@ -783,7 +806,7 @@ boundary. The chat panel should:
 
 1. Show a cyan **bookend** card at the very top, badge `◆ RECONSTRUCTED
    · INFO`, counter `MARKER 01 OF N` with `↓ NEXT`, followed
-   immediately by the conversation's true first user message (the
+   immediately by the conversation's first user message (the
    canonical origin recovered via cross-conversation backfill).
 2. Show an amber **seam** card (badge `⚠ IN-FILE REATTACH`) at each
    compaction whose lpu was a phantom reattached in-file, or a slate
@@ -821,8 +844,10 @@ parentUuid (with logicalParentUuid fallback per Patch D) backward**:
    reply, plus any sibling tip in K's prepended content.
 4. For each leaf, walk up via `parentUuid` (with `logicalParentUuid`
    fallback) to the first `user`/`assistant` ancestor. These become
-   candidates `U`. Filter out sidechain / teamName / isMeta tips →
-   `q`.
+   candidates `U`. The vendor preferred non-sidechain / non-team / non-meta
+   tips, then fell back to any candidate when that set was empty. v1.11 keeps
+   `isSidechain` and `isMeta` exclusions but treats `teamName` as file-local
+   ownership: a teammate's own JSONL carries it on every real turn.
 5. **Pick the single leaf with the highest index in `B`** (i.e. the
    one written latest into `_parsed`). Call it `Z`.
 6. Walk back from `Z` only via `parentUuid`/`lpu` fallback,
@@ -870,7 +895,7 @@ single-leaf-walk constraint:
 **Common pitfall when designing K extensions**: "I added content to
 `_parsed`" ≠ "the user sees it rendered". You have to ensure
 parentUuid/lpu connectivity from the live leaf BACK through your
-prepended content to a true root. If you just prepend without
+prepended content to a root. If you just prepend without
 linking, the walker picks the live leaf, walks back through
 existing links only, and your new content sits in `_parsed` as a
 disconnected sub-graph, pruned by step 5's max-by-index leaf
@@ -898,7 +923,7 @@ itself a boundary). Prepend that sibling's pre-content into `_parsed`.
 
 The result: even sessions whose own first line is a compact_boundary
 (no recoverable in-file origin) can now display the conversation's
-true canonical origin, sourced from a sibling fork that retained it.
+canonical origin, sourced from a sibling fork that retained it.
 
 **Upstream issue**: [#55818](https://github.com/anthropics/claude-code/issues/55818) (read-side mitigation) + [#46603](https://github.com/anthropics/claude-code/issues/46603) (write-side root cause at `compact.ts:598`).
 
