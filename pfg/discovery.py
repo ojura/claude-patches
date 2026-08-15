@@ -1,7 +1,7 @@
 """
 discovery: resolve each abstract vendor dep (_pv_X) to its current minified name
-on a given target, verify-once-or-abort, and enforce the core<->registry contract
-BIJECTIVELY. Target-agnostic engine over the per-target anchor DATA (anchors.py):
+on a given target, verify-once-or-abort, and enforce a BIJECTIVE relation between
+core and registry. Target-agnostic engine over the per-target anchor DATA (anchors.py):
 one core surface, N anchor sets, each must cover the surface.
 """
 import os
@@ -100,15 +100,16 @@ def references_pfg(target="extension"):
 
 
 def coverage(target="extension"):
-    """BIJECTIVE per-target contract between the core surface and the registry:
+    """Check that this target's core deps and registry anchors are in a bijective
+    relation -- the same set, verified from both sides:
       - every _pv_ the core CALLS must be resolvable                        -> else UNCOVERED
       - every alias-bound dep the registry declares must be called          -> else DEAD
     "Called" = the deps the alias prologue binds: bind + builtin (references) AND literal
     (discovered CONSTANTS baked as string literals, e.g. the CSS-module hashes). Locate
     deps are wholesale TARGETS, not source references, and capture deps are threaded into a
     rule at its splice site (not alias-bound), so both are excluded from the source side.
-    Adding OR removing a core dep is forced to move the registry in lockstep, loud on
-    either side, so an unanchored _pv_ (css hash included) fails loud."""
+    Adding OR removing a core dep is forced to move the registry in lockstep, so an
+    unanchored _pv_ (css hash included) fails loud."""
     derived = derive_deps(target)
     registry = anchors.deps_for(target)
     called = {pv for pv, d in registry.items() if d.kind in ("bind", "builtin", "literal")}
