@@ -8,7 +8,7 @@ JavaScriptCore bytecode copy of the entrypoint) appended as a trailing data blob
 stored in a `.bun` ELF section. This module extracts the embedded JS, applies
 length-changing text edits to it, and repacks the binary so it still runs.
 
-Design constraints (these are load-bearing):
+Design constraints (requirements, not preferences):
   - Pure Python standard library only. No node-lief, no tweakcc, no pyelftools.
     The same code runs at maintainer synthesis time AND in the end-user apply
     path, so it must be self-contained and dependency-free.
@@ -56,6 +56,12 @@ ELF_SHF_ALLOC = 0x2
 # 36-byte (old) form omits.
 _FIELD_ORDER_52 = ["name", "contents", "sourcemap", "bytecode", "moduleInfo", "bytecodeOriginPath"]
 _FIELD_ORDER_36 = ["name", "contents", "sourcemap", "bytecode"]
+
+# Tail of the pre-compile source path bun records for the Claude entrypoint in
+# each module's bytecodeOriginPath field. Claude 2.1.232 renamed the packed
+# module itself from src/entrypoints/cli.js to plain cli, but left this path
+# reading /$bunfs/root/src/entrypoints/cli.js.
+ENTRYPOINT_ORIGIN_SUFFIX = "entrypoints/cli.js"
 
 
 class BunFormatError(Exception):
@@ -416,30 +422,59 @@ class BunImage:
             or name.endswith("/src/entrypoints/cli.js")
         )
 
+    def bytecode_origin_path(self, rec):
+        """Return the module's recorded pre-compile source path, or '' when it
+        has none: the 36-byte record form has no such field, and a module built
+        without bytecode leaves it empty."""
+        off, length = rec.get("bytecodeOriginPath", (0, 0))
+        if length == 0:
+            return ""
+        self._require_range(
+            f"module[{rec.get('index', '?')}].bytecodeOriginPath", off, length)
+        return self.blob[off:off + length].decode("utf-8", "replace")
+
+    def is_entrypoint_record(self, rec):
+        """True if `rec` is recognizable as the Claude entrypoint, by either of
+        two checks. Both are needed because each one goes blind on builds the
+        other still reads:
+
+          - The module name is the path bun packed the file under, and it gets
+            renamed: 2.1.232 changed it from src/entrypoints/cli.js to plain
+            cli, which the name check does not match.
+          - bytecodeOriginPath is the source path bun records alongside the
+            bytecode. It survived that rename, but it is absent in the 36-byte
+            record form and empty in any module compiled without bytecode.
+        """
+        if self.bytecode_origin_path(rec).endswith(ENTRYPOINT_ORIGIN_SUFFIX):
+            return True
+        return self.is_entrypoint_name(rec["name_str"])
+
     def entrypoint_module(self):
         """Return the entrypoint module record.
 
         Prefer the offsets-struct `entry_point_id` (the value bun itself uses to
-        dispatch at startup); if the module at that index also passes our name
-        heuristic, return it. If the indexed module's name does NOT look like an
-        entrypoint, refuse with BunFormatError rather than silently falling back
-        to a name search, since a silent fallback could patch the wrong module
-        and still pass superficial smoke tests. The fallback to a name search
-        is only used when entry_point_id is out of range (older builds that did
-        not record a useful index there).
+        dispatch at startup); if the module at that index is also recognizable
+        as the entrypoint by name or by recorded source path, return it. If
+        neither check recognizes it, refuse with BunFormatError rather than
+        silently falling back to a search, since a silent fallback could patch
+        the wrong module and still pass superficial smoke tests. The fallback
+        search is only used when entry_point_id is out of range (older builds
+        that did not record a useful index there).
         """
         if 0 <= self.entry_point_id < len(self.modules):
             indexed = self.modules[self.entry_point_id]
-            if self.is_entrypoint_name(indexed["name_str"]):
+            if self.is_entrypoint_record(indexed):
                 return indexed
             raise BunFormatError(
-                f"entry_point_id and name heuristic disagree: bun says module "
-                f"{self.entry_point_id} ({indexed['name_str']!r}) is the "
-                f"entrypoint, but its name does not match the heuristic. "
-                f"Refusing to silently patch a different module.")
-        # entry_point_id out of range: fall back to a name search.
+                f"entry_point_id and the entrypoint checks disagree: bun says "
+                f"module {self.entry_point_id} ({indexed['name_str']!r}, source "
+                f"path {self.bytecode_origin_path(indexed)!r}) is the "
+                f"entrypoint, but neither its name nor its recorded source path "
+                f"identifies it as the Claude entrypoint. Refusing to silently "
+                f"patch a different module.")
+        # entry_point_id out of range: fall back to a search over all modules.
         for m in self.modules:
-            if self.is_entrypoint_name(m["name_str"]):
+            if self.is_entrypoint_record(m):
                 return m
         raise BunFormatError("could not locate the Claude entrypoint module")
 
@@ -595,9 +630,9 @@ def _repack_section_elf(orig_bytes, wrapped):
       - the containing LOAD segment's filesz and memsz.
 
     Safety guards (fail closed, symmetric for grow AND shrink):
-      - Load-bearing invariant: for every PT_LOAD segment whose file offset is
-        shifted by the resize, the new offset must still satisfy the loader's
-        congruence `(p_offset - p_vaddr) mod p_align == 0`. If it would not,
+      - The rule the dynamic loader itself enforces: for every PT_LOAD segment
+        whose file offset is shifted by the resize, the new offset must still
+        satisfy `(p_offset - p_vaddr) mod p_align == 0`. If it would not,
         refuse. This rule covers any segment-remapping case we have not
         implemented (we never adjust p_vaddr) and subsumes naive grow/shrink
         special cases into one invariant.
@@ -636,7 +671,7 @@ def _repack_section_elf(orig_bytes, wrapped):
     ]
     shifted_alloc = [s for s in shifted if s["flags"] & ELF_SHF_ALLOC]
     # Defense in depth: refuse to shift later allocated sections at all. The
-    # load-bearing alignment check below subsumes this for properly-aligned
+    # alignment check below subsumes this for properly-aligned
     # shifts, but allocated section shifts are unusual enough that we keep the
     # narrower refusal too. Symmetric for grow AND shrink, since either changes
     # foff without vaddr and breaks foff =~ vaddr mod p_align for those sections.
@@ -657,7 +692,7 @@ def _repack_section_elf(orig_bytes, wrapped):
             "cannot resize .bun inside unrelated segments: "
             + ", ".join(f"{seg['index']}:{seg['type']}" for seg in spanning))
 
-    # PT_LOAD invariant gate (load-bearing): for every PT_LOAD segment whose
+    # PT_LOAD invariant check: for every PT_LOAD segment whose
     # file offset is shifted by the resize, the new offset must still satisfy
     # the loader's congruence `(p_offset - p_vaddr) mod p_align == 0`. This is
     # the direct invariant that keeps the dynamic loader happy; phrasing the

@@ -443,14 +443,14 @@ def _build_bun_blob(modules, module_struct_size, trailing_pad=True, entry_point_
     return bytes(out)
 
 
-def _module(name, contents, bytecode=b"", ms=52):
+def _module(name, contents, bytecode=b"", ms=52, origin=b""):
     return {
         "name": name.encode() if isinstance(name, str) else name,
         "contents": contents.encode() if isinstance(contents, str) else contents,
         "sourcemap": b"",
         "bytecode": bytecode,
         "moduleInfo": b"",
-        "bytecodeOriginPath": b"",
+        "bytecodeOriginPath": origin.encode() if isinstance(origin, str) else origin,
         "encoding": 1, "loader": 1, "module_format": 2, "side": 0,
     }
 
@@ -710,7 +710,7 @@ def synthetic_tests():
         raised = "cannot grow zero-length field" in str(exc)
     _check("growing a (N>0, 0) field raises BunFormatError", raised)
 
-    # --- entry_point_id is preferred over name heuristic ---
+    # --- entry_point_id is preferred over a search by name ---
     # Build a fixture where module 0 is NOT an entrypoint and module 2 IS one,
     # with entry_point_id = 2. The handler must pick module 2 by index.
     mods_idx = [
@@ -725,9 +725,9 @@ def synthetic_tests():
            img_idx.entrypoint_module()["index"] == 2,
            f"got index {img_idx.entrypoint_module()['index']}")
 
-    # And a HARD FAIL when entry_point_id points at a module whose name does
-    # not match the entrypoint heuristic: silent fallback would patch the wrong
-    # module and still pass smoke tests.
+    # And a HARD FAIL when entry_point_id points at a module that neither
+    # entrypoint check recognizes: silent fallback would patch the wrong module
+    # and still pass smoke tests.
     fx_mismatch = build_bun_elf(mods_idx, entry_point_id=0)  # module 0 is "aux.js"
     img_mm = bh.BunImage(fx_mismatch)
     raised = False
@@ -736,6 +736,57 @@ def synthetic_tests():
     except bh.BunFormatError as exc:
         raised = "disagree" in str(exc)
     _check("entry_point_id pointing at non-entrypoint module hard-fails", raised)
+
+    # --- 2.1.232 shape: packed module renamed to "cli", source path unchanged ---
+    # Claude 2.1.232 packs its entrypoint as /$bunfs/root/cli, which the name
+    # check does not match; bytecodeOriginPath still reads
+    # /$bunfs/root/src/entrypoints/cli.js and is what resolves the module.
+    mods232 = [
+        _module("/$bunfs/root/cli", "console.log('(Claude Code)');",
+                bytecode=b"\xd4zFT" + b"\x00" * 40,
+                origin="/$bunfs/root/src/entrypoints/cli.js"),
+        _module("/$bunfs/root/helper.js", "module.exports={};"),
+    ]
+    fx232 = build_bun_elf(mods232)
+    img232 = bh.BunImage(fx232)
+    _check("2.1.232 module name alone is not recognized",
+           not bh.BunImage.is_entrypoint_name("/$bunfs/root/cli"))
+    _check("2.1.232 shape resolves via bytecodeOriginPath",
+           img232.entrypoint_module()["index"] == 0)
+    _check("2.1.232 shape extract_js works",
+           bh.extract_js(fx232) == b"console.log('(Claude Code)');")
+    _check("2.1.232 shape no-op byte-identical", bh.repack_unchanged(fx232) == fx232)
+
+    # A growing edit must leave bytecodeOriginPath readable. That field sits
+    # after contents in the record layout, so a wrong remap would shift it and
+    # the NEXT patch pass over the same binary would fail to find the entrypoint.
+    grown232 = bh.repack_with_js(fx232, b"console.log('(Claude Code) patched');")
+    img232g = bh.BunImage(grown232)
+    origin_after = img232g.bytecode_origin_path(img232g.modules[0])
+    _check("origin path survives a growing edit",
+           origin_after == "/$bunfs/root/src/entrypoints/cli.js",
+           f"got {origin_after!r}")
+    _check("grown 2.1.232 fixture still resolves its entrypoint",
+           img232g.entrypoint_module()["index"] == 0)
+
+    # --- a source path pointing elsewhere does not rescue a wrong module ---
+    mods_wrong = [
+        _module("/$bunfs/root/aux.js", "a();", bytecode=b"\xd4zFT" + b"\x00" * 40,
+                origin="/$bunfs/root/src/entrypoints/other.js"),
+        _module("/$bunfs/root/helper.js", "h();"),
+    ]
+    img_wrong = bh.BunImage(build_bun_elf(mods_wrong, entry_point_id=0))
+    raised = False
+    try:
+        img_wrong.entrypoint_module()
+    except bh.BunFormatError as exc:
+        raised = "disagree" in str(exc)
+    _check("non-entrypoint source path still hard-fails", raised)
+
+    # --- the 36-byte record form carries no source path at all ---
+    _check("36-byte form reports an empty origin path",
+           img36.bytecode_origin_path(img36.modules[0]) == "",
+           f"got {img36.bytecode_origin_path(img36.modules[0])!r}")
 
     # --- 36-vs-52 disambiguation under length ambiguity ---
     # 13 modules at 36 bytes/record = 468 bytes; 468 also divides 52 (= 9 * 52),
@@ -1087,9 +1138,9 @@ def main():
     # Strict-mode gate runner: CLAUDE_PFG_STRICT_GATES=gate7[,gateN...] promotes
     # SKIP -> FAIL for the listed gate ids; CLAUDE_PFG_STRICT_GATES_WAIVE=gate7
     # overrides strict mode for that gate (SKIP stays SKIP). Intended for CI
-    # release synthesis (per plan section 6 step 11b) so load-bearing gates
-    # (esp. gate 7's control-flow proof) cannot silently degrade when a future
-    # Anthropic bundle bump moves the anchor. Default with no env var is
+    # release synthesis (per plan section 6 step 11b) so the gates that prove
+    # the most (esp. gate 7's control-flow proof) cannot silently degrade when
+    # a future Anthropic bundle bump moves the anchor. Default with no env var is
     # unchanged: skip-permissive for local dev.
     strict_gates = set(g.strip() for g in os.environ.get(
         "CLAUDE_PFG_STRICT_GATES", "").split(",") if g.strip())
