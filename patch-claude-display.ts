@@ -139,13 +139,15 @@ function patchCollapsedReadSearch(content, ctx = {}) {
     const end = endCandidates.length > 0 ? Math.min(...endCandidates) : output.length;
     const segment = output.slice(start, end);
 
-    if (!segment.includes("createElement(") || !segment.includes("verbose:")) {
+    const hasRendererCall =
+      segment.includes("createElement(") || segment.includes("jsx(") || segment.includes("jsxs(");
+    if (!hasRendererCall || !segment.includes("verbose:")) {
       index = start + o7qCaseNeedle.length;
       continue;
     }
 
     const callMatch = segment.match(
-      /createElement\(([A-Za-z_$][\w$]*),\{message:[^}]*inProgressToolUseIDs:[^}]*shouldAnimate:[^}]*verbose:[^,}]+,tools:[^}]*lookups:[^}]*isActiveGroup:[^}]*\}\)/
+      /(?:createElement|jsx|jsxs)\([A-Za-z_$][\w$]*,\{message:[^}]*inProgressToolUseIDs:[^}]*shouldAnimate:[^}]*verbose:[^,}]+,tools:[^}]*lookups:[^}]*isActiveGroup:[^}]*\}\)/
     );
     if (!callMatch) {
       index = start + o7qCaseNeedle.length;
@@ -208,7 +210,7 @@ function patchWriteCreateDiffColors(content) {
     }
 
     const createReturnMatch = createSegment.match(
-      /return ([A-Za-z_$][\w$]*)\.createElement\(([A-Za-z_$][\w$]*),\{filePath:([A-Za-z_$][\w$]*),content:([A-Za-z_$][\w$]*),verbose:([A-Za-z_$][\w$]*)\}\)/
+      /return ([A-Za-z_$][\w$]*)\.(createElement|jsx|jsxs)\(([A-Za-z_$][\w$]*),\{filePath:([A-Za-z_$][\w$]*),content:([A-Za-z_$][\w$]*),verbose:([A-Za-z_$][\w$]*)\}\)/
     );
     if (!createReturnMatch) {
       index = updateStart + updateNeedle.length;
@@ -216,7 +218,7 @@ function patchWriteCreateDiffColors(content) {
     }
 
     const updateRendererMatch = updateSegment.match(
-      /createElement\(([A-Za-z_$][\w$]*),\{filePath:[^}]*structuredPatch:[^}]*style:([A-Za-z_$][\w$]*),verbose:[A-Za-z_$][\w$]*/
+      /(?:createElement|jsx|jsxs)\(([A-Za-z_$][\w$]*),\{filePath:[^}]*structuredPatch:[^}]*style:([A-Za-z_$][\w$]*),verbose:[A-Za-z_$][\w$]*/
     );
     if (!updateRendererMatch) {
       index = updateStart + updateNeedle.length;
@@ -226,21 +228,22 @@ function patchWriteCreateDiffColors(content) {
     candidates += 1;
 
     const reactNs = createReturnMatch[1];
-    const fileVar = createReturnMatch[3];
-    const contentVar = createReturnMatch[4];
-    const verboseVar = createReturnMatch[5];
+    const jsxFactory = createReturnMatch[2];
+    const fileVar = createReturnMatch[4];
+    const contentVar = createReturnMatch[5];
+    const verboseVar = createReturnMatch[6];
     const diffRenderer = updateRendererMatch[1];
     const styleVar = updateRendererMatch[2];
 
     const lineCounterMatch = createSegment.match(
-      /let [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\);return [A-Za-z_$][\w$]*\.createElement\([A-Za-z_$][\w$]*,null,"Wrote "/
+      /let [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\);return [A-Za-z_$][\w$]*\.(?:createElement|jsxs)\([A-Za-z_$][\w$]*,(?:null,|\{children:\[)"Wrote "/
     );
     const lineCountExpr = lineCounterMatch
       ? `${lineCounterMatch[1]}(${contentVar})`
       : `${contentVar}===""?0:${contentVar}.split(\`\\n\`).length`;
 
     const before = createReturnMatch[0];
-    const after = `return ${reactNs}.createElement(${diffRenderer},{filePath:${fileVar},structuredPatch:[{oldStart:1,oldLines:0,newStart:1,newLines:${lineCountExpr},lines:${contentVar}===""?[]:${contentVar}.split(\`\\n\`).map((__cc_line)=>"+"+__cc_line)}],firstLine:${contentVar}.split(\`\\n\`)[0]??null,fileContent:"",style:${styleVar},verbose:${verboseVar},previewHint:void 0})`;
+    const after = `return ${reactNs}.${jsxFactory}(${diffRenderer},{filePath:${fileVar},structuredPatch:[{oldStart:1,oldLines:0,newStart:1,newLines:${lineCountExpr},lines:${contentVar}===""?[]:${contentVar}.split(\`\\n\`).map((__cc_line)=>"+"+__cc_line)}],firstLine:${contentVar}.split(\`\\n\`)[0]??null,fileContent:"",style:${styleVar},verbose:${verboseVar},previewHint:void 0})`;
 
     if (!createSegment.includes(before)) {
       index = updateStart + updateNeedle.length;
@@ -307,17 +310,24 @@ function patchWordDiffLineBackgrounds(content) {
     const dimVar = params[3];
     const typeVar = typeVarMatch[1];
 
-    const childBgPattern =
+    const legacyChildBgPattern =
       /(key:`part-\$\{[A-Za-z_$][\w$]*\}-\$\{[A-Za-z_$][\w$]*\}`,backgroundColor:)([A-Za-z_$][\w$]*)(\},[A-Za-z_$][\w$]*\)\))/;
+    const jsxChildBgPattern =
+      /(backgroundColor:)([A-Za-z_$][\w$]*)(,children:[A-Za-z_$][\w$]*\},`part-\$\{[A-Za-z_$][\w$]*\}-\$\{[A-Za-z_$][\w$]*\}`\)\))/;
 
-    if (!childBgPattern.test(segment)) {
+    if (!legacyChildBgPattern.test(segment) && !jsxChildBgPattern.test(segment)) {
       index = anchorIndex + anchor.length;
       continue;
     }
 
     candidates += 1;
-    const nextSegment = segment.replace(childBgPattern, (_full, prefix, bgVar, suffix) => {
+    const backgroundFallback = (bgVar) =>
+      `${bgVar}??(${typeVar}==="add"?${dimVar}?"diffAddedDimmed":"diffAdded":${dimVar}?"diffRemovedDimmed":"diffRemoved")`;
+    let nextSegment = segment.replace(legacyChildBgPattern, (_full, prefix, bgVar, suffix) => {
       return `${prefix}${bgVar}??(${typeVar}==="add"?${dimVar}?"diffAddedDimmed":"diffAdded":${dimVar}?"diffRemovedDimmed":"diffRemoved")${suffix}`;
+    });
+    nextSegment = nextSegment.replace(jsxChildBgPattern, (_full, prefix, bgVar, suffix) => {
+      return `${prefix}${backgroundFallback(bgVar)}${suffix}`;
     });
 
     if (nextSegment !== segment) {
@@ -374,8 +384,8 @@ function patchThinkingCase(content, ctx = {}) {
       }
     );
     nextSegment = nextSegment.replace(
-      /createElement\(([A-Za-z_$][\w$]*),\{([^}]*)\}/g,
-      (full, component, props) => {
+      /((?:createElement|jsx|jsxs)\([A-Za-z_$][\w$]*,\{)([^}]*)\}/g,
+      (full, prefix, props) => {
         let nextProps = props;
         nextProps = nextProps.replace(/isTranscriptMode:[^,}]+/g, (entry) => {
           const desired = ctx.preserveLength ? "isTranscriptMode:1" : "isTranscriptMode:!0";
@@ -394,7 +404,7 @@ function patchThinkingCase(content, ctx = {}) {
         if (nextProps === props) {
           return full;
         }
-        return `createElement(${component},{${nextProps}}`;
+        return `${prefix}${nextProps}}`;
       }
     );
 
@@ -444,18 +454,22 @@ function patchRedactedThinkingSummaries(content) {
     const redactedSegment = output.slice(redactedStart, thinkingStart);
     const thinkingSegment = output.slice(thinkingStart, thinkingEnd);
 
+    const hasRedactedRendererCall =
+      redactedSegment.includes("createElement(") ||
+      redactedSegment.includes("jsx(") ||
+      redactedSegment.includes("jsxs(");
     if (
       thinkingStart - redactedStart > maxRendererGap ||
       thinkingEnd - thinkingStart > maxRendererGap ||
-      !redactedSegment.includes("createElement(") ||
-      !thinkingSegment.includes("hideInTranscript:")
+      !hasRedactedRendererCall ||
+      !thinkingSegment.includes("isTranscriptMode:")
     ) {
       index = redactedStart + redactedNeedle.length;
       continue;
     }
 
     const thinkingRendererMatch = thinkingSegment.match(
-      /([A-Za-z_$][\w$]*)\.createElement\(([A-Za-z_$][\w$]*),\{addMargin:([A-Za-z_$][\w$]*),param:([A-Za-z_$][\w$]*),isTranscriptMode:[^,}]+,verbose:[^,}]+,hideInTranscript:[^}]+\}\)/
+      /([A-Za-z_$][\w$]*)\.(createElement|jsx|jsxs)\(([A-Za-z_$][\w$]*),\{addMargin:([A-Za-z_$][\w$]*),param:([A-Za-z_$][\w$]*),isTranscriptMode:[^,}]+,verbose:[^,}]+(?:,hideInTranscript:[^}]+)?\}\)/
     );
     if (!thinkingRendererMatch) {
       index = redactedStart + redactedNeedle.length;
@@ -463,16 +477,20 @@ function patchRedactedThinkingSummaries(content) {
     }
 
     const reactNs = thinkingRendererMatch[1];
-    const thinkingComponent = thinkingRendererMatch[2];
-    const addMarginVar = thinkingRendererMatch[3];
-    const paramVar = thinkingRendererMatch[4];
+    const jsxFactory = thinkingRendererMatch[2];
+    const thinkingComponent = thinkingRendererMatch[3];
+    const addMarginVar = thinkingRendererMatch[4];
+    const paramVar = thinkingRendererMatch[5];
+    const hideInTranscriptProp = thinkingRendererMatch[0].includes("hideInTranscript:")
+      ? ",hideInTranscript:!1"
+      : "";
 
     candidates += 1;
 
     const replacement =
-      `case"redacted_thinking":{return ${reactNs}.createElement(${thinkingComponent},{` +
+      `case"redacted_thinking":{return ${reactNs}.${jsxFactory}(${thinkingComponent},{` +
       `addMargin:${addMarginVar},param:{type:"thinking",thinking:${paramVar}.data??""},` +
-      `isTranscriptMode:!0,verbose:!0,hideInTranscript:!1})}`;
+      `isTranscriptMode:!0,verbose:!0${hideInTranscriptProp}})}`;
 
     if (redactedSegment !== replacement) {
       output = output.slice(0, redactedStart) + replacement + output.slice(thinkingStart);
@@ -555,6 +573,10 @@ function patchThinkingStreaming(content) {
     const createElementCallPattern = /createElement\(([A-Za-z_$][\w$]*),\{([^{}]*?)\}\)/g;
     const promptRendererCallPattern =
       /createElement\(([A-Za-z_$][\w$]*),\{([\s\S]{0,2000}?placeholderElement:[\s\S]{0,2000}?agentDefinitions:[^}]*?onOpenRateLimitOptions:[^}]*?isLoading:)([^,}]+)(,streamingText:[^}]*?(?:showThinkingHint:[^}]*?)?isBriefOnly:[^}]*?)\}\)/g;
+    const jsxMainRendererPropsPattern =
+      /(screen:[^,}]+,streamingToolUses:[^,}]+,)(showAllInTranscript:[^,}]+,agentDefinitions:[^,}]+,onOpenRateLimitOptions:[^,}]+,isLoading:[^,}]+)/g;
+    const jsxTranscriptRendererPropsPattern =
+      /(screen:[^,}]+,agentDefinitions:[^,}]+,streamingToolUses:[^,}]+,)(showAllInTranscript:[^,}]+,onOpenRateLimitOptions:[^,}]+,isLoading:[^,}]+)/g;
 
     output = output.replace(createElementCallPattern, (full, component, props) => {
       if (!props.includes("streamingToolUses:")) {
@@ -601,6 +623,23 @@ function patchThinkingStreaming(content) {
         return full;
       }
     );
+
+    const injectStreamingThinking = (full, before, after) => {
+      if (full.includes("streamingThinking:")) {
+        return full;
+      }
+
+      propCandidates += 1;
+      const replacement = `${before}streamingThinking:${streamingVar},${after}`;
+      if (replacement !== full) {
+        propPatched += 1;
+        return replacement;
+      }
+      return full;
+    };
+
+    output = output.replace(jsxMainRendererPropsPattern, injectStreamingThinking);
+    output = output.replace(jsxTranscriptRendererPropsPattern, injectStreamingThinking);
   }
 
   candidates += propCandidates;
@@ -625,6 +664,42 @@ function patchThinkingStreaming(content) {
       const replacement =
         `${enabledVar}=${thinkingConfigVar}.type!=="disabled"&&!${envFlagHelper}(process.env.CLAUDE_CODE_DISABLE_THINKING),` +
         `${displayVar}=${enabledVar}?${thinkingConfigVar}.display??"summarized":void 0,${requestVar}=void 0;`;
+      if (replacement !== full) {
+        displayPatched += 1;
+        return replacement;
+      }
+      return full;
+    }
+  );
+  const thinkingDisplayCachedFlagPattern = new RegExp(
+    `(${identifierPattern})=(${identifierPattern})\\(process\\.env\\.CLAUDE_CODE_DISABLE_THINKING\\),` +
+      `(${identifierPattern})=(${identifierPattern})\\.type!=="disabled"&&!\\1,` +
+      `(${identifierPattern})=\\3((?:&&${identifierPattern}\\(\\)&&${identifierPattern}\\(${identifierPattern}\\))?)\\?\\4\\.display(?:\\?\\?void 0)?:void 0,` +
+      `(${identifierPattern})=void 0;`,
+    "g"
+  );
+  output = output.replace(
+    thinkingDisplayCachedFlagPattern,
+    (
+      full,
+      disableThinkingVar,
+      envFlagHelper,
+      enabledVar,
+      thinkingConfigVar,
+      displayVar,
+      displayGuards,
+      requestVar
+    ) => {
+      displayCandidates += 1;
+      if (full.includes('display??"summarized"')) {
+        return full;
+      }
+
+      const replacement =
+        `${disableThinkingVar}=${envFlagHelper}(process.env.CLAUDE_CODE_DISABLE_THINKING),` +
+        `${enabledVar}=${thinkingConfigVar}.type!=="disabled"&&!${disableThinkingVar},` +
+        `${displayVar}=${enabledVar}${displayGuards}?${thinkingConfigVar}.display??"summarized":void 0,` +
+        `${requestVar}=void 0;`;
       if (replacement !== full) {
         displayPatched += 1;
         return replacement;
@@ -796,6 +871,20 @@ function patchThinkingStreaming(content) {
     };
   };
 
+  const buildStreamingThinkingStartExpression = (
+    eventParam,
+    setStreamingThinkingParam,
+    createMessageHelper
+  ) =>
+    `${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>{let __cc_streamingThinkingMessage=${createMessageHelper}({content:[${eventParam}.event.content_block.type==="redacted_thinking"?{type:"redacted_thinking",data:${eventParam}.event.content_block.data??""}:{type:"thinking",thinking:""}],isVirtual:!0}),__cc_nextStreamingThinkingMessages=[...(__cc_prevStreamingThinking?.messages??[]).filter((__cc_entry)=>__cc_entry.index!==${eventParam}.event.index),{index:${eventParam}.event.index,message:__cc_streamingThinkingMessage}];return{thinking:${eventParam}.event.content_block.type==="redacted_thinking"?${eventParam}.event.content_block.data??"":"",isStreaming:!0,streamingEndedAt:void 0,currentIndex:${eventParam}.event.index,currentMessage:__cc_streamingThinkingMessage,messages:__cc_nextStreamingThinkingMessages}})`;
+
+  const buildStreamingThinkingDeltaStatement = (
+    eventParam,
+    setStreamingThinkingParam,
+    createMessageHelper
+  ) =>
+    `${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>{let __cc_nextStreamingThinkingDelta=typeof ${eventParam}.event.delta.thinking==="string"?${eventParam}.event.delta.thinking:"",__cc_nextStreamingThinkingText=(__cc_prevStreamingThinking?.thinking??"")+__cc_nextStreamingThinkingDelta,__cc_nextStreamingThinkingIndex=__cc_prevStreamingThinking?.currentIndex??${eventParam}.event.index,__cc_nextStreamingThinkingMessage=${createMessageHelper}({content:[{type:"thinking",thinking:__cc_nextStreamingThinkingText}],isVirtual:!0}),__cc_nextStreamingThinkingMessages=[...(__cc_prevStreamingThinking?.messages??[]).filter((__cc_entry)=>__cc_entry.index!==__cc_nextStreamingThinkingIndex),{index:__cc_nextStreamingThinkingIndex,message:__cc_nextStreamingThinkingMessage}];return __cc_prevStreamingThinking?{...__cc_prevStreamingThinking,thinking:__cc_nextStreamingThinkingText,isStreaming:!0,streamingEndedAt:void 0,currentIndex:__cc_nextStreamingThinkingIndex,currentMessage:__cc_nextStreamingThinkingMessage,messages:__cc_nextStreamingThinkingMessages}:{thinking:__cc_nextStreamingThinkingText,isStreaming:!0,streamingEndedAt:void 0,currentIndex:${eventParam}.event.index,currentMessage:__cc_nextStreamingThinkingMessage,messages:[{index:${eventParam}.event.index,message:__cc_nextStreamingThinkingMessage}]}});`;
+
   // 2.1.138 moved the UI stream reducer to a destructured options-bag shape.
   // Patch it by semantic option names instead of assuming positional params.
   if (createVirtualMessageHelper !== null) {
@@ -846,7 +935,11 @@ function patchThinkingStreaming(content) {
       const messageStopFinalizeAfter = `if(${eventParam}.event.type==="message_stop"){${optionsParam}.displayTransform?.finalize(),${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:Date.now(),currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}("tool-use"),${setStreamingToolsParam}(()=>[]);return}`;
 
       const thinkingStartBefore = `case"thinking":case"redacted_thinking":${setModeParam}("thinking");return;`;
-      const thinkingStartAfter = `case"thinking":case"redacted_thinking":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>{let __cc_streamingThinkingMessage=${createVirtualMessageHelper}({content:[${eventParam}.event.content_block.type==="redacted_thinking"?{type:"redacted_thinking",data:${eventParam}.event.content_block.data??""}:{type:"thinking",thinking:""}],isVirtual:!0});return{thinking:${eventParam}.event.content_block.type==="redacted_thinking"?${eventParam}.event.content_block.data??"":"",isStreaming:!0,streamingEndedAt:void 0,currentIndex:${eventParam}.event.index,currentMessage:__cc_streamingThinkingMessage,messages:[...(__cc_prevStreamingThinking?.messages??[]),{index:${eventParam}.event.index,message:__cc_streamingThinkingMessage}]}}),${setModeParam}("thinking");return;`;
+      const thinkingStartAfter = `case"thinking":case"redacted_thinking":${buildStreamingThinkingStartExpression(
+        eventParam,
+        setStreamingThinkingParam,
+        createVirtualMessageHelper
+      )},${setModeParam}("thinking");return;`;
 
       const textStartBefore = `case"text":${setModeParam}("responding");return;`;
       const textStartAfter = `case"text":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}("responding");return;`;
@@ -859,7 +952,11 @@ function patchThinkingStreaming(content) {
       const messageDeltaBlockAfter = `case"message_delta":{${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}("responding");`;
 
       const thinkingDeltaBefore = `case"thinking_delta":return;`;
-      const thinkingDeltaBody = `${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>{let __cc_nextStreamingThinkingDelta=typeof ${eventParam}.event.delta.thinking==="string"?${eventParam}.event.delta.thinking:"",__cc_nextStreamingThinkingText=(__cc_prevStreamingThinking?.thinking??"")+__cc_nextStreamingThinkingDelta,__cc_nextStreamingThinkingIndex=__cc_prevStreamingThinking?.currentIndex??${eventParam}.event.index,__cc_nextStreamingThinkingMessage=${createVirtualMessageHelper}({content:[{type:"thinking",thinking:__cc_nextStreamingThinkingText}],isVirtual:!0}),__cc_replacedStreamingThinkingMessage=!1,__cc_nextStreamingThinkingMessages=(__cc_prevStreamingThinking?.messages??[]).map((__cc_entry)=>__cc_entry.index===__cc_nextStreamingThinkingIndex?(__cc_replacedStreamingThinkingMessage=!0,{...__cc_entry,message:__cc_nextStreamingThinkingMessage}):__cc_entry);if(!__cc_replacedStreamingThinkingMessage)__cc_nextStreamingThinkingMessages=[...__cc_nextStreamingThinkingMessages,{index:__cc_nextStreamingThinkingIndex,message:__cc_nextStreamingThinkingMessage}];return __cc_prevStreamingThinking?{...__cc_prevStreamingThinking,thinking:__cc_nextStreamingThinkingText,isStreaming:!0,streamingEndedAt:void 0,currentIndex:__cc_nextStreamingThinkingIndex,currentMessage:__cc_nextStreamingThinkingMessage,messages:__cc_nextStreamingThinkingMessages}:{thinking:__cc_nextStreamingThinkingText,isStreaming:!0,streamingEndedAt:void 0,currentIndex:${eventParam}.event.index,currentMessage:__cc_nextStreamingThinkingMessage,messages:[{index:${eventParam}.event.index,message:__cc_nextStreamingThinkingMessage}]}});`;
+      const thinkingDeltaBody = buildStreamingThinkingDeltaStatement(
+        eventParam,
+        setStreamingThinkingParam,
+        createVirtualMessageHelper
+      );
       const thinkingDeltaAfter = `case"thinking_delta":{${thinkingDeltaBody}return;}`;
       const thinkingDeltaProgressPattern = new RegExp(
         `case"thinking_delta":\\{let\\{delta:([A-Za-z_$][\\w$]*)\\}=${eventParam}\\.event;if\\("estimated_tokens"in \\1&&typeof \\1\\.estimated_tokens==="number"\\)([A-Za-z_$][\\w$]*)\\?\\.\\(\\{type:"thinking_progress",estimatedTokensDelta:\\1\\.estimated_tokens\\}\\);return\\}`
@@ -923,6 +1020,214 @@ function patchThinkingStreaming(content) {
     }
   }
 
+  // 2.1.183 keeps onStreamingThinking on the outer dispatcher but moves the
+  // stream-event switch into an inner handler that omits it from destructuring.
+  // Re-introduce the option there, then patch the same semantic stream cases.
+  if (createVirtualMessageHelper !== null) {
+    const missingStreamingThinkingHandlerPattern =
+      /function [A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)(?:,[A-Za-z_$][\w$]*)?\)\{let\{([^}]*)\}=\2([;,])/g;
+    let missingStreamingThinkingMatch;
+    while ((missingStreamingThinkingMatch = missingStreamingThinkingHandlerPattern.exec(output)) !== null) {
+      const eventParam = missingStreamingThinkingMatch[1];
+      const optionsParam = missingStreamingThinkingMatch[2];
+      const props = missingStreamingThinkingMatch[3];
+      const declarationSeparator = missingStreamingThinkingMatch[4];
+      if (props.includes("onStreamingThinking:")) {
+        continue;
+      }
+
+      const propVar = (name) => {
+        const aliasMatch = props.match(new RegExp(`${name}:(${identifierPattern})`));
+        if (aliasMatch) {
+          return aliasMatch[1];
+        }
+        const shorthandMatch = props.match(new RegExp(`(?:^|,)${name}(?:,|$)`));
+        return shorthandMatch ? name : null;
+      };
+      const setModeParam = propVar("onSetStreamMode");
+      const setStreamingToolsParam = propVar("onStreamingToolUses");
+      const displayTransformParam = propVar("displayTransform");
+      const setStreamingThinkingParam = "__cc_onStreamingThinking";
+
+      if (setModeParam === null || setStreamingToolsParam === null) {
+        continue;
+      }
+
+      const handlerStart = missingStreamingThinkingMatch.index;
+      const handlerEnd = output.indexOf("function ", handlerStart + missingStreamingThinkingMatch[0].length);
+      if (handlerEnd === -1) {
+        continue;
+      }
+
+      const handlerSegment = output.slice(handlerStart, handlerEnd);
+      if (
+        !handlerSegment.includes(`type==="stream_request_start"`) ||
+        !handlerSegment.includes(`case"thinking_delta"`) ||
+        !handlerSegment.includes("content_block_start")
+      ) {
+        continue;
+      }
+
+      const thinkingDeltaBody = buildStreamingThinkingDeltaStatement(
+        eventParam,
+        setStreamingThinkingParam,
+        createVirtualMessageHelper
+      );
+
+      const replacements = [
+        [
+          `let{${props}}=${optionsParam}${declarationSeparator}`,
+          `let{${props},onStreamingThinking:${setStreamingThinkingParam}}=${optionsParam}${declarationSeparator}`,
+        ],
+        [
+          `if(${eventParam}.type==="stream_request_start"){${setModeParam}("requesting");return}`,
+          `if(${eventParam}.type==="stream_request_start"){${setStreamingThinkingParam}?.(null),${setModeParam}?.("requesting");return}`,
+        ],
+        [
+          `if(${eventParam}.type==="stream_request_start"){${setModeParam}?.("requesting");return}`,
+          `if(${eventParam}.type==="stream_request_start"){${setStreamingThinkingParam}?.(null),${setModeParam}?.("requesting");return}`,
+        ],
+        [
+          `if(${eventParam}.event.type==="message_stop"){${setModeParam}("tool-use"),${setStreamingToolsParam}(()=>[]);return}`,
+          `if(${eventParam}.event.type==="message_stop"){${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:Date.now(),currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]);return}`,
+        ],
+        [
+          `if(${eventParam}.event.type==="message_stop"){${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]);return}`,
+          `if(${eventParam}.event.type==="message_stop"){${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:Date.now(),currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]);return}`,
+        ],
+        [
+          `case"thinking":case"redacted_thinking":${setModeParam}("thinking");return;`,
+          `case"thinking":case"redacted_thinking":${buildStreamingThinkingStartExpression(
+            eventParam,
+            setStreamingThinkingParam,
+            createVirtualMessageHelper
+          )},${setModeParam}?.("thinking");return;`,
+        ],
+        [
+          `case"thinking":case"redacted_thinking":${setModeParam}?.("thinking");return;`,
+          `case"thinking":case"redacted_thinking":${buildStreamingThinkingStartExpression(
+            eventParam,
+            setStreamingThinkingParam,
+            createVirtualMessageHelper
+          )},${setModeParam}?.("thinking");return;`,
+        ],
+        [
+          `case"text":${setModeParam}("responding");return;`,
+          `case"text":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("responding");return;`,
+        ],
+        [
+          `case"text":${setModeParam}?.("responding");return;`,
+          `case"text":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("responding");return;`,
+        ],
+        [
+          `case"message_delta":${setModeParam}("responding");return;`,
+          `case"message_delta":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("responding");return;`,
+        ],
+        [
+          `case"message_delta":${setModeParam}?.("responding");return;`,
+          `case"message_delta":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("responding");return;`,
+        ],
+        [
+          `case"message_delta":{${setModeParam}("responding");`,
+          `case"message_delta":{${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("responding");`,
+        ],
+        [
+          `case"message_delta":{${setModeParam}?.("responding");`,
+          `case"message_delta":{${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("responding");`,
+        ],
+        [
+          `case"thinking_delta":return;`,
+          `case"thinking_delta":{${thinkingDeltaBody}return;}`,
+        ],
+      ];
+
+      if (displayTransformParam !== null) {
+        replacements.push(
+          [
+            `if(${eventParam}.event.type==="message_stop"){${displayTransformParam}.finalize(),${setModeParam}("tool-use"),${setStreamingToolsParam}(()=>[]);return}`,
+            `if(${eventParam}.event.type==="message_stop"){${displayTransformParam}?.finalize(),${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:Date.now(),currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]);return}`,
+          ],
+          [
+            `if(${eventParam}.event.type==="message_stop"){${displayTransformParam}?.finalize(),${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]);return}`,
+            `if(${eventParam}.event.type==="message_stop"){${displayTransformParam}?.finalize(),${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:Date.now(),currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]);return}`,
+          ]
+        );
+      }
+
+      let nextHandlerSegment = handlerSegment;
+      for (const [before, after] of replacements) {
+        const result = replaceSegmentNeedle(nextHandlerSegment, before, after);
+        if (!result.changed) {
+          continue;
+        }
+        candidates += 1;
+        nextHandlerSegment = result.segment;
+        if (nextHandlerSegment.includes(after)) {
+          patched += 1;
+        }
+      }
+
+      if (displayTransformParam !== null) {
+        const messageStopAuthoringProgressPattern = new RegExp(
+          `if\\(${eventParam}\\.event\\.type==="message_stop"\\)\\{if\\(` +
+            `${displayTransformParam}\\?\\.finalize\\(\\),` +
+            `${setModeParam}\\?\\.\\("tool-use"\\),` +
+            `${setStreamingToolsParam}\\?\\.\\(\\(\\)=>\\[\\]\\),` +
+            `(${identifierPattern})\\)(${identifierPattern})\\.loaded\\(\\)\\?\\.resetAuthoringProgress\\(\\);return\\}`
+        );
+        const nextMessageStopSegment = nextHandlerSegment.replace(
+          messageStopAuthoringProgressPattern,
+          (_full, authoringProgressVar, authoringProgressModule) =>
+            `if(${eventParam}.event.type==="message_stop"){if(` +
+            `${displayTransformParam}?.finalize(),` +
+            `${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:Date.now(),currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),` +
+            `${setModeParam}?.("tool-use"),${setStreamingToolsParam}?.(()=>[]),` +
+            `${authoringProgressVar})${authoringProgressModule}.loaded()?.resetAuthoringProgress();return}`
+        );
+        if (nextMessageStopSegment !== nextHandlerSegment) {
+          candidates += 1;
+          patched += 1;
+          nextHandlerSegment = nextMessageStopSegment;
+        }
+      }
+
+      const thinkingDeltaProgressPattern = new RegExp(
+        `case"thinking_delta":\\{let\\{delta:(${identifierPattern})\\}=${eventParam}\\.event;if\\("estimated_tokens"in \\1&&typeof \\1\\.estimated_tokens==="number"\\)(${identifierPattern})\\?\\.\\(\\{type:"thinking_progress",estimatedTokensDelta:\\1\\.estimated_tokens\\}\\);return\\}`
+      );
+      const thinkingDeltaProgressWithTextPattern = new RegExp(
+        `case"thinking_delta":\\{let\\{delta:(${identifierPattern})\\}=${eventParam}\\.event;if\\("estimated_tokens"in \\1&&typeof \\1\\.estimated_tokens==="number"\\)(${identifierPattern})\\?\\.\\(\\{type:"thinking_progress",estimatedTokensDelta:\\1\\.estimated_tokens\\}\\);else if\\("thinking"in \\1&&typeof \\1\\.thinking==="string"&&\\1\\.thinking\\.length>0\\)\\2\\?\\.\\(\\{type:"thinking_progress",estimatedTokensDelta:(${identifierPattern})\\(\\1\\.thinking\\)\\}\\);return\\}`
+      );
+
+      const nextThinkingDeltaProgressSegment = nextHandlerSegment.replace(
+        thinkingDeltaProgressPattern,
+        (_full, deltaVar, metricsVar) => {
+          return `case"thinking_delta":{${thinkingDeltaBody}let{delta:${deltaVar}}=${eventParam}.event;if("estimated_tokens"in ${deltaVar}&&typeof ${deltaVar}.estimated_tokens==="number")${metricsVar}?.({type:"thinking_progress",estimatedTokensDelta:${deltaVar}.estimated_tokens});return}`;
+        }
+      );
+      if (nextThinkingDeltaProgressSegment !== nextHandlerSegment) {
+        candidates += 1;
+        patched += 1;
+        nextHandlerSegment = nextThinkingDeltaProgressSegment;
+      }
+      const nextThinkingDeltaProgressWithTextSegment = nextHandlerSegment.replace(
+        thinkingDeltaProgressWithTextPattern,
+        (_full, deltaVar, metricsVar, estimateHelper) => {
+          return `case"thinking_delta":{${thinkingDeltaBody}let{delta:${deltaVar}}=${eventParam}.event;if("estimated_tokens"in ${deltaVar}&&typeof ${deltaVar}.estimated_tokens==="number")${metricsVar}?.({type:"thinking_progress",estimatedTokensDelta:${deltaVar}.estimated_tokens});else if("thinking"in ${deltaVar}&&typeof ${deltaVar}.thinking==="string"&&${deltaVar}.thinking.length>0)${metricsVar}?.({type:"thinking_progress",estimatedTokensDelta:${estimateHelper}(${deltaVar}.thinking)});return}`;
+        }
+      );
+      if (nextThinkingDeltaProgressWithTextSegment !== nextHandlerSegment) {
+        candidates += 1;
+        patched += 1;
+        nextHandlerSegment = nextThinkingDeltaProgressWithTextSegment;
+      }
+
+      if (nextHandlerSegment !== handlerSegment) {
+        output = output.slice(0, handlerStart) + nextHandlerSegment + output.slice(handlerEnd);
+        missingStreamingThinkingHandlerPattern.lastIndex = handlerStart + nextHandlerSegment.length;
+      }
+    }
+  }
+
   // Ensure streaming thinking state is reset and updated from thinking deltas.
   // Without this, some builds keep stale previous-turn thinking and only show
   // final thinking text after completion.
@@ -960,7 +1265,11 @@ function patchThinkingStreaming(content) {
           const thinkingStartAfter =
             createVirtualMessageHelper === null
               ? null
-              : `case"thinking":case"redacted_thinking":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>{let __cc_streamingThinkingMessage=${createVirtualMessageHelper}({content:[${eventParam}.event.content_block.type==="redacted_thinking"?{type:"redacted_thinking",data:${eventParam}.event.content_block.data??""}:{type:"thinking",thinking:""}],isVirtual:!0});return{thinking:${eventParam}.event.content_block.type==="redacted_thinking"?${eventParam}.event.content_block.data??"":"",isStreaming:!0,streamingEndedAt:void 0,currentIndex:${eventParam}.event.index,currentMessage:__cc_streamingThinkingMessage,messages:[...(__cc_prevStreamingThinking?.messages??[]),{index:${eventParam}.event.index,message:__cc_streamingThinkingMessage}]}}),${setModeParam}("thinking");return;`;
+              : `case"thinking":case"redacted_thinking":${buildStreamingThinkingStartExpression(
+                  eventParam,
+                  setStreamingThinkingParam,
+                  createVirtualMessageHelper
+                )},${setModeParam}("thinking");return;`;
 
           const textStartBefore = `case"text":${setModeParam}("responding");return;`;
           const textStartAfter = `case"text":${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>__cc_prevStreamingThinking?{...__cc_prevStreamingThinking,isStreaming:!1,streamingEndedAt:void 0,currentIndex:null,currentMessage:null}:__cc_prevStreamingThinking),${setModeParam}("responding");return;`;
@@ -975,7 +1284,11 @@ function patchThinkingStreaming(content) {
           const thinkingDeltaBody =
             createVirtualMessageHelper === null
               ? null
-              : `${setStreamingThinkingParam}?.((__cc_prevStreamingThinking)=>{let __cc_nextStreamingThinkingDelta=typeof ${eventParam}.event.delta.thinking==="string"?${eventParam}.event.delta.thinking:"",__cc_nextStreamingThinkingText=(__cc_prevStreamingThinking?.thinking??"")+__cc_nextStreamingThinkingDelta,__cc_nextStreamingThinkingIndex=__cc_prevStreamingThinking?.currentIndex??${eventParam}.event.index,__cc_nextStreamingThinkingMessage=${createVirtualMessageHelper}({content:[{type:"thinking",thinking:__cc_nextStreamingThinkingText}],isVirtual:!0}),__cc_replacedStreamingThinkingMessage=!1,__cc_nextStreamingThinkingMessages=(__cc_prevStreamingThinking?.messages??[]).map((__cc_entry)=>__cc_entry.index===__cc_nextStreamingThinkingIndex?(__cc_replacedStreamingThinkingMessage=!0,{...__cc_entry,message:__cc_nextStreamingThinkingMessage}):__cc_entry);if(!__cc_replacedStreamingThinkingMessage)__cc_nextStreamingThinkingMessages=[...__cc_nextStreamingThinkingMessages,{index:__cc_nextStreamingThinkingIndex,message:__cc_nextStreamingThinkingMessage}];return __cc_prevStreamingThinking?{...__cc_prevStreamingThinking,thinking:__cc_nextStreamingThinkingText,isStreaming:!0,streamingEndedAt:void 0,currentIndex:__cc_nextStreamingThinkingIndex,currentMessage:__cc_nextStreamingThinkingMessage,messages:__cc_nextStreamingThinkingMessages}:{thinking:__cc_nextStreamingThinkingText,isStreaming:!0,streamingEndedAt:void 0,currentIndex:${eventParam}.event.index,currentMessage:__cc_nextStreamingThinkingMessage,messages:[{index:${eventParam}.event.index,message:__cc_nextStreamingThinkingMessage}]}});`;
+              : buildStreamingThinkingDeltaStatement(
+                  eventParam,
+                  setStreamingThinkingParam,
+                  createVirtualMessageHelper
+                );
           const thinkingDeltaAfter =
             thinkingDeltaBody === null
               ? null
@@ -1351,6 +1664,19 @@ function patchWelcomePatchedBadge(content) {
   );
 
   output = output.replace(
+    /([A-Za-z_$][\w$]*)\.(jsx|jsxs)\(([A-Za-z_$][\w$]*),\{bold:!0,children:"Claude Code"\}\)/g,
+    (full, reactVar, jsxFactory, textComponent) => {
+      candidates += 1;
+      const replacement = `${reactVar}.${jsxFactory}(${textComponent},{bold:!0,children:"Connoisseur's Code"})`;
+      if (replacement !== full) {
+        patched += 1;
+        return replacement;
+      }
+      return full;
+    }
+  );
+
+  output = output.replace(
     /title:(`Claude Code v\$\{[\s\S]*?\.VERSION\}`),color:"professionalBlue",defaultTab:"general"/g,
     (full, titleExpr) => {
       candidates += 1;
@@ -1368,6 +1694,32 @@ function patchWelcomePatchedBadge(content) {
     (full) => {
       candidates += 1;
       const replacement = `"Welcome to Connoisseur's Code for "`;
+      if (replacement !== full) {
+        patched += 1;
+        return replacement;
+      }
+      return full;
+    }
+  );
+
+  output = output.replace(
+    /"Welcome to Claude Code"/g,
+    (full) => {
+      candidates += 1;
+      const replacement = `"Welcome to Connoisseur's Code"`;
+      if (replacement !== full) {
+        patched += 1;
+        return replacement;
+      }
+      return full;
+    }
+  );
+
+  output = output.replace(
+    /(color:"claude",bold:!0,children:\[)"Claude Code"(," "\])/g,
+    (full, prefix, suffix) => {
+      candidates += 1;
+      const replacement = `${prefix}"Connoisseur's Code"${suffix}`;
       if (replacement !== full) {
         patched += 1;
         return replacement;

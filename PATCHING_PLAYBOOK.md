@@ -112,7 +112,8 @@ Old bundle shape we match:
 - a switch arm with `case"collapsed_read_search"`
 - one build shape returns directly from the case
 - another build shape uses a block form `case"collapsed_read_search":{ ... }`
-- both forms contain a React `createElement(...)` call with a `verbose:` prop
+- both forms contain a React renderer call with a `verbose:` prop
+- older builds use `createElement(...)`; 2.1.186-style builds use JSX-runtime calls like `.jsx(...)` or `.jsxs(...)`
 
 What we rewrite:
 
@@ -140,6 +141,7 @@ Old bundle shape we match:
 - a nearby switch arm for `case"update":`
 - the `create` arm returns a simple write renderer with `{filePath,content,verbose}`
 - the `update` arm renders a richer diff component using `structuredPatch`
+- 2.1.186-style builds can use JSX-runtime calls like `.jsx(...)` and `.jsxs(...)` instead of `createElement(...)`
 
 What we rewrite:
 
@@ -168,6 +170,8 @@ Old bundle shape we match:
 - function body anchored near `"diffAddedWord";else if(!`
 - child parts render with `backgroundColor:<expr>`
 - the function also knows the diff `type` and a dimming flag parameter
+- older builds put `key:` before `backgroundColor:` in a `createElement(...)` props object
+- 2.1.186-style builds put the key after the props object in a JSX-runtime call, so match by the `backgroundColor:` and `part-${...}-${...}` shape instead of assuming prop order
 
 What we rewrite:
 
@@ -193,13 +197,15 @@ Old bundle shape we match:
 
 - switch arm `case"thinking":`
 - an early return like `if(!... )return null;`
-- renderer props containing `isTranscriptMode:` and `hideInTranscript:`
+- renderer props containing `isTranscriptMode:`
+- older builds also carry `hideInTranscript:`, but newer builds can omit it
+- renderer calls can be either `createElement(...)` or JSX-runtime `.jsx(...)` / `.jsxs(...)`
 
 What we rewrite:
 
 - remove the early null-return gate
 - force `isTranscriptMode:!0`
-- force `hideInTranscript:!1`
+- force `hideInTranscript:!1` when that prop exists
 
 Why this exists:
 
@@ -209,6 +215,36 @@ Likely break signs:
 
 - thinking blocks disappear from the main message flow
 - only final output appears while reasoning remains hidden
+
+### `redacted-thinking-inline`
+
+Intent:
+
+- render redacted thinking summaries inline using the same renderer as normal thinking blocks
+
+Old bundle shapes we match:
+
+- adjacent switch arms for `case"redacted_thinking":` and `case"thinking":`
+- the redacted arm returns a placeholder/summary component
+- the thinking arm renders a component with `addMargin:`, `param:`, `isTranscriptMode:`, and `verbose:`
+- older builds use `createElement(...)` and carry `hideInTranscript:`
+- 2.1.186-style builds use `.jsx(...)` and can omit `hideInTranscript:`
+
+What we rewrite:
+
+- replace the redacted arm with a thinking-renderer call
+- synthesize a `{type:"thinking",thinking:<redacted data>}` param
+- force transcript/verbose visibility, and force `hideInTranscript:!1` only when upstream still has that prop
+
+Why this exists:
+
+- redacted thinking summaries otherwise stay hidden or render as a generic placeholder
+
+Likely break signs:
+
+- redacted summaries disappear while normal thinking still appears
+- `redacted-thinking-inline` candidate count drops to `0`
+- the redacted and thinking switch arms are no longer adjacent
 
 ### `thinking-streaming`
 
@@ -227,6 +263,7 @@ Sub-fixes currently bundled here:
 - inline extras fix: materialize `streamingThinking.messages` in the transcript extras list, ordered alongside streaming tool-use blocks by content-block index
 - bottom-row suppressor: remove the separate live-thinking row that sits outside the main message flow so streaming thinking only renders inline once
 - reducer/event fix: update the stream event handler so `stream_request_start`, `thinking`, `thinking_delta`, `text`, `message_delta`, and `message_stop` keep per-block streaming thinking state in sync without relying on footer-row rendering
+- duplicate-index fix: keep only one virtual streaming-thinking message per content-block index so repeated block-start handling cannot create two live blocks that receive the same later deltas
 
 Old bundle shapes we match:
 
@@ -241,6 +278,9 @@ Old bundle shapes we match:
 - current main-screen renderer shapes can carry `placeholderElement:` and `streamingText:` but omit `showThinkingHint:`, so the prop-threading matcher must not depend on that prop being present before injecting `streamingThinking:`
 - 2.1.168-style transcript renderers can drop `hidePastThinking:` and `streamingThinking:` from the renderer signature entirely while the top-level app still has an `onStreamingThinking:<setter>` callback backed by nearby `useState(null)`. In that shape, rediscover the state variable from the setter and re-inject `streamingThinking:` into both the transcript renderer call sites and the transcript renderer destructuring signature.
 - 2.1.168-style UI reducers can run `displayTransform?.finalize()` inside the `message_stop` branch before switching to `"tool-use"`, and can use a block-form `case"message_delta":{...}`. The reducer patch must preserve those existing side effects while adding streaming-thinking cleanup before the stream transitions to normal response state.
+- 2.1.183-style UI reducers can keep `onStreamingThinking:<setter>` on the outer event dispatcher while moving the stream-event switch into a separate inner handler that destructures `onSetStreamMode`, `onStreamingToolUses`, `onStreamingText`, and `displayTransform`, but not `onStreamingThinking`. In that shape, inject `onStreamingThinking` into the inner handler destructuring, then patch `stream_request_start`, thinking/redacted-thinking block start, `thinking_delta`, text/message transitions, and `message_stop` there.
+- 2.1.199-style live thinking can still use the same `onStreamingThinking` state but may surface duplicate virtual entries if a thinking content-block start is handled more than once for the same index. Treat `streamingThinking.messages` as keyed by content-block index, not append-only.
+- 2.1.227-style UI reducers can continue the options-destructuring `let` statement with an `authoringProgressSurface` local instead of ending it with a semicolon. Their `message_stop` branch also conditionally resets authoring progress after finalizing display state, so preserve that side effect while injecting streaming-thinking cleanup.
 - the duplicate live-thinking suppressor should match the semantic row shape around `param:{type:"thinking",thinking:<var>.thinking}` and the surrounding `marginTop:1` wrapper, not a specific wrapper component identifier
 
 Why this exists:
@@ -255,6 +295,7 @@ Likely break signs:
 - live streaming shows two thinking blocks at once
 - live thinking pins itself to the bottom of the transcript instead of staying above the later streamed text/tool blocks
 - patch count drops partially rather than fully; this often means only one of the sub-fixes drifted
+- patch count still looks nonzero but live thinking is broken; check whether the reducer/event fix actually touched the stream-event handler, not just renderer prop threading or final assistant-message summary paths
 
 ### `subagent-prompt`
 
@@ -342,6 +383,7 @@ Intent:
 Old bundle shape we match:
 
 - string payload containing `switched from npm to native installer`
+- 2.1.186 no longer contains this string; `0` candidates is expected there unless this patch is retargeted to a newer installation warning
 
 What we rewrite:
 
@@ -355,6 +397,7 @@ Likely break signs:
 
 - upstream rewrites the migration copy and the needle vanishes
 - patch count drops to `0`
+- on 2.1.186, first confirm whether the old migration warning still exists before treating this as a regression
 
 ### `welcome-badge`
 
@@ -365,8 +408,10 @@ Intent:
 Old bundle shapes we match:
 
 - bold text node rendering `"Claude Code"`
+- JSX text props shaped like `{bold:!0,children:"Claude Code"}`
 - help/settings title template like ``title:(`Claude Code v${...VERSION}`),color:"professionalBlue",defaultTab:"general"``
 - welcome copy `"Welcome to Claude Code for "`
+- welcome copy `"Welcome to Claude Code"`
 - styled title helpers shaped like `<colorFn>("claude",<themeVar>)("Claude Code")`
 - same helper with padded text `(" Claude Code ")`
 
