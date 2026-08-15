@@ -7,7 +7,7 @@ pfg CLI:
 
 `crosscheck` is the 2b re-anchor worklist generator: unlike discover (which aborts
 on the first drifted anchor), it reports every anchor's count so a target bump
-surfaces all the re-anchor tickets in one pass.
+lists every re-anchor ticket in one pass.
 """
 import re
 import sys
