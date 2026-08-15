@@ -1,0 +1,342 @@
+{
+  "normal": {
+    "rc": 0,
+    "output_tail": "p\",\"claude-api\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"51d90b5f-b426-4512-967d-f007c38235e3\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\"}\n{\"type\":\"assistant\",\"message\":{\"id\":\"05f1ba54-a65d-4bca-9b5c-353268d3daa9\",\"container\":null,\"model\":\"<synthetic>\",\"role\":\"assistant\",\"stop_details\":null,\"stop_reason\":\"stop_sequence\",\"stop_sequence\":\"\",\"type\":\"message\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":null,\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":null,\"iterations\":null,\"speed\":null},\"content\":[{\"type\":\"text\",\"text\":\"(no content)\"}],\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\",\"uuid\":\"c6fafe2c-b799-4a0d-8e52-f6a7de59e1f6\",\"timestamp\":\"2026-08-05T05:04:54.991Z\"}\n{\"is_error\":false,\"duration_api_ms\":0,\"num_turns\":0,\"stop_reason\":null,\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{},\"permission_denials\":[],\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"result\":\"\",\"type\":\"result\",\"duration_ms\":10,\"uuid\":\"5491c8f5-0734-4ce0-be5f-6cf91c700a1a\"}\n{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/claude-clear-probe-dvrq7v6h/work\",\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\",\"tools\":[],\"mcp_servers\":[],\"model\":\"gpt-5.6-luna\",\"permissionMode\":\"dontAsk\",\"slash_commands\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"claude-api\",\"run\",\"run-skill-generator\",\"agents\",\"clear\",\"color\",\"compact\",\"config\",\"context\",\"effort\",\"fast\",\"heapdump\",\"init\",\"mcp\",\"model\",\"__remote-workflow\",\"workflow-launch-exec\",\"reload-skills\",\"rename\",\"review\",\"security-review\",\"usage\",\"insights\",\"recap\",\"skill-doctor\",\"goal\",\"design\",\"design-consent\",\"design-revoke\",\"team-onboarding\"],\"apiKeySource\":\"ANTHROPIC_API_KEY\",\"claude_code_version\":\"2.1.220\",\"output_style\":\"default\",\"agents\":[\"claude\",\"Explore\",\"general-purpose\",\"Plan\"],\"skills\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"claude-api\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"fb754f78-823f-4c2c-aad1-f0dcd429b285\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\"}\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}]},\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\",\"parent_tool_use_id\":null,\"uuid\":\"6820adda-7d79-493f-a37f-938aa6a45e99\",\"timestamp\":\"2026-08-05T05:04:54.998Z\",\"isReplay\":true}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg_probe_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.6-luna\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\",\"uuid\":\"833382f9-fb82-48f1-8c06-4b454dad1906\",\"timestamp\":\"2026-08-05T05:04:55.003Z\"}\n{\"is_error\":false,\"duration_api_ms\":5,\"num_turns\":1,\"stop_reason\":\"end_turn\",\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\",\"total_cost_usd\":0.000029999999999999997,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"gpt-5.6-luna\":{\"inputTokens\":1,\"outputTokens\":1,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.000029999999999999997,\"contextWindow\":372000,\"maxOutputTokens\":32000,\"canonicalModel\":\"gpt-5.6-luna\",\"provider\":\"firstParty\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"OK\",\"ttft_ms\":10,\"ttft_stream_ms\":9,\"time_to_request_ms\":8,\"type\":\"result\",\"duration_ms\":11,\"uuid\":\"72b08e5d-8edd-4b91-bf24-b65125742ea8\"}\n",
+    "requests": [
+      {
+        "path": "/v1/messages?beta=true",
+        "session_header": "11111111-1111-4111-8111-111111111111",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "claude-cli/2.1.220 (external, sdk-cli)",
+          "X-Claude-Code-Session-Id": "11111111-1111-4111-8111-111111111111",
+          "X-Stainless-Arch": "x64",
+          "X-Stainless-Lang": "js",
+          "X-Stainless-OS": "Linux",
+          "X-Stainless-Package-Version": "0.94.0",
+          "X-Stainless-Retry-Count": "0",
+          "X-Stainless-Runtime": "node",
+          "X-Stainless-Runtime-Version": "v26.3.0",
+          "X-Stainless-Timeout": "600",
+          "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": "test",
+          "x-app": "cli",
+          "Connection": "keep-alive",
+          "Host": "127.0.0.1:47656",
+          "Accept-Encoding": "gzip, deflate, br, zstd",
+          "Content-Length": "1341"
+        },
+        "body": {
+          "model": "gpt-5.6-luna",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-05.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+                },
+                {
+                  "type": "text",
+                  "text": "first",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ],
+          "system": [
+            {
+              "type": "text",
+              "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            },
+            {
+              "type": "text",
+              "text": "CWD: /tmp/claude-clear-probe-dvrq7v6h/work\nDate: 2026-08-05\n\ngitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: HEAD\n\nMain branch (you will usually use this for PRs): main\n\nGit user: Juraj Or\u0161uli\u0107\n\nStatus:\n(clean)\n\nRecent commits:\n",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ],
+          "tools": [],
+          "metadata": {
+            "user_id": "{\"device_id\":\"32a90370b9b5940ea3e90f6837994c0d4596fc71bf06234632c12bda9f066136\",\"account_uuid\":\"\",\"session_id\":\"11111111-1111-4111-8111-111111111111\"}"
+          },
+          "max_tokens": 128000,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "low"
+          },
+          "stream": true
+        }
+      },
+      {
+        "path": "/v1/messages?beta=true",
+        "session_header": "ab73acfa-2b72-4780-9b8d-0481385c113c",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "claude-cli/2.1.220 (external, sdk-cli)",
+          "X-Claude-Code-Session-Id": "ab73acfa-2b72-4780-9b8d-0481385c113c",
+          "X-Stainless-Arch": "x64",
+          "X-Stainless-Lang": "js",
+          "X-Stainless-OS": "Linux",
+          "X-Stainless-Package-Version": "0.94.0",
+          "X-Stainless-Retry-Count": "0",
+          "X-Stainless-Runtime": "node",
+          "X-Stainless-Runtime-Version": "v26.3.0",
+          "X-Stainless-Timeout": "600",
+          "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": "test",
+          "x-app": "cli",
+          "Connection": "keep-alive",
+          "Host": "127.0.0.1:47656",
+          "Accept-Encoding": "gzip, deflate, br, zstd",
+          "Content-Length": "1848"
+        },
+        "body": {
+          "model": "gpt-5.6-luna",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-05.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+                },
+                {
+                  "type": "text",
+                  "text": "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to.</local-command-caveat>\n"
+                },
+                {
+                  "type": "text",
+                  "text": "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>\n"
+                },
+                {
+                  "type": "text",
+                  "text": "<local-command-stdout></local-command-stdout>\n"
+                },
+                {
+                  "type": "text",
+                  "text": "second",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ],
+          "system": [
+            {
+              "type": "text",
+              "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            },
+            {
+              "type": "text",
+              "text": "CWD: /tmp/claude-clear-probe-dvrq7v6h/work\nDate: 2026-08-05\n\ngitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: HEAD\n\nMain branch (you will usually use this for PRs): main\n\nGit user: Juraj Or\u0161uli\u0107\n\nStatus:\n(clean)\n\nRecent commits:\n",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ],
+          "tools": [],
+          "metadata": {
+            "user_id": "{\"device_id\":\"32a90370b9b5940ea3e90f6837994c0d4596fc71bf06234632c12bda9f066136\",\"account_uuid\":\"\",\"session_id\":\"ab73acfa-2b72-4780-9b8d-0481385c113c\"}"
+          },
+          "max_tokens": 128000,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "low"
+          },
+          "stream": true
+        }
+      }
+    ]
+  },
+  "pinned": {
+    "rc": 0,
+    "output_tail": "\",\"claude-api\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"e9c42cbd-7398-407c-8ce7-ff22d3a08653\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\"}\n{\"type\":\"assistant\",\"message\":{\"id\":\"9f8ba4bb-1f4b-4dce-a8a2-80dd609f5b19\",\"container\":null,\"model\":\"<synthetic>\",\"role\":\"assistant\",\"stop_details\":null,\"stop_reason\":\"stop_sequence\",\"stop_sequence\":\"\",\"type\":\"message\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":null,\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":null,\"iterations\":null,\"speed\":null},\"content\":[{\"type\":\"text\",\"text\":\"(no content)\"}],\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\",\"uuid\":\"1a82942a-50eb-4925-8782-69663c6203ff\",\"timestamp\":\"2026-08-05T05:04:56.605Z\"}\n{\"is_error\":false,\"duration_api_ms\":0,\"num_turns\":0,\"stop_reason\":null,\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{},\"permission_denials\":[],\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"result\":\"\",\"type\":\"result\",\"duration_ms\":10,\"uuid\":\"1617aa82-dd8a-4c23-b83b-40cffcea3eac\"}\n{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/claude-clear-probe-o9liw3mz/work\",\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\",\"tools\":[],\"mcp_servers\":[],\"model\":\"gpt-5.6-luna\",\"permissionMode\":\"dontAsk\",\"slash_commands\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"claude-api\",\"run\",\"run-skill-generator\",\"agents\",\"clear\",\"color\",\"compact\",\"config\",\"context\",\"effort\",\"fast\",\"heapdump\",\"init\",\"mcp\",\"model\",\"__remote-workflow\",\"workflow-launch-exec\",\"reload-skills\",\"rename\",\"review\",\"security-review\",\"usage\",\"insights\",\"recap\",\"skill-doctor\",\"goal\",\"design\",\"design-consent\",\"design-revoke\",\"team-onboarding\"],\"apiKeySource\":\"ANTHROPIC_API_KEY\",\"claude_code_version\":\"2.1.220\",\"output_style\":\"default\",\"agents\":[\"claude\",\"Explore\",\"general-purpose\",\"Plan\"],\"skills\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"claude-api\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"393aa145-6af9-4b25-bfa6-1b3e8597e4f2\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\"}\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}]},\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\",\"parent_tool_use_id\":null,\"uuid\":\"8be61a71-a486-4883-9fb4-66cbaf7f2b42\",\"timestamp\":\"2026-08-05T05:04:56.612Z\",\"isReplay\":true}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg_probe_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.6-luna\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\",\"uuid\":\"c5560b4d-a086-4cb8-aba1-8cd002d65a8f\",\"timestamp\":\"2026-08-05T05:04:56.617Z\"}\n{\"is_error\":false,\"duration_api_ms\":5,\"num_turns\":1,\"stop_reason\":\"end_turn\",\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\",\"total_cost_usd\":0.000029999999999999997,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"gpt-5.6-luna\":{\"inputTokens\":1,\"outputTokens\":1,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.000029999999999999997,\"contextWindow\":372000,\"maxOutputTokens\":32000,\"canonicalModel\":\"gpt-5.6-luna\",\"provider\":\"firstParty\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"OK\",\"ttft_ms\":10,\"ttft_stream_ms\":10,\"time_to_request_ms\":7,\"type\":\"result\",\"duration_ms\":11,\"uuid\":\"bab3ee14-8a13-44dd-9451-ee5f4d3ad00b\"}\n",
+    "requests": [
+      {
+        "path": "/v1/messages?beta=true",
+        "session_header": "11111111-1111-4111-8111-111111111111",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "claude-cli/2.1.220 (external, sdk-cli)",
+          "X-Claude-Code-Session-Id": "11111111-1111-4111-8111-111111111111",
+          "X-Stainless-Arch": "x64",
+          "X-Stainless-Lang": "js",
+          "X-Stainless-OS": "Linux",
+          "X-Stainless-Package-Version": "0.94.0",
+          "X-Stainless-Retry-Count": "0",
+          "X-Stainless-Runtime": "node",
+          "X-Stainless-Runtime-Version": "v26.3.0",
+          "X-Stainless-Timeout": "600",
+          "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": "test",
+          "x-app": "cli",
+          "Connection": "keep-alive",
+          "Host": "127.0.0.1:47656",
+          "Accept-Encoding": "gzip, deflate, br, zstd",
+          "Content-Length": "1341"
+        },
+        "body": {
+          "model": "gpt-5.6-luna",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-05.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+                },
+                {
+                  "type": "text",
+                  "text": "first",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ],
+          "system": [
+            {
+              "type": "text",
+              "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            },
+            {
+              "type": "text",
+              "text": "CWD: /tmp/claude-clear-probe-o9liw3mz/work\nDate: 2026-08-05\n\ngitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: HEAD\n\nMain branch (you will usually use this for PRs): main\n\nGit user: Juraj Or\u0161uli\u0107\n\nStatus:\n(clean)\n\nRecent commits:\n",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ],
+          "tools": [],
+          "metadata": {
+            "user_id": "{\"device_id\":\"f19b62dbb71a27b7612cfacfbf58a64ad829370f6a592baa247d806976610918\",\"account_uuid\":\"\",\"session_id\":\"11111111-1111-4111-8111-111111111111\"}"
+          },
+          "max_tokens": 128000,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "low"
+          },
+          "stream": true
+        }
+      },
+      {
+        "path": "/v1/messages?beta=true",
+        "session_header": "11111111-1111-4111-8111-111111111111",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "claude-cli/2.1.220 (external, sdk-cli)",
+          "X-Claude-Code-Session-Id": "11111111-1111-4111-8111-111111111111",
+          "X-Stainless-Arch": "x64",
+          "X-Stainless-Lang": "js",
+          "X-Stainless-OS": "Linux",
+          "X-Stainless-Package-Version": "0.94.0",
+          "X-Stainless-Retry-Count": "0",
+          "X-Stainless-Runtime": "node",
+          "X-Stainless-Runtime-Version": "v26.3.0",
+          "X-Stainless-Timeout": "600",
+          "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": "test",
+          "x-app": "cli",
+          "Connection": "keep-alive",
+          "Host": "127.0.0.1:47656",
+          "Accept-Encoding": "gzip, deflate, br, zstd",
+          "Content-Length": "1848"
+        },
+        "body": {
+          "model": "gpt-5.6-luna",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-05.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+                },
+                {
+                  "type": "text",
+                  "text": "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to.</local-command-caveat>\n"
+                },
+                {
+                  "type": "text",
+                  "text": "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>\n"
+                },
+                {
+                  "type": "text",
+                  "text": "<local-command-stdout></local-command-stdout>\n"
+                },
+                {
+                  "type": "text",
+                  "text": "second",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ],
+          "system": [
+            {
+              "type": "text",
+              "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            },
+            {
+              "type": "text",
+              "text": "CWD: /tmp/claude-clear-probe-o9liw3mz/work\nDate: 2026-08-05\n\ngitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: HEAD\n\nMain branch (you will usually use this for PRs): main\n\nGit user: Juraj Or\u0161uli\u0107\n\nStatus:\n(clean)\n\nRecent commits:\n",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ],
+          "tools": [],
+          "metadata": {
+            "user_id": "{\"device_id\":\"f19b62dbb71a27b7612cfacfbf58a64ad829370f6a592baa247d806976610918\",\"account_uuid\":\"\",\"session_id\":\"96444f77-7abe-4577-be79-ef2d54f28b2f\"}"
+          },
+          "max_tokens": 128000,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "low"
+          },
+          "stream": true
+        }
+      }
+    ]
+  }
+}

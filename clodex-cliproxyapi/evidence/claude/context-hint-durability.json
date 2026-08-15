@@ -1,0 +1,71 @@
+{
+  "run_rc": 0,
+  "resume_rc": 0,
+  "hint_rejected": true,
+  "requests": [
+    {
+      "mode": "run",
+      "hint": null,
+      "bytes": 2188,
+      "wrappers": 0,
+      "cleared": 0,
+      "raw_A": 0,
+      "tool_results": 0
+    },
+    {
+      "mode": "run",
+      "hint": null,
+      "bytes": 99237,
+      "wrappers": 0,
+      "cleared": 0,
+      "raw_A": 0,
+      "tool_results": 0
+    },
+    {
+      "mode": "run",
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "bytes": 402116,
+      "wrappers": 0,
+      "cleared": 0,
+      "raw_A": 30,
+      "tool_results": 10
+    },
+    {
+      "mode": "run",
+      "hint": null,
+      "bytes": 253221,
+      "wrappers": 5,
+      "cleared": 0,
+      "raw_A": 0,
+      "tool_results": 10
+    },
+    {
+      "mode": "resume",
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "bytes": 402241,
+      "wrappers": 0,
+      "cleared": 0,
+      "raw_A": 30,
+      "tool_results": 10
+    }
+  ],
+  "tool_result_files": [
+    "/tmp/claude-context-hint-g2qc3xuu/config/projects/-tmp-claude-context-hint-g2qc3xuu-work/77777777-7777-4777-8777-777777777777/tool-results/toolu_hint_2.txt",
+    "/tmp/claude-context-hint-g2qc3xuu/config/projects/-tmp-claude-context-hint-g2qc3xuu-work/77777777-7777-4777-8777-777777777777/tool-results/toolu_hint_1.txt",
+    "/tmp/claude-context-hint-g2qc3xuu/config/projects/-tmp-claude-context-hint-g2qc3xuu-work/77777777-7777-4777-8777-777777777777/tool-results/toolu_hint_3.txt",
+    "/tmp/claude-context-hint-g2qc3xuu/config/projects/-tmp-claude-context-hint-g2qc3xuu-work/77777777-7777-4777-8777-777777777777/tool-results/toolu_hint_0.txt",
+    "/tmp/claude-context-hint-g2qc3xuu/config/projects/-tmp-claude-context-hint-g2qc3xuu-work/77777777-7777-4777-8777-777777777777/tool-results/toolu_hint_4.txt"
+  ],
+  "jsonls": [
+    "/tmp/claude-context-hint-g2qc3xuu/config/projects/-tmp-claude-context-hint-g2qc3xuu-work/77777777-7777-4777-8777-777777777777.jsonl"
+  ],
+  "run_tail": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\nAFTER_HINT_OK\n",
+  "resume_tail": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\nRESUME_OK\n",
+  "root": "/tmp/claude-context-hint-g2qc3xuu"
+}

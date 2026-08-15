@@ -1,0 +1,13 @@
+{
+  "parent_rc": 0,
+  "fork_rc": 0,
+  "parent_output_tail": ":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"<persisted-output>\\nFull output saved to: /tmp/claude-persisted-fork-7yd9egzt/config/projects/-tmp/55555555-5555-4555-8555-555555555555/tool-results/result.txt\\nUse Read to view.\\n</persisted-output>\",\"ttft_ms\":117,\"ttft_stream_ms\":116,\"time_to_request_ms\":112,\"type\":\"result\",\"duration_ms\":133,\"uuid\":\"2f80ce3a-55c9-4d7f-8ec8-ffcd860e893b\"}\n",
+  "fork_output_tail": ":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"<persisted-output>\\nFull output saved to: /tmp/claude-persisted-fork-7yd9egzt/config/projects/-tmp/55555555-5555-4555-8555-555555555555/tool-results/result.txt\\nUse Read to view.\\n</persisted-output>\",\"ttft_ms\":500,\"ttft_stream_ms\":498,\"time_to_request_ms\":489,\"type\":\"result\",\"duration_ms\":518,\"uuid\":\"12132333-b32e-4b4f-b7ac-aee1eeecd9b6\"}\n",
+  "parent_session": "55555555-5555-4555-8555-555555555555",
+  "child_transcript": "/tmp/claude-persisted-fork-7yd9egzt/config/projects/-tmp/b8e63587-5516-4ca2-a533-f778231ad334.jsonl",
+  "wrapper_copied_verbatim": true,
+  "child_owned_artifact_copy": false,
+  "artifact_exists_after_parent_delete": false,
+  "child_transcript_exists_after_parent_delete": true,
+  "root": "/tmp/claude-persisted-fork-7yd9egzt"
+}

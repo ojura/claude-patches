@@ -1,0 +1,93 @@
+{
+  "date": "2026-08-10",
+  "classification": {
+    "translation_and_cache_key": "source-confirmed at CLIProxyAPI v7.2.116",
+    "response_matrices": "executable-reproduced against the isolated direct route",
+    "artifact_kind": "project-authored focused summary"
+  },
+  "cliproxy_source": {
+    "path": "/tmp/cliproxyapi-source",
+    "commit": "a88197f845c979132c8978ea223c6af05cc81536",
+    "tag": "v7.2.116",
+    "source_locations": {
+      "top_level_system_to_developer": "internal/translator/codex/claude/codex_claude_request.go:51-83",
+      "message_level_system_to_user": "internal/translator/codex/claude/codex_claude_request.go:90-100",
+      "tool_result_to_function_output": "internal/translator/codex/claude/codex_claude_request.go:200-249",
+      "system_reminder_wrapper": "internal/translator/common/claude_system.go:15-27",
+      "prompt_cache_derivation": "internal/runtime/executor/helps/claude_code_session.go:96-105",
+      "prompt_cache_injection": "internal/runtime/executor/codex_executor_request.go:91-147"
+    }
+  },
+  "source_confirmed": {
+    "top_level_system": "Claude top-level system text becomes a Responses developer message.",
+    "message_level_system": "Claude message-level system text becomes a Responses user message at the same history position and receives one outer system-reminder wrapper.",
+    "tool_result": "Claude tool_result becomes function_call_output.",
+    "promoted_midturn_order": [
+      "assistant function_call",
+      "function_call_output",
+      "user steering reminder"
+    ],
+    "prompt_cache_key": "A deterministic UUID is derived from model name plus Claude root session and agent identity, then sent as prompt_cache_key and Session_id.",
+    "cache_interpretation": "The stable key selects a performance namespace. It does not authorize reasoning replay or continuation, and reuse still requires an identical content prefix.",
+    "tail_prefix_property": "Keeping later steering at its chronological tail leaves the earlier translated request prefix unchanged when model-facing content before it is unchanged. Provider cache-hit amounts remain runtime-dependent.",
+    "known_wrapper_edge": "The message-level-system helper always adds an outer system-reminder wrapper. Already wrapped content can therefore become nested."
+  },
+  "short_correction_matrix": {
+    "temporary_source": "/tmp/midturn-steering-research/clean-instance/payload-matrix.json",
+    "model": "gpt-5.6-sol",
+    "trials": 21,
+    "thinking_disabled_trials": 18,
+    "xhigh_trials": 3,
+    "xhigh_variants": [
+      "direct user text",
+      "full system-reminder wrapper",
+      "steering appended to tool output"
+    ],
+    "tool_result_characters": 4625,
+    "corrected_choice_trials": 21,
+    "variants": [
+      "direct user text",
+      "third-person steering scaffold",
+      "full system-reminder wrapper",
+      "direct system-reminder wrapper",
+      "steering appended to tool output",
+      "message-level system"
+    ],
+    "interpretation": "Every tested representation selected the later corrected port. This does not establish equal reliability in long or competing work."
+  },
+  "long_history_matrix": {
+    "temporary_source": "/tmp/midturn-steering-research/clean-instance/ack-matrix.json",
+    "model": "gpt-5.6-sol",
+    "history_tool_cycles": 40,
+    "retained_direct_path_trials": 12,
+    "verbal_acknowledgement_trials": 12,
+    "variants": {
+      "latest_direct_user": {
+        "trials": 3,
+        "acknowledged": 3,
+        "fact_in_next_tool_arguments": 3
+      },
+      "latest_full_wrapper": {
+        "trials": 3,
+        "acknowledged": 3,
+        "fact_in_next_tool_arguments": 3
+      },
+      "embedded_in_tool_result": {
+        "trials": 3,
+        "acknowledged": 3,
+        "fact_in_next_tool_arguments": 1
+      },
+      "latest_message_level_system": {
+        "trials": 3,
+        "acknowledged": 3,
+        "fact_in_next_tool_arguments": 1
+      }
+    },
+    "interpretation": "The model acknowledged every update, but acknowledgement did not guarantee that the next tool arguments changed. The sample is too small and synthetic to estimate a production miss rate."
+  },
+  "limitations": [
+    "The full matrix responses contain large model signatures and are not copied into this corpus; this file retains aggregate outcomes and temporary source paths.",
+    "The matrices compare representations and salience. They do not reproduce Claude Code's final-response timing window.",
+    "The direct translation claims are source-confirmed at v7.2.116 and must not be attributed to the separately pinned 7.2.112 retained-WebSocket binary lane."
+  ]
+}

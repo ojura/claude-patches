@@ -1,0 +1,8 @@
+=== RUN   TestWorkflowPartialWebsocketWriteIsRetriedAsFullRequest
+time="2026-08-05T12:58:06+02:00" level=info msg="codex websockets: upstream connected session=partial-write-session auth=auth-a url=ws://127.0.0.1:41967/responses"
+time="2026-08-05T12:58:06+02:00" level=info msg="codex websockets: upstream disconnected session=partial-write-session auth=auth-a url=ws://127.0.0.1:41967/responses reason=send_error err=write tcp 127.0.0.1:36502->127.0.0.1:41967: write: connection reset by peer"
+time="2026-08-05T12:58:06+02:00" level=info msg="codex websockets: upstream connected session=partial-write-session auth=auth-a url=ws://127.0.0.1:41967/responses"
+time="2026-08-05T12:58:07+02:00" level=info msg="codex websockets: upstream disconnected session=partial-write-session auth=auth-a url=ws://127.0.0.1:41967/responses reason=upstream_disconnected err=websocket: close 1006 (abnormal closure): unexpected EOF"
+--- PASS: TestWorkflowPartialWebsocketWriteIsRetriedAsFullRequest (1.31s)
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor	1.367s

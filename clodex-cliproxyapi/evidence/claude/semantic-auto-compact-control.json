@@ -1,0 +1,35 @@
+{
+  "rc": 0,
+  "message_requests": 6,
+  "compact_like_requests": 1,
+  "body_bytes": [
+    4876,
+    5043,
+    11565,
+    6002184,
+    6005767,
+    6005909
+  ],
+  "message_counts": [
+    1,
+    3,
+    3,
+    1,
+    3,
+    5
+  ],
+  "wire_summary_marker": [
+    false,
+    false,
+    false,
+    false,
+    true,
+    true
+  ],
+  "jsonl_compact_boundary": true,
+  "jsonl_summary_marker": true,
+  "resume_rc": 0,
+  "resume_output_tail": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\nOK\n",
+  "output_tail": "tion from where it left off without asking the user any further questions. Resume directly \u2014 do not acknowledge the summary, do not recap what was happening, do not preface with \\\"I'll continue\\\" or similar. Pick up the last task as if the break never happened.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"55555555-5555-4555-8555-555555555555\",\"uuid\":\"6ecd2590-943e-4085-86d9-2fd1b90ae973\",\"timestamp\":\"2026-08-05T09:42:09.634Z\",\"isSynthetic\":true}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg_5\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.6-luna\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0},\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"55555555-5555-4555-8555-555555555555\",\"uuid\":\"f0bf5757-1f4e-442d-88d1-e0197bef457d\",\"timestamp\":\"2026-08-05T09:42:09.725Z\"}\n{\"is_error\":false,\"duration_api_ms\":359,\"num_turns\":2,\"stop_reason\":\"end_turn\",\"session_id\":\"55555555-5555-4555-8555-555555555555\",\"total_cost_usd\":0.00015,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"gpt-5.6-luna\":{\"inputTokens\":5,\"outputTokens\":5,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.00015,\"contextWindow\":372000,\"maxOutputTokens\":32000,\"canonicalModel\":\"gpt-5.6-luna\",\"provider\":\"firstParty\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"disabled_by_env\",\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"OK\",\"ttft_ms\":259,\"ttft_stream_ms\":258,\"time_to_request_ms\":207,\"type\":\"result\",\"duration_ms\":260,\"uuid\":\"249d0fcb-1198-4101-8f49-f44864f8c10d\"}\n",
+  "root": "/tmp/claude-auto-compact-ertrnpnq"
+}

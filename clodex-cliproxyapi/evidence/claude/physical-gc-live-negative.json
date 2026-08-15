@@ -1,0 +1,34 @@
+{
+  "compact_seen": false,
+  "before": {
+    "bytes": 6003800,
+    "raw": true
+  },
+  "after": {
+    "bytes": 6007982,
+    "raw": true
+  },
+  "requests": [
+    {
+      "path": "/v1/messages?beta=true",
+      "compact": false,
+      "body_bytes": 4796
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "compact": false,
+      "body_bytes": 6002109
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "compact": true,
+      "body_bytes": 6011424
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "compact": false,
+      "body_bytes": 5557
+    }
+  ],
+  "root": "/tmp/claude-gc-live-d2053zr9"
+}

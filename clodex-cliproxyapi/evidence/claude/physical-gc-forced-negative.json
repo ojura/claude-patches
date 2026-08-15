@@ -1,0 +1,32 @@
+{
+  "first_request": true,
+  "compact_request": true,
+  "second_request": true,
+  "message_request_count": 6,
+  "message_counts": [
+    1,
+    3,
+    5,
+    5,
+    3,
+    7
+  ],
+  "wire_summary_marker": [
+    false,
+    false,
+    false,
+    false,
+    true,
+    true
+  ],
+  "jsonls": [
+    "/tmp/claude-interactive-compact-6jwyhca1/config/history.jsonl",
+    "/tmp/claude-interactive-compact-6jwyhca1/config/projects/-tmp/44444444-4444-4444-8444-444444444444.jsonl"
+  ],
+  "jsonl_compact_boundary": true,
+  "jsonl_summary_marker": true,
+  "resume_rc": 0,
+  "resume_output_tail": "OK\n",
+  "screen_tail": "h-check\u001b[44Gthe\u001b[48Guser's\u001b[55GClaude\u001b[62GCode\u001b[67Gsetup\u001b[73Gand\u001b[77Gfix\u001b[81Gissues:\u001b[89Gdiagnose\u001b[98Ginstallation\u001b[111Ghealth\u001b[118G\u2014\u001b[120Gwhat\u001b[125Gthe\u001b[129G`claude\u001b[137Gdoctor`\u001b[145Gterminal\u001b[39m\n\n\u001b[31G\u001b[38;2;153;153;153mdiagnostics\u001b[43Gcover\u001b[49G\u2014\u001b[51Gfrom\u001b[56Glocal\u001b[62Gdata\u001b[67G(duplicate\u001b[78Gor\u001b[81Gleftover\u001b[90Ginstalls,\u001b[100GPATH,\u001b[106Gunparseable\u001b[118Gsettings\u001b[127Gfiles,\u001b[134Gbroken\u001b[141Gor\u001b[144Gcolliding\u001b[154Gag\u2026\u001b[39m\n\n\u001b[38;2;153;153;153m/verify\u001b[31GVerify\u001b[38Gthat\u001b[43Ga\u001b[45Gcode\u001b[50Gchange\u001b[57Gactually\u001b[66Gdoes\u001b[71Gwhat\u001b[76Git's\u001b[81Gsupposed\u001b[90Gto\u001b[93Gby\u001b[96Gexercising\u001b[107Git\u001b[110Gend-to-end\u001b[121Gand\u001b[125Gobserving\u001b[135Gbehavior\u001b[144G\u2014\u001b[146Gdrive\u001b[152Gthe\u001b[39m\n\n\u001b[31G\u001b[38;2;153;153;153maffected\u001b[40Gflow,\u001b[46Gnot\u001b[50Gjust\u001b[55Gtests\u001b[61Gor\u001b[64Gtypecheck.\u001b[75GRun\u001b[79Gbefore\u001b[86Gcommitting\u001b[97Gnontrivial\u001b[108Gchanges;\u001b[117Gbootstraps\u001b[128Gthis\u001b[133Grepo's\u001b[140Gproject\u001b[148Gverify\u001b[155Gs\u2026\u001b[39m\n\n\u001b[38;2;153;153;153m/agents\u001b[31G(removed)\u001b[41GAsk\u001b[45GClaude\u001b[52Gto\u001b[55Gcreate/manage\u001b[69Gsubagents,\u001b[80Gor\u001b[83Gedit\u001b[88G.claude/agents/\u001b[39m\n\n\u001b[38;2;153;153;153m/memory\u001b[31GOpen\u001b[36Ga\u001b[38Gmemory\u001b[45Gfile\u001b[50Gin\u001b[53Gyour\u001b[58Geditor\u001b[39m\n\n\u001b[38;2;153;153;153m/subtask\u001b[31GSend\u001b[36Ga\u001b[38Gsubagent\u001b[47Goff\u001b[51Gwith\u001b[56Gyour\u001b[61Gfull\u001b[66Gcontext;\u001b[75Gits\u001b[79Gresult\u001b[86Gcomes\u001b[92Gback\u001b[97Ghere\u001b[39m\n\n\u001b[38;2;153;153;153m/clear\u001b[31GStart\u001b[37Ga\u001b[39Gnew\u001b[43Gsession\u001b[51Gwith\u001b[56Gempty\u001b[62Gcontext;\u001b[71Gprevious\u001b[80Gsession\u001b[88Gstays\u001b[94Gon\u001b[97Gdisk\u001b[102G(resumable\u001b[113Gwith\u001b[118G/resume)\u001b[39m\n\n\u001b[38;2;153;153;153m/compact\u001b[31GFree\u001b[36Gup\u001b[39Gcontext\u001b[47Gby\u001b[50Gsummarizing\u001b[62Gthe\u001b[66Gconversation\u001b[79Gso\u001b[82Gfar\u001b[39m\n\n\u001b[38;2;153;153;153m/skill-doctor\u001b[31GShow\u001b[36Gwhich\u001b[42Gloaded\u001b[49Gskills\u001b[56Gare\u001b[60Gunused\u001b[67Gand\u001b[71Gcosting\u001b[79Gcontext\u001b[39m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\u001b[7C\u001b[22A\u001b[?2026l\u001b[?1006l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[7D\u001b[22B\u001b(B\u000f\u001b[>4m\u001b[<u\u001b[?1004l\u001b[?2031l\u001b[?2004l\u001b[?25h\u001b7\u001b[r\u001b8\u001b]0;\u0007\u001b[2m\u001b[22m\n\u001b[2mResume this session with:\u001b[22m\n\u001b[2mclaude --resume 44444444-4444-4444-8444-444444444444\u001b[22m\n\u001b[2m\u001b[22m",
+  "root": "/tmp/claude-interactive-compact-6jwyhca1"
+}

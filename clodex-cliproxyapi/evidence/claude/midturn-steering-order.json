@@ -1,0 +1,113 @@
+{
+  "date": "2026-08-10",
+  "classification": {
+    "queue_and_normalization": "source-confirmed",
+    "request_order": "executable-reproduced",
+    "artifact_kind": "project-authored focused summary"
+  },
+  "claude_code": {
+    "version": "2.1.220",
+    "authoritative_bundle": "/tmp/claude-2.1.220.js",
+    "bundle_sha256": "e32e7ead0b8ec4815fb69806bfad0116bdb9b51bba927fbd172f5a4a2903ce6e",
+    "source_confirmed": {
+      "queue_snapshot": "After a model response containing at least one tool_use, all tool results, and PostToolBatch hooks; paths that abort or end earlier skip this snapshot.",
+      "snapshot_skip_paths": [
+        "abort",
+        "deferred tool",
+        "hook stop",
+        "requested end turn",
+        "dynamic loop end",
+        "max turn",
+        "suspended fold"
+      ],
+      "selection_filters": {
+        "main_thread": "Keep commands addressed to the main agent.",
+        "subagent": "Keep only targeted task notifications for that agent.",
+        "slash_like_input": "Exclude unless slash processing was explicitly skipped.",
+        "attachment_and_removal_modes": [
+          "prompt",
+          "task-notification"
+        ]
+      },
+      "selected_priorities": [
+        "now",
+        "next"
+      ],
+      "excluded_priority": "later",
+      "attachment_modes": [
+        "prompt",
+        "task-notification"
+      ],
+      "transcript_order": [
+        "assistant tool_use",
+        "user tool_result",
+        "attachment queued_command"
+      ],
+      "normalization": "For a text-only attachment on a model with mid-conversation-system support, Claude Code emits a later message-level system item. The stable harness remains in the top-level system field.",
+      "outbound_order": [
+        "assistant tool_use",
+        "user tool_result",
+        "system steering reminder"
+      ],
+      "beta": "mid-conversation-system-2026-04-07",
+      "promotion_content_rules": {
+        "eligible_content": "Only text-only attachment conversion qualifies for message-level system promotion.",
+        "sonnet_5": "The message-level system content retains a system-reminder wrapper.",
+        "other_eligible_models": "The message-level system content uses the unwrapped inner reminder text."
+      },
+      "capability_selection_order": [
+        "HIPAA mode disables promotion.",
+        "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM forces promotion otherwise.",
+        "Per-model mid_conversation_system metadata decides when present.",
+        "Explicit older Claude model families are denied.",
+        "Model capability mid_conv_system, Mythos 5, or an eligible provider route enables promotion."
+      ],
+      "rejection_fallback": "If the endpoint rejects the message-level system role or beta, midConvFallback normalizes the request again with promotion disabled.",
+      "final_response_limit": "A response with no tool_use completes without another queue snapshot. Input arriving during final prose, after the last tool snapshot, or during Stop hooks becomes a later top-level turn.",
+      "zero_attachment_result": "If selected commands produce no queued_command attachment, they remain queued.",
+      "partial_attachment_emission": "If only part of the selected batch emits attachments, Claude Code logs an error and removes the whole selected batch.",
+      "removal_and_abort": "Queue removal occurs after attachment emission. If abort is observed after emission but before removal, the attachment may exist in the aborted transcript while the command remains queued for later delivery.",
+      "cancellation": "cancel_async_message cannot remove a fold-in-flight UUID. interrupt with cancel_queued:true also cancels fold-in-flight UUIDs while aborting the turn.",
+      "chair_sermon": "Text-only mid-conversation-system promotion runs before the tengu_chair_sermon branch. On fallback paths, false can still append all-text attachments to a string-valued tool result; true performs a broader mixed-content relocation and cleanup pass.",
+      "chair_sermon_details": {
+        "false_path": "Append all-text attachment blocks to a preceding string-valued tool_result when eligible; otherwise retain them as user content.",
+        "true_path": "Wrap unwrapped attachment text, offer mixed content to the preceding tool result, merge adjacent user messages, then move remaining top-level reminder text into the last tool result.",
+        "tool_reference_exclusion": "A tool result containing tool_reference refuses relocation.",
+        "error_result_behavior": "Discard non-text attachment blocks before merging into an error result; retain the original error result when no text remains.",
+        "mixed_media_behavior": "Trim and coalesce text blocks, which can change mixed-media placement relative to the false path."
+      }
+    },
+    "executable_capture": {
+      "temporary_capture_directory": "/tmp/midturn-steering-research/clean-instance",
+      "temporary_capture_types": [
+        "captured Claude request JSONL",
+        "Claude child event stream JSONL"
+      ],
+      "second_request_message_roles": [
+        "user",
+        "system",
+        "assistant",
+        "user",
+        "system"
+      ],
+      "second_request_post_tool_tail": [
+        "assistant tool_use",
+        "user tool_result",
+        "system steering reminder"
+      ],
+      "top_level_system_present": true,
+      "transcript_event_order": [
+        "tool_result",
+        "replayed human update",
+        "next assistant action"
+      ],
+      "submission_timestamp_preceded_tool_result_emission": true,
+      "interpretation": "The input was queued while the tool ran, then delivered after the tool result in the next model request. It was not lost and was not merged into the stable top-level system field."
+    },
+    "limitations": [
+      "The full temporary request and stream captures are not retained in this corpus; this file preserves only the fields needed for the ordering conclusion.",
+      "The installed 2.1.220 binary is locally patched, so executable observations identify the hash-pinned installed bytes rather than pristine upstream independently of source confirmation.",
+      "Abort/removal and cancellation race behavior is source-confirmed but was not reproduced in a focused runtime fixture during this investigation."
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "interrupted_tail_removal": {
+    "before": 29273,
+    "after": 9020,
+    "truncated_before_kill": true,
+    "target_remains": false,
+    "suffix_remains": false,
+    "root": "/tmp/claude-remove-case-57x5hrr4"
+  }
+}

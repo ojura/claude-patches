@@ -1,0 +1,18 @@
+{
+  "over_50m": {
+    "before": 53069996,
+    "after": 53071918,
+    "target_remains": true,
+    "rc": 0,
+    "root": "/tmp/claude-remove-case-ce7ptjtv",
+    "tail": "OK\n"
+  },
+  "interrupted_tail_removal": {
+    "before": 29289,
+    "after": 30995,
+    "truncated_before_kill": false,
+    "target_remains": false,
+    "suffix_remains": true,
+    "root": "/tmp/claude-remove-case-a0q_oxx2"
+  }
+}

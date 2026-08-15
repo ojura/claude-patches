@@ -1,0 +1,17 @@
+{
+  "classification": "report-derived executable summary; per-delay raw captures were not retained",
+  "source_report": "reports/workflow12-local-state-checks.md",
+  "source_probe": "probes/claude/replacement_crash_window.py",
+  "tool_output_bytes_approx": 1900000,
+  "wrapper_bytes": 2276,
+  "delays_ms": {
+    "0": "turn_absent_on_resume",
+    "10": "turn_absent_on_resume",
+    "25": "turn_absent_on_resume",
+    "50": "turn_absent_on_resume",
+    "100": "wrapper_reconstructed",
+    "200": "wrapper_reconstructed",
+    "500": "wrapper_reconstructed"
+  },
+  "correction": "The exercised failure omitted the entire assistant/tool interaction; it did not restore the original raw body."
+}

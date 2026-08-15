@@ -1,0 +1,23 @@
+{
+  "precompute_ready_request": true,
+  "ptl_sent": true,
+  "retry_seen": true,
+  "models": [
+    "gpt-5.6-luna",
+    "gpt-5.6-luna",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra"
+  ],
+  "compact_count": 2,
+  "trigger_request_count": 2,
+  "trigger_models": [
+    "gpt-5.6-terra",
+    "gpt-5.6-terra"
+  ],
+  "retry_contains_luna_summary": true,
+  "retry_body_bytes": 6355,
+  "root": "/tmp/claude-precompute-cross-model-5k9_5lrt"
+}

@@ -1,0 +1,77 @@
+{
+  "precompute_request": true,
+  "hint_rejected": true,
+  "hint_retry": true,
+  "ptl_rejected": true,
+  "ptl_retry": true,
+  "clear_requests": [
+    {
+      "bytes": 402325,
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "wrappers": 0,
+      "raw": 30,
+      "marker": false
+    },
+    {
+      "bytes": 253465,
+      "hint": null,
+      "wrappers": 5,
+      "raw": 0,
+      "marker": false
+    },
+    {
+      "bytes": 402465,
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "wrappers": 0,
+      "raw": 30,
+      "marker": false
+    },
+    {
+      "bytes": 398408,
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "wrappers": 0,
+      "raw": 30,
+      "marker": true
+    },
+    {
+      "bytes": 403217,
+      "hint": null,
+      "wrappers": 0,
+      "raw": 30,
+      "marker": true
+    }
+  ],
+  "trigger_requests": [
+    {
+      "bytes": 402465,
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "wrappers": 0,
+      "raw": 30,
+      "marker": false
+    },
+    {
+      "bytes": 398408,
+      "hint": {
+        "enabled": true,
+        "target_tokens_saved": 75000
+      },
+      "wrappers": 0,
+      "raw": 30,
+      "marker": true
+    }
+  ],
+  "compact_count": 2,
+  "root": "/tmp/claude-hint-precompute-_3vphorx"
+}

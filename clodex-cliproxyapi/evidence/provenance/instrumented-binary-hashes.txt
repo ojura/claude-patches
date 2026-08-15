@@ -1,0 +1,11 @@
+# Surviving temporary instrumented binaries (2026-08-05)
+# These binaries are excluded from the durable corpus. Hashes prevent silent reuse while /tmp survives.
+11e3551214d678a47335d1f21d00e70f71a8ca8a7ab61512afc5996ffa3ac185  /tmp/claude-2.1.220-ttl-mixed  275015792
+7fd412ee4f5e55e7bde187d22f9653df6f56050e5250f3428b085659b693ee9b  /tmp/claude-2.1.220-force-context-hint  275015488
+8d6746c75f4851891b98c4486cd93e0546852f2462b3cc50d58c5822ed769a6e  /tmp/claude-2.1.220-force-precompute-always  275015852
+c7a8c667f52a05a938755e42d87669ad34489d862a4c5c5deeb142c45539dbe6  /tmp/claude-2.1.220-hint-precompute-stale  275015301
+6811ea0a894c4fbdb27f07085dd9b5696fd85d422ed6fc1f7ca1c4ac0a1d0932  /tmp/claude-2.1.220-force-physical-gc-v2  275016218
+48b194a6002aca25215bdb422b6604732aa47659b2a2f030bb8a865dc9cd35ed  /tmp/claude-2.1.220-remove-probe  275016478
+d10aca7d43d8e27dc0cdc941c9e3db0fe37c995b1c8b3c358cdc9944ca04452c  /tmp/claude-2.1.220-force-precompute  275016103
+0568040e8e10c3148b41bc3454e6c4b0cb8e6e5fda5e529f0f47d4c070a27bc6  /tmp/claude-2.1.220-force-physical-gc  275016150
+88f27ab46e9b3183b71662f3c390971a3b784eb73b0c735d4d9e7d458ff5b723  /tmp/claude-2.1.220-enable-background-shortcut  275016221

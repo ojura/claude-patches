@@ -1,0 +1,20 @@
+{
+  "five": {
+    "status": 200,
+    "body": {
+      "input_tokens": 1849
+    }
+  },
+  "one": {
+    "status": 200,
+    "body": {
+      "input_tokens": 1777
+    }
+  },
+  "mixed": {
+    "status": 200,
+    "body": {
+      "input_tokens": 1804
+    }
+  }
+}

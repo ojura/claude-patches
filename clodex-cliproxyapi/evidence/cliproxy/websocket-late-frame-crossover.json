@@ -1,0 +1,99 @@
+{
+  "a_events": [
+    {
+      "type": "response.completed",
+      "response": {
+        "id": "resp_A",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    }
+  ],
+  "b_events": [
+    {
+      "type": "response.completed",
+      "response": {
+        "id": "resp_A_LATE",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    }
+  ],
+  "extra_events": [],
+  "up_request_count": 2,
+  "up_requests": [
+    {
+      "model": "gpt-5.6-luna",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "A"
+            }
+          ]
+        }
+      ],
+      "stream": true,
+      "store": false,
+      "parallel_tool_calls": true,
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "instructions": "",
+      "tools": [
+        {
+          "type": "image_generation",
+          "output_format": "png"
+        }
+      ],
+      "prompt_cache_key": "f48bea65-a8bd-5be5-a222-5b5875902e73",
+      "type": "response.create"
+    },
+    {
+      "type": "response.create",
+      "model": "gpt-5.6-luna",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "B"
+            }
+          ]
+        }
+      ],
+      "stream": true,
+      "store": false,
+      "parallel_tool_calls": true,
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "instructions": "",
+      "tools": [
+        {
+          "type": "image_generation",
+          "output_format": "png"
+        }
+      ],
+      "prompt_cache_key": "f48bea65-a8bd-5be5-a222-5b5875902e73"
+    }
+  ],
+  "root": "/tmp/cliproxy-ws-probe-qi61h8tk"
+}

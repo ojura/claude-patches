@@ -1,0 +1,37 @@
+{
+  "claude_code": {
+    "version": "2.1.220",
+    "installed_binary": "/home/juraj/.local/share/claude/versions/2.1.220",
+    "installed_binary_sha256": "d6e8882dce83be22a08456f6bdf8fa9b52c8bddf97fdcc1fc4d02209f0e5244e",
+    "extracted_js_sha256": "e32e7ead0b8ec4815fb69806bfad0116bdb9b51bba927fbd172f5a4a2903ce6e",
+    "extracted_js_bytes": 21636716,
+    "note": "Installed binary is locally patched; extracted JS is the authoritative investigation source."
+  },
+  "cliproxy_go_source": {
+    "path": "/tmp/cliproxyapi-source",
+    "commit": "a88197f845c979132c8978ea223c6af05cc81536",
+    "tag": "v7.2.116",
+    "usage": "Go/source audit and focused package probes."
+  },
+  "cliproxy_late_frame_binary": {
+    "path": "/home/juraj/.ccs/cliproxy/bin/original/cli-proxy-api",
+    "version": "7.2.112",
+    "commit": "a63da8ae",
+    "built_at": "2026-07-31T08:40:05Z",
+    "sha256": "8f4c9e1e3ddcabede29236569cb835fb160e167255ca340e9df5b6a3d910bc5a",
+    "usage": "Python retained-WebSocket late-frame fixture; distinct from the Go/source lane."
+  },
+  "codex_source": {
+    "path": "/tmp/codex-source",
+    "commit": "d75f94a94d5cb0bbabc59b86c0427c7ad09a9d6d"
+  },
+  "ccs": {
+    "version": "8.8.1",
+    "package_json_sha256": "f96e9b0eba1a9cb0dddf57f5d599d72b0b793af7087fb280e970651c16802597",
+    "audited_file_sha256": {
+      "dist/cliproxy/config/thinking-config.js": "d50285e68afc01088ce72921e1879e0b43a7534d3829d2a3feda8fbf69f08c26",
+      "dist/cliproxy/ai-providers/codex-reasoning-proxy.js": "7ab4ff0a73e35af8a9ad2b863375b4a146d85bfe7b83a1dec6deb5ad1f288dda",
+      "dist/cliproxy/executor/env-resolver.js": "30139b8e65ff512d5cff013e80b8d180f0cf64690cdb3b04aad8660dbefedca7"
+    }
+  }
+}

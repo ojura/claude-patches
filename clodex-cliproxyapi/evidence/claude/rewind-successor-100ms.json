@@ -1,0 +1,16 @@
+{
+  "target_uuid": "c4077e25-fa9b-4a0e-a220-46b8cd5e0890",
+  "new_request_seen": true,
+  "resume_rc": 0,
+  "resume_has_NEW_BRANCH": true,
+  "resume_has_THIRD": false,
+  "resume_has_SECOND": true,
+  "jsonl_has_NEW_BRANCH": true,
+  "jsonl_last_prompt_lines": [
+    "{\"type\":\"last-prompt\",\"lastPrompt\":\"THIRD\",\"leafUuid\":\"ac47e4d9-43f4-411d-8a27-1336b527995c\",\"explicit\":true,\"rewound\":true,\"sessionId\":\"88888888-8888-4888-8888-888888888100\"}",
+    "{\"type\":\"last-prompt\",\"lastPrompt\":\"AFTER_RESTART\",\"leafUuid\":\"aa1a651e-d1a1-4909-8c72-dbc0e573e891\",\"sessionId\":\"88888888-8888-4888-8888-888888888100\"}"
+  ],
+  "resume_body_bytes": 5322,
+  "root": "/tmp/claude-rewind-successor-97bkj4nx",
+  "resume_tail": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\nOK_6\n"
+}
