@@ -62,11 +62,14 @@ Surfaces
      thinking message via the discovered createVirtualMessageHelper,
      and push the updated state through the React setter.
   T1. onCancel interrupted-thinking commit (Tier 1): pristine commits the
-     streamed thinking summary on Esc as a virtual (display-only) thinking
-     block, excluded from the next request. Rewrite it to a real text block
-     with a cut marker so the summary is fed back to the model, not just
-     shown. Summary only; the raw reasoning lives in the never-emitted
-     signature.
+     streamed thinking summary on Esc as a virtual thinking block. Rewrite
+     that commit to append a cut marker and reuse the streaming preview's
+     uuid, so the block replaces the preview instead of landing beside it,
+     then clear the preview. One gray block, rendered once.
+     Display only: the model does not see it. N3 skips virtual messages
+     (Edt -> lBr), and atr drops thinking-only assistant messages anyway.
+     Feeding the summary back would take a text block, not just dropping
+     the flag, since a thinking block also needs its issued signature.
 
   Connoisseur's message_stop and message_delta sub-replacements are not
   ported. They affect only the `isStreaming` flag's reset timing, and the
@@ -782,17 +785,25 @@ def main():
     )
     splice(OLD_TD_BODY, new_td_body, 'E.7 thinking_delta writer')
 
-    # Tier 1: feed the interrupted thinking summary to the model.
-    # Pristine onCancel already commits the streamed summary on Esc, but as a
-    # VIRTUAL thinking block (isVirtual:!0, empty signature). That is display-only
-    # and excluded from the next request, so the model never sees it. Rewrite that
-    # one commit to carry a cut marker and reuse the streaming preview's identity,
-    # then drop the preview so the block renders once. Summary only: the raw chain
-    # lives in the never-emitted signature blob.
+    # Tier 1: the interrupted-thinking commit in onCancel.
+    # Pristine already commits the streamed summary on Esc as a virtual thinking
+    # block (isVirtual:!0, empty signature). Rewrite that one commit to append a
+    # cut marker and reuse the streaming preview's uuid, so the committed block
+    # takes the preview's place instead of landing beside it, then clear the
+    # preview.
+    #
+    # This changes rendering only; the block stays virtual and never reaches the
+    # model. Two separate exclusions on the request path drop it: N3's message
+    # loop skips it via Edt -> lBr (isVirtual), and atr
+    # (filterOrphanedThinkingOnlyMessages) drops assistant messages whose content
+    # is entirely thinking blocks, which is this commit's exact shape. Emitting a
+    # text block instead would clear both, and would also avoid sending a thinking
+    # block without the signature it was issued with. Verified against 2.1.232.
+    #
     # X4 (the commit observation) is embedded here and self-gates via logwrite.
     # onCancel commits through setMessages, which X3 cannot see, so X4 is the only
     # direct trace of the Tier-1 commit firing.
-    print("\n--- Tier 1 (interrupted thinking to model) ---")
+    print("\n--- Tier 1 (interrupted-thinking commit) ---")
     T1_TEXT = names['t1_text_var']
     splice(
         names['t1_anchor'],
@@ -808,7 +819,7 @@ def main():
         'the gray block renders once (no white text, no seam, no leftover). */'
         f'{names["t1_set_messages"]}(({names["t1_acc"]})=>[...{names["t1_acc"]},__pfg_fin]);'
         f'{names["think_setter"]}(null);}}',
-        'Tier1 onCancel thinking-to-text (+X4)',
+        'Tier1 onCancel interrupted-thinking commit (+X4)',
     )
 
     def apply_pfg_instr():
