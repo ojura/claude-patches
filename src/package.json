@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Clean-source home for the pfg patch primitives (compiled into the bundle by the codegen). ESM so the primitives can be unit-tested directly."
+}
