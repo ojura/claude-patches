@@ -255,7 +255,7 @@ def gate6_multi_edit(data):
     different offsets), then runs the result."""
     img = bun_handler.BunImage(data)
     ep = img.entrypoint_module()
-    js = bun_handler.extract_js(data)
+    js = img.read_field(ep, "contents")
     needle = b"(Claude Code)"
     if js.count(needle) < 2:
         return None, "skip: need two anchor sites for a multi-edit"
@@ -443,7 +443,7 @@ def _build_bun_blob(modules, module_struct_size, trailing_pad=True, entry_point_
     return bytes(out)
 
 
-def _module(name, contents, bytecode=b"", ms=52, origin=b""):
+def _module(name, contents, bytecode=b"", ms=52, origin=b"", module_format=2):
     return {
         "name": name.encode() if isinstance(name, str) else name,
         "contents": contents.encode() if isinstance(contents, str) else contents,
@@ -451,7 +451,7 @@ def _module(name, contents, bytecode=b"", ms=52, origin=b""):
         "bytecode": bytecode,
         "moduleInfo": b"",
         "bytecodeOriginPath": origin.encode() if isinstance(origin, str) else origin,
-        "encoding": 1, "loader": 1, "module_format": 2, "side": 0,
+        "encoding": 1, "loader": 1, "module_format": module_format, "side": 0,
     }
 
 
@@ -787,6 +787,62 @@ def synthetic_tests():
     _check("36-byte form reports an empty origin path",
            img36.bytecode_origin_path(img36.modules[0]) == "",
            f"got {img36.bytecode_origin_path(img36.modules[0])!r}")
+
+    # --- Bun 1.4 split ESM builds expose all JavaScript chunks ---
+    split_mods = [
+        _module("/$bunfs/root/cli",
+                'import{answer}from"/$bunfs/root/chunk-a.js";console.log(answer);',
+                bytecode=b"entry-bytecode", origin="/$bunfs/root/src/entrypoints/cli.js",
+                module_format=1),
+        _module("/$bunfs/root/chunk-a.js", "export let answer=1;",
+                bytecode=b"chunk-a-bytecode", origin="/$bunfs/root/chunk-a.js",
+                module_format=1),
+        _module("/$bunfs/root/chunk-b.js", "export let unused=2;",
+                bytecode=b"chunk-b-bytecode", origin="/$bunfs/root/chunk-b.js",
+                module_format=1),
+    ]
+    fx_split = build_bun_elf(split_mods, entry_point_id=0)
+    img_split = bh.BunImage(fx_split)
+    extracted_split = bh.extract_js(fx_split)
+    split_records = bh.split_extracted_js(extracted_split)
+    _check("split ESM extraction includes every JavaScript module",
+           [(index, name) for index, name, _ in split_records] == [
+               (0, b"/$bunfs/root/cli"),
+               (1, b"/$bunfs/root/chunk-a.js"),
+               (2, b"/$bunfs/root/chunk-b.js"),
+           ])
+    _check("split ESM extraction is larger than the bootstrap",
+           len(extracted_split) > img_split.entrypoint_module()["contents"][1])
+    _check("split ESM no-op repack is byte-identical",
+           bh.repack_unchanged(fx_split) == fx_split)
+
+    patched_split = extracted_split.replace(b"export let answer=1;", b"export let answer=1000;")
+    changed_split = bh.changed_js_modules(extracted_split, patched_split)
+    _check("changed-module detection identifies only the edited chunk",
+           [(index, name) for index, name, _ in changed_split]
+           == [(1, b"/$bunfs/root/chunk-a.js")])
+    out_split = bh.repack_with_js(fx_split, patched_split)
+    img_split_after = bh.BunImage(out_split)
+    _check("split ESM edit maps back to the correct module",
+           img_split_after.read_field(img_split_after.modules[1], "contents")
+           == b"export let answer=1000;")
+    _check("split ESM untouched entrypoint stays byte-identical",
+           img_split_after.read_field(img_split_after.modules[0], "contents")
+           == img_split.read_field(img_split.modules[0], "contents"))
+    _check("split ESM extraction round-trips after edit",
+           bh.extract_js(out_split) == patched_split)
+
+    damaged_markers = patched_split.replace(
+        b"bun_handler module 6e0d7c9f5a3b4d2184f176c2",
+        b"bun_handler module damaged",
+        1,
+    )
+    raised = False
+    try:
+        bh.repack_with_js(fx_split, damaged_markers)
+    except bh.BunFormatError as exc:
+        raised = "marker" in str(exc)
+    _check("split ESM repack refuses changed module markers", raised)
 
     # --- 36-vs-52 disambiguation when the table length divides both ---
     # 13 * 36 == 9 * 52 == 468. Record 0 is identical through its first four

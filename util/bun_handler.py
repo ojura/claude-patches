@@ -3,10 +3,10 @@
 Surgical, byte-exact, stdlib-only handler for the bun-packed native Claude CLI.
 
 Anthropic ships the native Claude CLI as a single-file executable produced by
-`bun build --compile`: a host ELF executable with the bundled JavaScript (and a
-JavaScriptCore bytecode copy of the entrypoint) appended as a trailing data blob,
-stored in a `.bun` ELF section. This module extracts the embedded JS, applies
-length-changing text edits to it, and repacks the binary so it still runs.
+`bun build --compile`: a host ELF executable with embedded JavaScript modules,
+JavaScriptCore bytecode, and assets stored in a `.bun` ELF section. This module
+extracts the complete patchable JavaScript, applies length-changing text edits,
+and repacks the binary so it still runs.
 
 Design constraints (requirements, not preferences):
   - Pure Python standard library only. No node-lief, no tweakcc, no pyelftools.
@@ -28,13 +28,11 @@ Scope of THIS module:
   - Mach-O, PE/COFF, and the pre-2.1.83 ELF trailing-overlay form are detected
     and rejected with a clear NotImplementedError. They are later milestones.
 
-Why source edits take effect even though the entrypoint is bytecode-compiled:
-  The entrypoint module carries `@bun @bytecode @bun-cjs` and a large JSC bytecode
-  blob, but the bytecode does not inline string literals; it reads them from the
-  live source buffer. Editing the source bytes (even with a length change) changes
-  runtime behavior with the bytecode left intact, as long as the bytes a given
-  literal occupies are edited in place and the module table offset/length are
-  fixed up. We keep the bytecode untouched.
+Why source edits take effect even when modules are bytecode-compiled:
+  JSC bytecode reads strings and source-backed data from each module's live source
+  buffer. Editing those source bytes changes runtime behavior with bytecode left
+  intact, as long as each edited module keeps its identity and every shifted range
+  in the module table is updated. We keep the bytecode untouched.
 """
 import hashlib
 import struct
@@ -62,6 +60,12 @@ _FIELD_ORDER_36 = ["name", "contents", "sourcemap", "bytecode"]
 # module itself from src/entrypoints/cli.js to plain cli, but left this path
 # reading /$bunfs/root/src/entrypoints/cli.js.
 ENTRYPOINT_ORIGIN_SUFFIX = "entrypoints/cli.js"
+
+# Bun 1.4 can compile an ESM program as many embedded chunks. The public API
+# still returns one byte string so existing patchers can search it globally.
+# These markers preserve module boundaries for repacking after length changes.
+_MULTI_MODULE_HEADER = b"// bun_handler multi-module bundle v1"
+_MULTI_MODULE_MARKER = b"\n// bun_handler module 6e0d7c9f5a3b4d2184f176c2 "
 
 
 class BunFormatError(Exception):
@@ -492,9 +496,33 @@ class BunImage:
         self._require_range(f"module[{rec.get('index', '?')}].{field}", off, length)
         return self.blob[off:off + length]
 
+    def source_modules(self):
+        """Return the embedded modules represented by extract_js().
+
+        Older compiled binaries use a CJS entrypoint containing the complete
+        program, plus a few small native-addon wrappers. Bun 1.4 code splitting
+        uses an ESM entrypoint and stores every generated chunk as a separate ESM
+        module. Include all ESM modules for that form so extraction does not
+        mistake the small bootstrap for the complete program.
+        """
+        entrypoint = self.entrypoint_module()
+        if entrypoint["module_format"] != 1:
+            return [entrypoint]
+        modules = [m for m in self.modules if m["module_format"] == 1]
+        return modules if len(modules) > 1 else [entrypoint]
+
     def extract_js(self):
-        """Return the entrypoint module's JS source bytes."""
-        return self.read_field(self.entrypoint_module(), "contents")
+        """Return the complete patchable JavaScript source.
+
+        A single-module build returns its entrypoint bytes unchanged. A split
+        ESM build returns all JavaScript chunks with reversible comment markers
+        between them; repack_with_js() uses those markers to map edits back to
+        the original module records.
+        """
+        modules = self.source_modules()
+        if len(modules) == 1:
+            return self.read_field(modules[0], "contents")
+        return _join_source_modules(self, modules)
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +784,89 @@ def _repack_section_elf(orig_bytes, wrapped):
 
 
 # ---------------------------------------------------------------------------
+# Multi-module source representation
+# ---------------------------------------------------------------------------
+
+def _join_source_modules(img, modules):
+    out = bytearray(_MULTI_MODULE_HEADER)
+    for module in modules:
+        contents = img.read_field(module, "contents")
+        if _MULTI_MODULE_MARKER in contents:
+            raise BunFormatError(
+                f"module {module['index']} contains the reserved bundle marker")
+        name = img.read_field(module, "name")
+        out += _MULTI_MODULE_MARKER
+        out += str(module["index"]).encode("ascii")
+        out += b" "
+        out += name.hex().encode("ascii")
+        out += b"\n"
+        out += contents
+    return bytes(out)
+
+
+def split_extracted_js(extracted):
+    """Split extract_js() output into (index, name, contents) records.
+
+    Legacy single-module output returns one record with index and name set to
+    None. Malformed multi-module markers raise BunFormatError instead of letting
+    repacking assign edited source to the wrong embedded module.
+    """
+    data = bytes(extracted)
+    if not data.startswith(_MULTI_MODULE_HEADER):
+        return [(None, None, data)]
+
+    records = []
+    seen = set()
+    pos = len(_MULTI_MODULE_HEADER)
+    while pos < len(data):
+        if not data.startswith(_MULTI_MODULE_MARKER, pos):
+            raise BunFormatError("malformed multi-module bundle marker")
+        metadata_start = pos + len(_MULTI_MODULE_MARKER)
+        metadata_end = data.find(b"\n", metadata_start)
+        if metadata_end < 0:
+            raise BunFormatError("unterminated multi-module bundle marker")
+        metadata = data[metadata_start:metadata_end].split(b" ", 1)
+        if len(metadata) != 2:
+            raise BunFormatError("malformed multi-module bundle metadata")
+        try:
+            index = int(metadata[0])
+            name = bytes.fromhex(metadata[1].decode("ascii"))
+        except (ValueError, UnicodeDecodeError):
+            raise BunFormatError("malformed multi-module bundle metadata") from None
+        if index < 0 or index in seen or not name:
+            raise BunFormatError("invalid multi-module bundle index or name")
+        seen.add(index)
+
+        contents_start = metadata_end + 1
+        next_pos = data.find(_MULTI_MODULE_MARKER, contents_start)
+        contents_end = len(data) if next_pos < 0 else next_pos
+        records.append((index, name, data[contents_start:contents_end]))
+        if next_pos < 0:
+            pos = len(data)
+        else:
+            pos = next_pos
+
+    if not records:
+        raise BunFormatError("multi-module bundle contains no modules")
+    return records
+
+
+def changed_js_modules(original, modified):
+    """Return records whose contents changed between two extraction results."""
+    before = split_extracted_js(original)
+    after = split_extracted_js(modified)
+    before_ids = [(index, name) for index, name, _ in before]
+    after_ids = [(index, name) for index, name, _ in after]
+    if before_ids != after_ids:
+        raise BunFormatError("multi-module bundle markers changed during patching")
+    return [
+        new
+        for old, new in zip(before, after)
+        if old[2] != new[2]
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -769,35 +880,62 @@ def can_handle(data):
 
 
 def extract_js(data):
-    """Extract the entrypoint JS source bytes from a bun binary's bytes."""
+    """Extract the complete patchable JavaScript source from a bun binary."""
     return BunImage(data).extract_js()
 
 
 def repack_with_js(data, new_js):
-    """Return new binary bytes with the entrypoint module's JS source replaced
-    by `new_js` (bytes). The bytecode is left intact; offsets and ELF headers are
-    fixed up for the length delta. Deterministic: same input + same new_js yields
-    identical output bytes.
+    """Return a binary with source edits from extract_js() applied.
+
+    Single-module builds replace the entrypoint contents. Split ESM builds map
+    each edited region back to its original module using the extraction markers.
+    Bytecode remains unchanged; module offsets and ELF metadata are adjusted for
+    the combined source-length delta.
     """
     img = BunImage(data)
-    ep = img.entrypoint_module()
-    new_blob = _apply_blob_edits(img, {(ep["index"], "contents"): bytes(new_js)})
+    modules = img.source_modules()
+    records = split_extracted_js(new_js)
+
+    if len(modules) == 1:
+        if len(records) != 1 or records[0][0] is not None:
+            raise BunFormatError("single-module binary received multi-module source")
+        edits = {(modules[0]["index"], "contents"): records[0][2]}
+    else:
+        if len(records) == 1 and records[0][0] is None:
+            raise BunFormatError(
+                "split ESM binary requires the multi-module output from extract_js()")
+        expected = [
+            (module["index"], img.read_field(module, "name"))
+            for module in modules
+        ]
+        received = [(index, name) for index, name, _ in records]
+        if received != expected:
+            raise BunFormatError("multi-module bundle markers do not match the binary")
+        edits = {
+            (module["index"], "contents"): contents
+            for module, (_, _, contents) in zip(modules, records)
+            if contents != img.read_field(module, "contents")
+        }
+        if not edits:
+            return img.data
+
+    new_blob = _apply_blob_edits(img, edits)
     wrapped = _wrap_section(new_blob, img.section_header_size)
     return _repack_section_elf(img.data, wrapped)
 
 
 def repack_unchanged(data):
-    """Run the full parse -> identity-edit -> rewrap -> ELF-rewrite pipeline with
-    no content change. Used by the byte-stability self-test: the result must equal
-    the input exactly. That evidences the fields we parse and re-emit are
-    accounted for (any byte we mis-modeled in a region we rewrite would corrupt
-    the round-trip); it does not prove the format is fully understood, since a
-    field copied as an opaque span round-trips perfectly while staying unmodeled.
+    """Run the full identity-edit and ELF-rewrite pipeline.
+
+    The result must equal the input exactly for both single-module and split ESM
+    builds. This checks every source-module range that the public API can edit.
     """
     img = BunImage(data)
-    ep = img.entrypoint_module()
-    same = img.read_field(ep, "contents")
-    new_blob = _apply_blob_edits(img, {(ep["index"], "contents"): same})
+    edits = {
+        (module["index"], "contents"): img.read_field(module, "contents")
+        for module in img.source_modules()
+    }
+    new_blob = _apply_blob_edits(img, edits)
     wrapped = _wrap_section(new_blob, img.section_header_size)
     return _repack_section_elf(img.data, wrapped)
 
@@ -844,11 +982,13 @@ def _selftest(path):
 
     img = BunImage(data)
     ep = img.entrypoint_module()
+    source_modules = img.source_modules()
     js = img.extract_js()
     print(f"entrypoint: {ep['name_str']}")
     print(f"module struct size: {img.module_struct_size}  section header size: {img.section_header_size}")
-    print(f"JS source: {len(js)} bytes  sha256 {hashlib.sha256(js).hexdigest()[:16]}")
-    print(f"bytecode: {ep['bytecode'][1]} bytes (left intact)")
+    print(f"JS source: {len(js)} bytes across {len(source_modules)} module(s)  "
+          f"sha256 {hashlib.sha256(js).hexdigest()[:16]}")
+    print(f"bytecode: {sum(m['bytecode'][1] for m in source_modules)} bytes (left intact)")
 
     # Gate 1: no-op byte identity.
     noop = repack_unchanged(data)
@@ -898,7 +1038,7 @@ def _selftest(path):
 def _usage():
     print("usage: bun_handler.py <command> <binary> [args]", file=sys.stderr)
     print("  detect <binary>                 print detected format", file=sys.stderr)
-    print("  extract <binary> [out.js]       extract entrypoint JS", file=sys.stderr)
+    print("  extract <binary> [out.js]       extract complete patchable JS", file=sys.stderr)
     print("  selftest <binary>               run byte-stability gates", file=sys.stderr)
 
 
