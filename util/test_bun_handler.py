@@ -788,59 +788,83 @@ def synthetic_tests():
            img36.bytecode_origin_path(img36.modules[0]) == "",
            f"got {img36.bytecode_origin_path(img36.modules[0])!r}")
 
-    # --- 36-vs-52 disambiguation under length ambiguity ---
-    # 13 modules at 36 bytes/record = 468 bytes; 468 also divides 52 (= 9 * 52),
-    # so the length alone is ambiguous. record-0's name field sits at offset
-    # 0..8 of the record in both forms, so the name plausibility check returns
-    # the SAME boolean for both interpretations and cannot disambiguate. Any
-    # signature on the trailing bytes (bytes 32..40) is byte-indistinguishable
-    # between a real 36-byte record (small enums) and a real 52-byte record
-    # with an empty moduleInfo range. Per the fail-closed posture, the
-    # disambiguator must refuse with BunFormatError rather than commit to a
-    # potentially wrong guess that would corrupt non-entrypoint modules on
-    # length-changing edits.
+    # --- 36-vs-52 disambiguation when the table length divides both ---
+    # 13 * 36 == 9 * 52 == 468. Record 0 is identical through its first four
+    # ranges, but later record boundaries differ. Validating every record picks
+    # the real layout without relying on a binary version.
     mods36_amb = [_module("/$bunfs/root/src/entrypoints/cli.js", "X();", ms=36)]
     for n in range(12):
         mods36_amb.append(_module(f"/$bunfs/root/mod{n}.js", f"m{n}();", ms=36))
     fx36_amb = build_bun_elf(mods36_amb, module_struct_size=36, section_header_size=8)
+    img36_amb = bh.BunImage(fx36_amb)
+    _check("ambiguous-length 36-byte table is identified from all records",
+           img36_amb.module_struct_size == 36, f"got {img36_amb.module_struct_size}")
+    _check("ambiguous-length 36-byte table extracts its entrypoint",
+           img36_amb.extract_js() == b"X();")
+    _check("ambiguous-length 36-byte table no-op round-trips",
+           bh.repack_unchanged(fx36_amb) == fx36_amb)
+
+    mods52_amb = [
+        _module("/$bunfs/root/src/entrypoints/cli.js",
+                "console.log('(Claude Code)');",
+                bytecode=b"\xd4zFT" + b"\x00" * 40),
+    ]
+    for n in range(8):
+        mods52_amb.append(_module(f"/$bunfs/root/m{n}.js", f"e{n}();"))
+    fx52_amb = build_bun_elf(mods52_amb, module_struct_size=52, section_header_size=8)
+    img52_amb = bh.BunImage(fx52_amb)
+    _check("ambiguous-length 52-byte table is identified from all records",
+           img52_amb.module_struct_size == 52, f"got {img52_amb.module_struct_size}")
+    _check("ambiguous-length 52-byte table extracts its entrypoint",
+           img52_amb.extract_js() == b"console.log('(Claude Code)');")
+    _check("ambiguous-length 52-byte table no-op round-trips",
+           bh.repack_unchanged(fx52_amb) == fx52_amb)
+
+    # A deliberately constructed table can satisfy both interpretations. Every
+    # candidate name points to the same valid bunfs path, and all remaining
+    # accidental ranges end before the table. The parser must still refuse.
+    both_mods = [
+        _module("/$bunfs/root/src/entrypoints/cli.js", "X" * 1024,
+                bytecode=b"\xd4zFT" + b"\x00" * 40),
+    ]
+    for n in range(8):
+        both_mods.append(_module(f"/$bunfs/root/b{n}.js", f"b{n}();"))
+    both_seed = build_bun_elf(both_mods, module_struct_size=52, section_header_size=8)
+    both_seed_img = bh.BunImage(both_seed)
+    both_fx = bytearray(both_seed)
+    both_bun = bh.Elf64(both_seed).section(".bun")
+    both_blob_abs = both_bun["foff"] + both_seed_img.section_header_size
+    both_table_abs = both_blob_abs + both_seed_img.modules_off
+    both_fx[both_table_abs:both_table_abs + both_seed_img.modules_len] = (
+        b"\x00" * both_seed_img.modules_len)
+    shared_name = b"/$bunfs/" + b"a" * (257 - len("/$bunfs/"))
+    both_fx[both_blob_abs + 257:both_blob_abs + 257 + len(shared_name)] = shared_name
+    both_fx[both_blob_abs + 257 + len(shared_name)] = 0
+    for ms in (36, 52):
+        for i in range(both_seed_img.modules_len // ms):
+            _struct.pack_into("<II", both_fx, both_table_abs + i * ms, 257, 257)
     raised = None
     try:
-        bh.BunImage(fx36_amb)
+        bh.BunImage(bytes(both_fx))
     except bh.BunFormatError as exc:
-        raised = "ambiguous module table layout" in str(exc)
-    _check("ambiguous length (13*36 == 9*52) refuses with BunFormatError",
+        raised = "both 36-byte and 52-byte records validate" in str(exc)
+    _check("table valid under both layouts refuses as ambiguous",
            raised is True, f"got raised={raised}")
 
-    # Same shape from the OTHER side: a valid 52-byte form whose record-0 has
-    # an empty moduleInfo (offset>0, length==0) reads bytes 32..36 as a small
-    # value followed by zero padding, indistinguishable from a 36-byte record
-    # at record-0 alone. modules_len=468 again divides both 36 and 52, and the
-    # name field decodes cleanly under both interpretations, so the
-    # disambiguator must refuse here too.
-    def _build_52_with_empty_moduleinfo_blob():
-        """Return a fixture whose record-0 (52-byte form) has moduleInfo=(N,0),
-        sitting in a 9-module table that is length-ambiguous with the 36-byte
-        form. Hand-write the blob layout to control record-0's bytes precisely.
-        """
-        # 9 modules, 52 bytes each = 468 bytes (also divisible by 36).
-        mods52 = [
-            _module("/$bunfs/root/src/entrypoints/cli.js",
-                    "console.log('(Claude Code)');",
-                    bytecode=b"\xd4zFT" + b"\x00" * 40),
-        ]
-        for n in range(8):
-            mods52.append(_module(f"/$bunfs/root/m{n}.js", f"e{n}();"))
-        return build_bun_elf(mods52, module_struct_size=52, section_header_size=8)
-
-    fx52_amb = _build_52_with_empty_moduleinfo_blob()
-    # Sanity: confirm modules_len would be ambiguous.
-    img_check = bh.Elf64(fx52_amb).section(".bun")
+    # If the common record-0 name is malformed, neither interpretation is
+    # acceptable and the error must say that rather than choosing by length.
+    neither_fx = bytearray(fx36_amb)
+    neither_seed = bh.BunImage(fx36_amb)
+    neither_bun = bh.Elf64(fx36_amb).section(".bun")
+    neither_table_abs = (neither_bun["foff"] + neither_seed.section_header_size
+                         + neither_seed.modules_off)
+    _struct.pack_into("<I", neither_fx, neither_table_abs + 4, 0)
     raised = None
     try:
-        bh.BunImage(fx52_amb)
+        bh.BunImage(bytes(neither_fx))
     except bh.BunFormatError as exc:
-        raised = "ambiguous module table layout" in str(exc)
-    _check("ambiguous length (9*52 == 13*36, empty moduleInfo) refuses",
+        raised = "matches neither 36-byte nor 52-byte record layout" in str(exc)
+    _check("table invalid under both layouts refuses as malformed",
            raised is True, f"got raised={raised}")
 
     # --- u32 section-header form ---

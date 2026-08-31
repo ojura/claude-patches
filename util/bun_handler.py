@@ -185,8 +185,8 @@ def _detect_non_elf_format(data):
 def _detect_module_struct_size(modules_table_len):
     """Bun's module table is N records of either 36 or 52 bytes. Return the
     candidate size when only one divides the table length; return None when
-    both divide (callers must disambiguate by inspecting record-0) or neither
-    does. Silent fallback ("just pick 52") would patch the wrong field offsets
+    both divide (callers must validate both complete record interpretations) or
+    neither does. Silent fallback ("just pick 52") would patch the wrong field offsets
     for a 36-byte build and look superficially fine, so we refuse it here.
     """
     div52 = (modules_table_len % 52) == 0
@@ -271,12 +271,10 @@ class BunImage:
             if self.modules_len % 36 != 0 and self.modules_len % 52 != 0:
                 raise BunFormatError(
                     f"module table length {self.modules_len} divides neither 36 nor 52")
-            # Ambiguous: disambiguate by trying each interpretation against
-            # record-0's name field. The 52-byte form has its name range at
-            # offset 0 and (encoding, loader, format, side) at offset 48; the
-            # 36-byte form has the same name range at offset 0 but trailing
-            # bytes at offset 32. Decoding the candidate name string and
-            # checking it looks like a bun module path picks the right one.
+            # When both divide, validate every record under both interpretations.
+            # Record 0 cannot distinguish the layouts because its name range is
+            # at offset 0 in both. Subsequent record boundaries differ, so the
+            # wrong interpretation reads source/table bytes as ranges and names.
             self.module_struct_size = self._disambiguate_module_struct_size()
         else:
             self.module_struct_size = size_from_length
@@ -285,52 +283,61 @@ class BunImage:
         self.modules = self._read_modules()
 
     def _disambiguate_module_struct_size(self):
-        """Return 36 or 52 by validating which interpretation makes record-0's
-        name field plausible. Raise BunFormatError if both or neither validate.
-        """
-        def name_plausible(ms):
-            if self.modules_len < ms:
-                return False
-            try:
-                name_off, name_len = struct.unpack_from(
-                    "<II", self.blob, self.modules_off)
-            except struct.error:
-                return False
-            # Range must fit and be non-trivial.
-            if name_len == 0 or name_len > 4096:
-                return False
-            end = name_off + name_len
-            if name_off < 0 or end > len(self.blob) or end < name_off:
-                return False
-            try:
-                name = self.blob[name_off:end].decode("utf-8")
-            except UnicodeDecodeError:
-                return False
-            # Bun module names are filesystem-like paths (start with '/' or
-            # contain a '/' separator). Reject random binary junk.
-            return "/" in name or name in ("claude", "claude.exe")
+        """Return the one record size whose complete table validates.
 
-        ok36 = name_plausible(36)
-        ok52 = name_plausible(52)
-        if ok36 and not ok52:
-            return 36
-        if ok52 and not ok36:
-            return 52
-        if ok36 and ok52:
-            # Both interpretations pass the name plausibility check. Earlier
-            # versions tried a cheap byte-field signature on record-0's bytes
-            # 32..36 to commit to 36 when those bytes looked like the small
-            # enums (encoding, loader, moduleFormat, side); but a valid
-            # 52-byte form with an empty moduleInfo range (offset > 0, length
-            # == 0) reads bytes 32..36 as (low_byte_of_offset, 0, 0, 0) which
-            # ALSO satisfies the "looks small" predicate. The two layouts are
-            # byte-indistinguishable at record-0 alone in that case, so any
-            # commit would risk silently corrupting non-entrypoint modules on
-            # a length-changing edit. Fail closed and let the caller resolve
-            # via a different signal (e.g. format detection from the binary
-            # version, or splitting modules across multiple records).
-            raise BunFormatError("ambiguous module table layout")
-        raise BunFormatError("ambiguous module table layout")
+        Record 0 has the same name-range offset in both layouts, so inspecting
+        it alone cannot distinguish 36 from 52. The record boundaries diverge
+        after it. Validate every candidate record, including every range and
+        every name, and accept a size only when the other interpretation fails.
+        """
+        def candidate_valid(ms):
+            if self.modules_len < ms or self.modules_len % ms != 0:
+                return False
+            field_count = 6 if ms == 52 else 4
+            tail = 48 if ms == 52 else 32
+            for i in range(self.modules_len // ms):
+                base = self.modules_off + i * ms
+                ranges = [
+                    struct.unpack_from("<II", self.blob, base + field * 8)
+                    for field in range(field_count)
+                ]
+
+                # Bun writes every per-module region before modules_ptr, then
+                # appends the complete record array. A wrong record size soon
+                # reads table/source bytes as offsets; blob-wide bounds checks
+                # alone admit many of those accidental ranges.
+                for off, length in ranges:
+                    if length == 0:
+                        continue
+                    end = off + length
+                    if end < off or end > self.modules_off:
+                        return False
+
+                # The Linux serializer writes each key as a NUL-terminated path
+                # below /$bunfs/. Check the terminator too: StringPointer.length
+                # excludes it, and the runtime reads the field with sliceToZ.
+                name_off, name_len = ranges[0]
+                name_end = name_off + name_len
+                if name_len == 0 or name_end >= self.modules_off:
+                    return False
+                name = self.blob[name_off:name_end]
+                if not name.startswith(b"/$bunfs/") or self.blob[name_end] != 0:
+                    return False
+
+                encoding, _loader, module_format, side = struct.unpack_from(
+                    "<BBBB", self.blob, base + tail)
+                if encoding > 2 or module_format > 2 or side > 1:
+                    return False
+            return True
+
+        valid = [ms for ms in (36, 52) if candidate_valid(ms)]
+        if len(valid) == 1:
+            return valid[0]
+        if len(valid) == 2:
+            raise BunFormatError(
+                "ambiguous module table layout: both 36-byte and 52-byte records validate")
+        raise BunFormatError(
+            "module table matches neither 36-byte nor 52-byte record layout")
 
     def _looks_like_overlay(self):
         """Heuristic for the trailing-overlay form: the trailer near EOF with an
