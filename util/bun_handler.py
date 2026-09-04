@@ -18,21 +18,26 @@ Design constraints (requirements, not preferences):
   - Surgical in-place editing, never full re-serialization. A bun blob rebuild
     reflows every region and breaks the JavaScriptCore bytecode's absolute source
     offsets (and also bloats the file). Instead we splice edited region bytes in
-    place and only recompute the module table, the offsets struct, and the ELF
-    headers/segment sizes for the byte delta. This is what makes the no-op
-    round-trip byte-identical: nothing moves that does not have to.
+    place, remap the module and optional-record pointers, invalidate only changed
+    modules' compiled views, and update the offsets struct plus ELF geometry.
+    This is what makes the no-op round-trip byte-identical: nothing moves that
+    does not have to.
 
 Scope of THIS module:
   - linux-x64 ELF, `.bun`-section storage form only (the layout shipped since
-    roughly native build 2.1.83).
+    roughly native build 2.1.83), with ASCII source stored as Encoding::Latin1.
+    Non-ASCII edits require Bun's UTF-16 re-encoding path and are rejected.
   - Mach-O, PE/COFF, and the pre-2.1.83 ELF trailing-overlay form are detected
     and rejected with a clear NotImplementedError. They are later milestones.
 
-Why source edits take effect even when modules are bytecode-compiled:
-  JSC bytecode reads strings and source-backed data from each module's live source
-  buffer. Editing those source bytes changes runtime behavior with bytecode left
-  intact, as long as each edited module keeps its identity and every shifted range
-  in the module table is updated. We keep the bytecode untouched.
+Why changed modules must shed compiled state:
+  Bun stores four representations that can become stale independently: source
+  bytes, a precomputed source hash, JavaScriptCore bytecode, and ESM module-info
+  (imports/exports). Merely replacing source can therefore produce a binary that
+  re-extracts perfectly while still executing or analysing the old program. For
+  every module whose source changes, this writer preserves the module identity but
+  clears its source hash, bytecode, module-info, and sourcemap pointers. Unchanged
+  modules retain their compiled state byte-for-byte.
 """
 import hashlib
 import struct
@@ -47,7 +52,32 @@ BUN_TRAILER = b"\n---- Bun! ----\n"
 
 ELF_PT_LOAD = 1
 ELF_SHT_NOBITS = 8
+ELF_SHF_WRITE = 0x1
 ELF_SHF_ALLOC = 0x2
+ELF_PF_WRITE = 0x2
+ELF_EM_X86_64 = 0x3E
+
+# Current standalone-module-graph flags. Bits 0-4 affect runtime policy but add
+# no records. Bits 5-9 append records immediately after the module table, in
+# bit order. Bit 10 is descriptive only. Unknown higher bits are unsafe because
+# they may insert records whose pointers this writer would fail to remap.
+BUN_FLAG_SOURCE_TEXT_CONTIGUOUS = 1 << 4
+BUN_FLAG_HAS_SOURCE_HASHES = 1 << 5
+BUN_FLAG_HAS_BUILTIN_BYTECODE = 1 << 6
+BUN_FLAG_HAS_BYTECODE_STRING_TABLE = 1 << 7
+BUN_FLAG_HAS_STARTUP_MODULE_COUNT = 1 << 8
+BUN_FLAG_HAS_MODULE_INFO_STRING_TABLE = 1 << 9
+BUN_FLAG_CROSS_COMPILED_BYTECODE = 1 << 10
+BUN_KNOWN_FLAGS = (1 << 11) - 1
+
+# Bun's Loader enum is append-only and currently occupies discriminants 0..21.
+# Invalid Rust enum discriminants are not merely unsupported values; reading
+# them as `Loader` is undefined behaviour in the runtime.
+BUN_MAX_LOADER = 21
+
+# `append_bytecode_aligned` arranges every module/builtin bytecode payload and
+# the shared bytecode string table on a 128-byte runtime address.
+BUN_BYTECODE_ALIGNMENT = 128
 
 # Module record field order, as bun lays out the per-module struct. The 52-byte
 # (new) form carries two extra ranges (moduleInfo, bytecodeOriginPath) that the
@@ -61,11 +91,15 @@ _FIELD_ORDER_36 = ["name", "contents", "sourcemap", "bytecode"]
 # reading /$bunfs/root/src/entrypoints/cli.js.
 ENTRYPOINT_ORIGIN_SUFFIX = "entrypoints/cli.js"
 
-# Bun 1.4 can compile an ESM program as many embedded chunks. The public API
-# still returns one byte string so existing patchers can search it globally.
-# These markers preserve module boundaries for repacking after length changes.
+# Bun can store executable JavaScript as one module, as a bundled CJS entrypoint
+# plus small CJS wrappers, or as many split ESM chunks. The public API still
+# returns one byte string so patchers can search it globally. These markers
+# preserve module identity and boundaries when more than one executable source
+# record is present.
 _MULTI_MODULE_HEADER = b"// bun_handler multi-module bundle v1"
 _MULTI_MODULE_MARKER = b"\n// bun_handler module 6e0d7c9f5a3b4d2184f176c2 "
+
+_JS_LOADERS = frozenset((0, 1, 2, 3))  # JSX, JS, TS, TSX
 
 
 class BunFormatError(Exception):
@@ -87,26 +121,49 @@ class Elf64:
             raise BunFormatError("missing ELF magic")
         ei_class = data[4]
         ei_data = data[5]
+        ei_version = data[6]
+        ei_osabi = data[7]
         if ei_class != 2:
             # ELFCLASS32; we only handle 64-bit native Claude builds.
             raise NotImplementedError("only ELF64 is supported (native Claude is x64)")
         if ei_data != 1:
             raise NotImplementedError("only little-endian ELF is supported")
+        if ei_version != 1:
+            raise BunFormatError(f"unsupported ELF identification version {ei_version}")
+        if ei_osabi not in (0, 3):  # ELFOSABI_NONE/SYSV or ELFOSABI_GNU
+            raise NotImplementedError(
+                f"only Linux-compatible ELF OSABI values are supported ({ei_osabi})")
 
-        self.data = data
+        e_type = struct.unpack_from("<H", data, 16)[0]
+        if e_type not in (2, 3):  # ET_EXEC or ET_DYN (PIE)
+            raise NotImplementedError(f"unsupported ELF file type {e_type}")
+        e_machine = struct.unpack_from("<H", data, 18)[0]
+        if e_machine != ELF_EM_X86_64:
+            raise NotImplementedError(
+                f"only linux-x64 ELF is supported (e_machine=0x{e_machine:x})")
+        e_version = struct.unpack_from("<I", data, 20)[0]
+        if e_version != 1:
+            raise BunFormatError(f"unsupported ELF header version {e_version}")
+
+        self.data = data if isinstance(data, bytes) else bytes(data)
         self.e_phoff = struct.unpack_from("<Q", data, 32)[0]
         self.e_shoff = struct.unpack_from("<Q", data, 40)[0]
+        self.e_ehsize = struct.unpack_from("<H", data, 52)[0]
         self.e_phentsize = struct.unpack_from("<H", data, 54)[0]
         self.e_phnum = struct.unpack_from("<H", data, 56)[0]
         self.e_shentsize = struct.unpack_from("<H", data, 58)[0]
         self.e_shnum = struct.unpack_from("<H", data, 60)[0]
         self.e_shstrndx = struct.unpack_from("<H", data, 62)[0]
+        if self.e_ehsize < 64:
+            raise BunFormatError("ELF header size is smaller than ELF64_Ehdr")
         self._read_sections()
         self._read_segments()
 
     def _read_sections(self):
         if self.e_shentsize < 64:
             raise BunFormatError("ELF section header entries too small")
+        if self.e_shnum == 0:
+            raise NotImplementedError("extended ELF section numbering is unsupported")
         table_end = self.e_shoff + self.e_shentsize * self.e_shnum
         if self.e_shoff <= 0 or table_end > len(self.data):
             raise BunFormatError("ELF section header table out of range")
@@ -116,7 +173,7 @@ class Elf64:
         self.sections = []
         for i in range(self.e_shnum):
             o = self.e_shoff + i * self.e_shentsize
-            self.sections.append({
+            section = {
                 "index": i,
                 "name_off": struct.unpack_from("<I", self.data, o)[0],
                 "type": struct.unpack_from("<I", self.data, o + 4)[0],
@@ -124,8 +181,17 @@ class Elf64:
                 "vaddr": struct.unpack_from("<Q", self.data, o + 16)[0],
                 "foff": struct.unpack_from("<Q", self.data, o + 24)[0],
                 "size": struct.unpack_from("<Q", self.data, o + 32)[0],
+                "addralign": struct.unpack_from("<Q", self.data, o + 48)[0],
                 "hdr_off": o,
-            })
+            }
+            align = section["addralign"]
+            if align not in (0, 1) and align & (align - 1):
+                raise BunFormatError(
+                    f"ELF section {i} sh_addralign is not a power of two")
+            if (section["type"] != ELF_SHT_NOBITS and section["size"] > 0
+                    and section["foff"] + section["size"] > len(self.data)):
+                raise BunFormatError(f"ELF section {i} payload runs past end of file")
+            self.sections.append(section)
 
         shstr = self.sections[self.e_shstrndx]
         if shstr["type"] == ELF_SHT_NOBITS:
@@ -134,30 +200,53 @@ class Elf64:
             raise BunFormatError("ELF section name string table out of range")
         names = self.data[shstr["foff"]:shstr["foff"] + shstr["size"]]
         for s in self.sections:
+            if s["name_off"] >= len(names):
+                raise BunFormatError(
+                    f"ELF section {s['index']} name offset is outside .shstrtab")
             end = names.find(b"\x00", s["name_off"])
             if end < 0:
-                end = len(names)
-            s["name"] = names[s["name_off"]:end].decode("utf-8", "replace")
+                raise BunFormatError(
+                    f"ELF section {s['index']} name is not NUL-terminated")
+            try:
+                s["name"] = names[s["name_off"]:end].decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BunFormatError(
+                    f"ELF section {s['index']} name is not valid UTF-8") from exc
 
     def _read_segments(self):
         if self.e_phentsize < 56:
             raise BunFormatError("ELF program header entries too small")
+        if self.e_phnum == 0:
+            raise BunFormatError("ELF has no program headers")
         table_end = self.e_phoff + self.e_phentsize * self.e_phnum
         if self.e_phoff <= 0 or table_end > len(self.data):
             raise BunFormatError("ELF program header table out of range")
         self.segments = []
         for i in range(self.e_phnum):
             o = self.e_phoff + i * self.e_phentsize
-            self.segments.append({
+            segment = {
                 "index": i,
                 "type": struct.unpack_from("<I", self.data, o)[0],
+                "flags": struct.unpack_from("<I", self.data, o + 4)[0],
                 "foff": struct.unpack_from("<Q", self.data, o + 8)[0],
                 "vaddr": struct.unpack_from("<Q", self.data, o + 16)[0],
                 "filesz": struct.unpack_from("<Q", self.data, o + 32)[0],
                 "memsz": struct.unpack_from("<Q", self.data, o + 40)[0],
                 "align": struct.unpack_from("<Q", self.data, o + 48)[0],
                 "hdr_off": o,
-            })
+            }
+            if segment["filesz"] > 0 and segment["foff"] + segment["filesz"] > len(self.data):
+                raise BunFormatError(f"ELF segment {i} payload runs past end of file")
+            if segment["type"] == ELF_PT_LOAD:
+                if segment["filesz"] > segment["memsz"]:
+                    raise BunFormatError(f"PT_LOAD segment {i} has p_filesz > p_memsz")
+                align = segment["align"]
+                if align not in (0, 1) and align & (align - 1):
+                    raise BunFormatError(f"PT_LOAD segment {i} p_align is not a power of two")
+                if align not in (0, 1) and (segment["foff"] - segment["vaddr"]) % align:
+                    raise BunFormatError(
+                        f"PT_LOAD segment {i} violates p_offset/p_vaddr congruence")
+            self.segments.append(segment)
 
     def section(self, name):
         for s in self.sections:
@@ -213,11 +302,11 @@ class BunImage:
     """
 
     def __init__(self, data):
-        self.data = bytes(data)
+        self.data = data if isinstance(data, bytes) else bytes(data)
         self.elf = Elf64(self.data)
 
-        bs = self.elf.section(".bun")
-        if bs is None:
+        bun_sections = [s for s in self.elf.sections if s["name"] == ".bun"]
+        if not bun_sections:
             # No .bun section. Distinguish the trailing-overlay form (later
             # milestone) from "this is not a bun binary at all".
             if self._looks_like_overlay():
@@ -226,9 +315,16 @@ class BunImage:
                     "only the .bun-section form is supported in this milestone"
                 )
             raise BunFormatError("no .bun section found; not a supported bun ELF")
-        self.bun_section = bs
+        if len(bun_sections) != 1:
+            raise BunFormatError("ELF contains more than one .bun section")
+        self.bun_section = bun_sections[0]
+        bs = self.bun_section
+        if bs["type"] == ELF_SHT_NOBITS or bs["size"] == 0:
+            raise BunFormatError(".bun section has no file payload")
 
-        sec = self.data[bs["foff"]:bs["foff"] + bs["size"]]
+        # Keep read-only views instead of copying the 100+ MB section twice.
+        self._data_view = memoryview(self.data)
+        sec = self._data_view[bs["foff"]:bs["foff"] + bs["size"]]
         if len(sec) != bs["size"]:
             raise BunFormatError(".bun section runs past end of file")
 
@@ -250,9 +346,9 @@ class BunImage:
         # The trailer is normally the last bytes of the blob. Some builds append a
         # single pad byte after it; locate the trailer so the offsets struct (which
         # sits immediately before the trailer) is found correctly in both cases.
-        if self.blob[-len(BUN_TRAILER):] == BUN_TRAILER:
+        if bytes(self.blob[-len(BUN_TRAILER):]) == BUN_TRAILER:
             trailer_end = len(self.blob)
-        elif self.blob[-len(BUN_TRAILER) - 1:-1] == BUN_TRAILER:
+        elif bytes(self.blob[-len(BUN_TRAILER) - 1:-1]) == BUN_TRAILER:
             trailer_end = len(self.blob) - 1
         else:
             raise BunFormatError("bun trailer bytes not found at end of blob")
@@ -263,11 +359,25 @@ class BunImage:
          self.compile_argv_off, self.compile_argv_len, self.flags) = struct.unpack_from(
             "<QIIIIII", self.blob, self.offsets_off)
 
+        unknown_flags = self.flags & ~BUN_KNOWN_FLAGS
+        if unknown_flags:
+            raise NotImplementedError(
+                f"bun module graph uses unknown flag bits 0x{unknown_flags:x}; "
+                "their optional-record layout cannot be remapped safely")
+        if self.byte_count != self.offsets_off:
+            raise BunFormatError(
+                f"bun byte_count {self.byte_count} does not equal offsets position "
+                f"{self.offsets_off}")
+
         # Bounds-check the module table and compile-argv range BEFORE any reads.
         # A crafted (modules_off, modules_len) could otherwise let struct.error
         # leak out of _read_modules; fail closed with BunFormatError instead.
         self._require_range("module table", self.modules_off, self.modules_len)
         self._require_range("compile-exec-argv", self.compile_argv_off, self.compile_argv_len)
+        if self.modules_len == 0:
+            raise BunFormatError("bun module table is empty")
+        if self.modules_off + self.modules_len > self.offsets_off:
+            raise BunFormatError("bun module table overlaps the offsets structure")
 
         size_from_length = _detect_module_struct_size(self.modules_len)
         if size_from_length is None:
@@ -285,6 +395,8 @@ class BunImage:
         if self.modules_len % self.module_struct_size != 0:
             raise BunFormatError("module table length not a multiple of the record size")
         self.modules = self._read_modules()
+        self._parse_optional_records()
+        self._validate_structure()
 
     def _disambiguate_module_struct_size(self):
         """Return the one record size whose complete table validates.
@@ -319,18 +431,19 @@ class BunImage:
 
                 # The Linux serializer writes each key as a NUL-terminated path
                 # below /$bunfs/. Check the terminator too: StringPointer.length
-                # excludes it, and the runtime reads the field with sliceToZ.
+                # excludes it, and the runtime reads the field with slice_to_z.
                 name_off, name_len = ranges[0]
                 name_end = name_off + name_len
                 if name_len == 0 or name_end >= self.modules_off:
                     return False
-                name = self.blob[name_off:name_end]
+                name = bytes(self.blob[name_off:name_end])
                 if not name.startswith(b"/$bunfs/") or self.blob[name_end] != 0:
                     return False
 
-                encoding, _loader, module_format, side = struct.unpack_from(
+                encoding, loader, module_format, side = struct.unpack_from(
                     "<BBBB", self.blob, base + tail)
-                if encoding > 2 or module_format > 2 or side > 1:
+                if (encoding > 2 or loader > BUN_MAX_LOADER
+                        or module_format > 2 or side > 1):
                     return False
             return True
 
@@ -364,11 +477,8 @@ class BunImage:
     def _require_range(self, label, offset, length):
         """Validate that [offset, offset+length) sits inside the bun blob.
 
-        Treats negative offsets/lengths and addition overflow as out-of-range.
-        Zero-length ranges are always allowed even when the offset is nonzero;
-        bun uses zero-length fields with placeholder offsets (e.g. compile-argv
-        often has offset > 0, length 0 pointing just past the data) and the
-        parser must accept them since no bytes are actually read.
+        Zero-length ranges reserve no bytes and may use offset 0 or a placeholder
+        offset. Non-empty ranges must be fully inside the blob.
         """
         if length == 0:
             if offset < 0:
@@ -408,17 +518,214 @@ class BunImage:
                 tail = 32
             enc, ldr, fmt, side = struct.unpack_from("<BBBB", table, base + tail)
             rec.update(encoding=enc, loader=ldr, module_format=fmt, side=side)
-            # Bound-check every field range against the blob. A crafted record
-            # with garbage offsets must raise BunFormatError, not let an out-of-
-            # range slice produce a silently truncated name_str or contents.
             for field in ("name", "contents", "sourcemap", "bytecode",
                           "moduleInfo", "bytecodeOriginPath"):
                 f_off, f_len = rec[field]
                 self._require_range(f"module[{i}].{field}", f_off, f_len)
             name_off, name_len = rec["name"]
-            rec["name_str"] = self.blob[name_off:name_off + name_len].decode("utf-8", "replace")
+            name_bytes = bytes(self.blob[name_off:name_off + name_len])
+            try:
+                rec["name_str"] = name_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BunFormatError(f"module[{i}].name is not valid UTF-8") from exc
+            rec["name_bytes"] = name_bytes
             mods.append(rec)
         return mods
+
+    def _need_optional_bytes(self, at, size, label):
+        end = at + size
+        if at < 0 or size < 0 or end < at or end > self.offsets_off:
+            raise BunFormatError(f"{label} record runs past the offsets structure")
+        return end
+
+    def _parse_optional_records(self):
+        """Parse the flag-ordered records immediately following the module table.
+
+        Record locations and every nested StringPointer are retained so the
+        writer can remap them after a source splice. Treating this area as opaque
+        is what originally left source hashes and shared-table pointers stale.
+        """
+        at = self.modules_off + self.modules_len
+        module_count = len(self.modules)
+
+        self.source_hashes_off = None
+        self.source_hashes_len = 0
+        self.builtin_bytecode = []
+        self.bytecode_string_table_record_off = None
+        self.bytecode_string_table = (0, 0)
+        self.startup_module_count_record_off = None
+        self.startup_module_count = 0
+        self.module_info_string_table_record_off = None
+        self.module_info_string_table = (0, 0)
+
+        if self.flags & BUN_FLAG_HAS_SOURCE_HASHES:
+            size = module_count * 4
+            self._need_optional_bytes(at, size, "source-hash table")
+            self.source_hashes_off = at
+            self.source_hashes_len = size
+            at += size
+
+        if self.flags & BUN_FLAG_HAS_BUILTIN_BYTECODE:
+            self._need_optional_bytes(at, 4, "builtin-bytecode count")
+            count = struct.unpack_from("<I", self.blob, at)[0]
+            count_off = at
+            at += 4
+            if count > (self.offsets_off - at) // 12:
+                raise BunFormatError("builtin-bytecode count exceeds optional-record space")
+            for i in range(count):
+                self._need_optional_bytes(at, 12, f"builtin-bytecode[{i}]")
+                builtin_id, off, length = struct.unpack_from("<III", self.blob, at)
+                self._require_range(f"builtin-bytecode[{i}].bytes", off, length)
+                self.builtin_bytecode.append({
+                    "index": i,
+                    "id": builtin_id,
+                    "record_off": at,
+                    "pointer_record_off": at + 4,
+                    "bytes": (off, length),
+                    "count_record_off": count_off,
+                })
+                at += 12
+
+        if self.flags & BUN_FLAG_HAS_BYTECODE_STRING_TABLE:
+            self._need_optional_bytes(at, 8, "bytecode-string-table pointer")
+            self.bytecode_string_table_record_off = at
+            self.bytecode_string_table = struct.unpack_from("<II", self.blob, at)
+            self._require_range(
+                "bytecode-string-table", *self.bytecode_string_table)
+            at += 8
+
+        if self.flags & BUN_FLAG_HAS_STARTUP_MODULE_COUNT:
+            self._need_optional_bytes(at, 4, "startup-module count")
+            self.startup_module_count_record_off = at
+            self.startup_module_count = struct.unpack_from("<I", self.blob, at)[0]
+            if self.startup_module_count > module_count:
+                raise BunFormatError(
+                    f"startup-module count {self.startup_module_count} exceeds "
+                    f"module count {module_count}")
+            at += 4
+
+        if self.flags & BUN_FLAG_HAS_MODULE_INFO_STRING_TABLE:
+            self._need_optional_bytes(at, 8, "module-info-string-table pointer")
+            self.module_info_string_table_record_off = at
+            self.module_info_string_table = struct.unpack_from("<II", self.blob, at)
+            self._require_range(
+                "module-info-string-table", *self.module_info_string_table)
+            at += 8
+
+        self.optional_tail_off = self.modules_off + self.modules_len
+        self.optional_tail_end = at
+
+    def _runtime_blob_vaddr(self):
+        return self.bun_section["vaddr"] + self.section_header_size
+
+    def _validate_structure(self):
+        """Validate the serializer invariants the surgical writer depends on."""
+        modules_end = self.modules_off + self.modules_len
+        if self.optional_tail_off != modules_end or self.optional_tail_end > self.offsets_off:
+            raise BunFormatError("optional records overlap the offsets structure")
+
+        # compile_exec_argv is serialized after the optional records. Its
+        # StringPointer length excludes the NUL terminator. A zero-length pointer
+        # may be the (0,0) tombstone or point at the serializer's empty NUL.
+        if self.compile_argv_len:
+            end = self.compile_argv_off + self.compile_argv_len
+            if self.compile_argv_off < self.optional_tail_end or end >= self.offsets_off:
+                raise BunFormatError("compile-exec-argv is not after the optional records")
+            if self.blob[end] != 0:
+                raise BunFormatError("compile-exec-argv is not NUL-terminated")
+            if 0 in self.blob[self.compile_argv_off:end]:
+                raise BunFormatError("compile-exec-argv contains an interior NUL")
+        elif self.compile_argv_off != 0:
+            if not self.optional_tail_end <= self.compile_argv_off <= self.offsets_off:
+                raise BunFormatError("empty compile-exec-argv placeholder is out of order")
+
+        regions = []
+        names = set()
+        runtime_base = self._runtime_blob_vaddr()
+
+        def add_region(label, off, length, terminator=0, alignment=None):
+            if length == 0:
+                return
+            end = off + length
+            owned_end = end + terminator
+            if off < 0 or owned_end < end or owned_end > self.modules_off:
+                raise BunFormatError(
+                    f"{label} range (including terminator/padding) intersects "
+                    "the module table or metadata tail")
+            if terminator and any(self.blob[end:end + terminator]):
+                raise BunFormatError(f"{label} is not correctly NUL-terminated")
+            if alignment and (runtime_base + off) % alignment:
+                raise BunFormatError(
+                    f"{label} runtime address is not {alignment}-byte aligned")
+            regions.append((off, owned_end, label))
+
+        for m in self.modules:
+            i = m["index"]
+            if not 0 <= m["encoding"] <= 2:
+                raise BunFormatError(f"module[{i}] has invalid Encoding {m['encoding']}")
+            if not 0 <= m["loader"] <= BUN_MAX_LOADER:
+                raise BunFormatError(f"module[{i}] has invalid Loader {m['loader']}")
+            if not 0 <= m["module_format"] <= 2:
+                raise BunFormatError(
+                    f"module[{i}] has invalid ModuleFormat {m['module_format']}")
+            if not 0 <= m["side"] <= 1:
+                raise BunFormatError(f"module[{i}] has invalid FileSide {m['side']}")
+
+            name = m["name_bytes"]
+            if not name.startswith(b"/$bunfs/"):
+                raise BunFormatError(f"module[{i}].name is not below /$bunfs/")
+            if b"\x00" in name:
+                raise BunFormatError(f"module[{i}].name contains an interior NUL")
+            if name in names:
+                raise BunFormatError(f"duplicate embedded module name {name!r}")
+            names.add(name)
+
+            add_region(f"module[{i}].name", *m["name"], terminator=1)
+            contents_term = 2 if m["encoding"] == 2 else 1
+            if m["encoding"] == 2:
+                off, length = m["contents"]
+                if length and ((runtime_base + off) % 2 or length % 2):
+                    raise BunFormatError(
+                        f"module[{i}].contents is invalid UTF-16 storage")
+            add_region(
+                f"module[{i}].contents", *m["contents"], terminator=contents_term)
+            add_region(f"module[{i}].sourcemap", *m["sourcemap"])
+            add_region(
+                f"module[{i}].bytecode", *m["bytecode"],
+                alignment=BUN_BYTECODE_ALIGNMENT)
+            add_region(f"module[{i}].moduleInfo", *m["moduleInfo"])
+            add_region(
+                f"module[{i}].bytecodeOriginPath", *m["bytecodeOriginPath"],
+                terminator=1)
+            origin_off, origin_len = m["bytecodeOriginPath"]
+            if origin_len and 0 in self.blob[origin_off:origin_off + origin_len]:
+                raise BunFormatError(
+                    f"module[{i}].bytecodeOriginPath contains an interior NUL")
+
+        for entry in self.builtin_bytecode:
+            add_region(
+                f"builtin-bytecode[{entry['index']}].bytes", *entry["bytes"],
+                alignment=BUN_BYTECODE_ALIGNMENT)
+        add_region(
+            "bytecode-string-table", *self.bytecode_string_table,
+            alignment=BUN_BYTECODE_ALIGNMENT)
+        add_region("module-info-string-table", *self.module_info_string_table)
+
+        regions.sort(key=lambda r: (r[0], r[1], r[2]))
+        for previous, current in zip(regions, regions[1:]):
+            if previous[1] > current[0]:
+                raise BunFormatError(
+                    f"embedded regions overlap: {previous[2]} [{previous[0]}, "
+                    f"{previous[1]}) and {current[2]} [{current[0]}, {current[1]})")
+
+    def source_hash(self, module):
+        """Return a module's stored source hash, or 0 when the table is absent."""
+        index = module if isinstance(module, int) else module["index"]
+        if not 0 <= index < len(self.modules):
+            raise BunFormatError(f"source-hash module index {index} is out of range")
+        if self.source_hashes_off is None:
+            return 0
+        return struct.unpack_from("<I", self.blob, self.source_hashes_off + index * 4)[0]
 
     # -- module lookup ------------------------------------------------------
 
@@ -442,7 +749,11 @@ class BunImage:
             return ""
         self._require_range(
             f"module[{rec.get('index', '?')}].bytecodeOriginPath", off, length)
-        return self.blob[off:off + length].decode("utf-8", "replace")
+        try:
+            return bytes(self.blob[off:off + length]).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BunFormatError(
+                f"module[{rec.get('index', '?')}].bytecodeOriginPath is not UTF-8") from exc
 
     def is_entrypoint_record(self, rec):
         """True if `rec` is recognizable as the Claude entrypoint, by either of
@@ -494,22 +805,50 @@ class BunImage:
         # Records produced by _read_modules are already range-checked; this is a
         # defensive guard for callers that hand in synthesized records.
         self._require_range(f"module[{rec.get('index', '?')}].{field}", off, length)
-        return self.blob[off:off + length]
+        return bytes(self.blob[off:off + length])
 
     def source_modules(self):
         """Return the embedded modules represented by extract_js().
 
-        Older compiled binaries use a CJS entrypoint containing the complete
-        program, plus a few small native-addon wrappers. Bun 1.4 code splitting
-        uses an ESM entrypoint and stores every generated chunk as a separate ESM
-        module. Include all ESM modules for that form so extraction does not
-        mistake the small bootstrap for the complete program.
+        Older Claude binaries use one bundled CJS entrypoint plus separate CJS
+        native-addon wrappers. Newer Bun code splitting stores the program as
+        many ESM chunks. Both forms contain independently executable JavaScript
+        records, so omitting the non-entrypoint records would make the advertised
+        editing surface incomplete. Include every JS-like ESM/CJS module and let
+        the reversible multi-module envelope preserve their identities.
         """
         entrypoint = self.entrypoint_module()
-        if entrypoint["module_format"] != 1:
-            return [entrypoint]
-        modules = [m for m in self.modules if m["module_format"] == 1]
-        return modules if len(modules) > 1 else [entrypoint]
+        modules = [
+            m for m in self.modules
+            if m["loader"] in _JS_LOADERS and m["module_format"] in (1, 2)
+        ]
+        if not any(m["index"] == entrypoint["index"] for m in modules):
+            raise BunFormatError(
+                f"entrypoint module {entrypoint['index']} is not an executable "
+                f"JavaScript record (Loader={entrypoint['loader']}, "
+                f"ModuleFormat={entrypoint['module_format']})")
+        if len(modules) == 1:
+            modules = [entrypoint]
+
+        # The extraction format is a byte-preserving editing surface. Bun's
+        # UTF-16 storage requires decode/re-encode and offset/alignment handling
+        # that this milestone deliberately does not guess at. Restrict only the
+        # source modules; a supported binary may still contain UTF-16 text assets.
+        for m in modules:
+            if m["encoding"] != 1:
+                raise NotImplementedError(
+                    f"patchable JavaScript module {m['index']} uses Encoding "
+                    f"{m['encoding']}; only ASCII Encoding::Latin1 source is supported")
+            off, length = m["contents"]
+            if not bytes(self.blob[off:off + length]).isascii():
+                raise NotImplementedError(
+                    f"patchable JavaScript module {m['index']} contains non-ASCII "
+                    "Latin-1 bytes; UTF-16 re-encoding is not implemented")
+            if m["loader"] not in _JS_LOADERS:
+                raise BunFormatError(
+                    f"patchable JavaScript module {m['index']} has non-JS Loader "
+                    f"{m['loader']}")
+        return modules
 
     def extract_js(self):
         """Return the complete patchable JavaScript source.
@@ -530,106 +869,276 @@ class BunImage:
 # ---------------------------------------------------------------------------
 
 def _apply_blob_edits(img, edits):
-    """Apply a set of in-place region edits to the bun blob and return the new
-    blob bytes.
+    """Apply owned-region edits and return a remapped bun blob.
 
-    edits: dict mapping (module_index, field_name) -> new_bytes.
+    Public callers edit module ``contents``. The lower-level mapping remains
+    useful to tests, but every changed source module is handled specially:
+    source hash, bytecode, module-info and sourcemap are detached so neither JSC
+    evaluation nor Bun's import/export analysis can silently use stale state.
 
-    Model: the blob is a flat buffer; each module field occupies [off, off+len).
-    Changing a field's content by delta D shifts every byte at position >= the
-    field's original end by D. We splice the edited regions in increasing offset
-    order, then rewrite the module table and the offsets struct in the new
-    coordinate space. Empty (offset 0, length 0) fields keep offset 0.
+    All StringPointers in the module table and optional tail are remapped. The
+    original physical cache bytes stay in the blob as unreachable padding; this
+    keeps the operation surgical and avoids a full graph reserialization.
     """
     blob = img.blob
     ms = img.module_struct_size
     field_order = _FIELD_ORDER_52 if ms == 52 else _FIELD_ORDER_36
 
-    # Resolve each edit to (orig_off, orig_len, new_bytes), sorted by offset.
-    edit_list = []
-    for (mi, field), new_bytes in edits.items():
-        off, length = img.modules[mi][field]
-        # Zero-length fields come in two flavours, both refusing the same way
-        # for the same reason:
-        #   (0, 0)       bun's tombstone for an absent field.
-        #   (N>0, 0)     placeholder offset pointing past data (e.g. how the
-        #                real binary records compile-exec-argv).
-        # In either case the field reserves no bytes inside the blob, so a
-        # grow would have to splice the new bytes at `off` and shift every
-        # downstream region; the splice/remap path treats `off` as the start
-        # of a region we already own and trusts it not to overlap anything,
-        # which only holds when the field is non-empty. Refuse a non-empty
-        # replacement for any zero-length source field rather than corrupt
-        # downstream offsets. Shrinks of zero-length to empty are no-ops and
-        # remain allowed.
-        if length == 0 and len(new_bytes) > 0:
-            raise BunFormatError(
-                f"cannot grow zero-length field module[{mi}].{field} "
-                f"(offset={off}): the field reserves no bytes in the blob, "
-                f"so growing it would shift downstream regions without a "
-                f"matching offset remap")
-        edit_list.append((off, length, mi, field, new_bytes))
-    edit_list.sort(key=lambda e: e[0])
+    if not isinstance(edits, dict):
+        raise TypeError("edits must be a dict keyed by (module_index, field_name)")
 
+    # Resolve and normalize each effective edit. Identity replacements are
+    # deliberately discarded: they must not invalidate compiled state, which is
+    # what keeps the no-op round trip byte-identical.
+    edit_list = []
+    zero_length_contents = []
+    changed_source_modules = set()
+    for key, replacement in edits.items():
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise BunFormatError("edit keys must be (module_index, field_name)")
+        mi, field = key
+        if not isinstance(mi, int) or not 0 <= mi < len(img.modules):
+            raise BunFormatError(f"edit module index {mi!r} is out of range")
+        if field not in field_order:
+            raise BunFormatError(
+                f"field {field!r} is not present in the {ms}-byte module record")
+        try:
+            new_bytes = bytes(replacement)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"replacement for module[{mi}].{field} is not bytes-like") from exc
+        if len(new_bytes) > 0xFFFFFFFF:
+            raise BunFormatError(f"replacement for module[{mi}].{field} exceeds u32 length")
+
+        off, length = img.modules[mi][field]
+        if blob[off:off + length] == new_bytes:
+            continue
+        if field == "contents":
+            if img.modules[mi]["encoding"] != 1:
+                raise NotImplementedError(
+                    f"editing module[{mi}] contents with Encoding "
+                    f"{img.modules[mi]['encoding']} is unsupported")
+            if not new_bytes.isascii():
+                raise NotImplementedError(
+                    f"editing module[{mi}] with non-ASCII source requires Bun's "
+                    "UTF-16 encoding path")
+            changed_source_modules.add(mi)
+        if length == 0 and new_bytes:
+            if field != "contents":
+                raise BunFormatError(
+                    f"cannot grow zero-length field module[{mi}].{field} "
+                    f"(offset={off}): the field reserves no bytes in the blob")
+            zero_length_contents.append((mi, new_bytes))
+            continue
+        edit_list.append((off, length, mi, field, new_bytes))
+
+    # Empty source fields own no bytes to replace. Allocate their new ASCII
+    # source (plus NUL) immediately before the module table, then point the
+    # record at that inserted island. Clear SOURCE_TEXT_CONTIGUOUS because the
+    # new source may no longer belong to the serializer's original source run.
+    zero_length_lookup = {}
+    zero_length_block = bytearray()
+    for mi, new_bytes in sorted(zero_length_contents, key=lambda item: item[0]):
+        relative = len(zero_length_block)
+        zero_length_block.extend(new_bytes)
+        zero_length_block.append(0)
+        zero_length_lookup[(mi, "contents")] = (relative, len(new_bytes))
+    if zero_length_block:
+        edit_list.append((
+            img.modules_off, 0, -1, "zero-length-source-allocation",
+            bytes(zero_length_block),
+        ))
+
+    edit_list.sort(key=lambda e: (e[0], e[1], e[2], e[3]))
     for a, b in zip(edit_list, edit_list[1:]):
         if a[0] + a[1] > b[0]:
-            raise BunFormatError("overlapping blob edits are not supported")
+            raise BunFormatError(
+                f"overlapping blob edits are not supported: module[{a[2]}].{a[3]} "
+                f"and module[{b[2]}].{b[3]}")
 
-    # Build the remap from original byte position to new byte position.
-    deltas = [(off + length, len(new_bytes) - length) for (off, length, _, _, new_bytes) in edit_list]
+    def make_deltas(splices):
+        return [
+            (off + length, len(new_bytes) - length)
+            for (off, length, _mi, _field, new_bytes) in splices
+        ]
+
+    def remap_with(pos, deltas):
+        shift = 0
+        for end, delta in deltas:
+            if pos >= end:
+                shift += delta
+        value = pos + shift
+        if value < 0 or value > 0xFFFFFFFF:
+            raise BunFormatError(f"remapped bun offset {value} does not fit StringPointer")
+        return value
+
+    # Length-changing source edits can move later UTF-16 bodies or bytecode.
+    # Insert the minimum zero padding immediately before each affected region,
+    # in original-offset order, so its runtime address remains valid. Padding
+    # is unreferenced and therefore does not change extracted JavaScript.
+    runtime_base = img._runtime_blob_vaddr()
+    alignment_targets = []
+    for m in img.modules:
+        if m["encoding"] == 2 and m["contents"][1]:
+            alignment_targets.append(
+                (m["contents"][0], 2, f"module[{m['index']}].contents"))
+    for m in img.modules:
+        if m["index"] not in changed_source_modules:
+            off, length = m["bytecode"]
+            if length:
+                alignment_targets.append(
+                    (off, BUN_BYTECODE_ALIGNMENT,
+                     f"module[{m['index']}].bytecode"))
+    for entry in img.builtin_bytecode:
+        off, length = entry["bytes"]
+        if length:
+            alignment_targets.append(
+                (off, BUN_BYTECODE_ALIGNMENT,
+                 f"builtin-bytecode[{entry['index']}].bytes"))
+    if img.bytecode_string_table[1]:
+        alignment_targets.append(
+            (img.bytecode_string_table[0], BUN_BYTECODE_ALIGNMENT,
+             "bytecode-string-table"))
+
+    splice_list = list(edit_list)
+    padding_serial = 0
+    for off, alignment, label in sorted(
+            alignment_targets, key=lambda item: (item[0], -item[1], item[2])):
+        current_deltas = make_deltas(splice_list)
+        new_off = remap_with(off, current_deltas)
+        padding = (-(runtime_base + new_off)) % alignment
+        if padding:
+            # Internal insertions sort before an owned edit at the same offset,
+            # making remap(off) point to the real region after its padding.
+            splice_list.append(
+                (off, 0, -1, f"alignment-padding-{padding_serial}:{label}",
+                 b"\x00" * padding))
+            padding_serial += 1
+            splice_list.sort(key=lambda e: (e[0], 0 if e[1] == 0 else 1, e[2], e[3]))
+
+    # The ELF metadata after `.bun` has its own modular-alignment contract. A
+    # source edit of (say) +30 bytes must not move an 8-byte-aligned .symtab by
+    # +30. Add unreferenced bytes immediately before the Bun offsets struct so
+    # the complete section delta preserves every shifted object's original
+    # residue without disturbing any source/cache region.
+    current_delta = sum(delta for _end, delta in make_deltas(splice_list))
+    bun_end = img.bun_section["foff"] + img.bun_section["size"]
+    file_alignment = _required_file_shift_alignment(img.elf, bun_end)
+    file_padding = (-current_delta) % file_alignment
+    if file_padding:
+        splice_list.append((
+            img.offsets_off, 0, -1, "elf-file-alignment-padding",
+            b"\x00" * file_padding,
+        ))
+        splice_list.sort(key=lambda e: (e[0], 0 if e[1] == 0 else 1, e[2], e[3]))
+
+    deltas = make_deltas(splice_list)
 
     def remap(pos):
-        shift = 0
-        for end, d in deltas:
-            if pos >= end:
-                shift += d
-        return pos + shift
+        return remap_with(pos, deltas)
 
-    # Splice edited regions in increasing offset order.
-    out = bytearray()
-    cursor = 0
-    for (off, length, _mi, _field, new_bytes) in edit_list:
-        out += blob[cursor:off]
-        out += new_bytes
-        cursor = off + length
-    out += blob[cursor:]
+    # One mutable output buffer; memoryview slices avoid materializing every
+    # unchanged source/bytecode run as an intermediate bytes object.
+    new_size = len(blob) + sum(delta for _end, delta in deltas)
+    if new_size < 0:
+        raise BunFormatError("edits would produce a negative bun blob size")
+    out = bytearray(new_size)
+    source_cursor = 0
+    dest_cursor = 0
+    for off, length, _mi, _field, new_bytes in splice_list:
+        unchanged = blob[source_cursor:off]
+        out[dest_cursor:dest_cursor + len(unchanged)] = unchanged
+        dest_cursor += len(unchanged)
+        out[dest_cursor:dest_cursor + len(new_bytes)] = new_bytes
+        dest_cursor += len(new_bytes)
+        source_cursor = off + length
+    tail = blob[source_cursor:]
+    out[dest_cursor:dest_cursor + len(tail)] = tail
 
-    # Rewrite the module table at its remapped location.
     new_modules_off = remap(img.modules_off)
     new_offsets_off = remap(img.offsets_off)
-    new_compile_argv_off = remap(img.compile_argv_off) if img.compile_argv_len > 0 else img.compile_argv_off
+    # Unlike module tombstones, compile_exec_argv's zero-length pointer normally
+    # names a real NUL after the optional records, so keep it in the same place
+    # relative to shifted metadata.
+    new_compile_argv_off = remap(img.compile_argv_off)
+    edit_lookup = {
+        (mi, field): new_bytes
+        for (_off, _length, mi, field, new_bytes) in edit_list
+    }
 
-    edit_lookup = {(off_mi, off_field): nb for (_o, _l, off_mi, off_field, nb) in edit_list}
-
+    # Rebuild each fixed-size record in place. Only pointers/lengths and stale
+    # cache fields change; enum bytes and record order are preserved.
     for m in img.modules:
         rc = new_modules_off + m["index"] * ms
+        changed_source = m["index"] in changed_source_modules
         for field in field_order:
             off, length = m[field]
             edited = edit_lookup.get((m["index"], field))
-            if edited is not None:
-                struct.pack_into("<II", out, rc, remap(off) if length > 0 else off, len(edited))
+            zero_alloc = zero_length_lookup.get((m["index"], field))
+            if changed_source and field in ("sourcemap", "bytecode", "moduleInfo"):
+                new_off, new_length = 0, 0
+            elif zero_alloc is not None:
+                relative, new_length = zero_alloc
+                new_off = remap(img.modules_off) - len(zero_length_block) + relative
+            elif edited is not None:
+                new_off = remap(off) if length else off
+                new_length = len(edited)
             else:
-                struct.pack_into("<II", out, rc, remap(off) if length > 0 else off, length)
+                new_off = remap(off) if length else off
+                new_length = length
+            struct.pack_into("<II", out, rc, new_off, new_length)
             rc += 8
-        struct.pack_into("<BBBB", out, rc,
-                         m["encoding"], m["loader"], m["module_format"], m["side"])
+        struct.pack_into(
+            "<BBBB", out, rc,
+            m["encoding"], m["loader"], m["module_format"], m["side"])
 
-    # Rewrite the 32-byte offsets struct. Bun stores the struct's own offset in
-    # the leading byte_count field; we preserve that convention.
+    # Optional-tail records are not part of modules_ptr.length. They still carry
+    # pointers into the pre-table data and therefore need the same coordinate
+    # transform as module fields.
+    if img.source_hashes_off is not None:
+        new_hashes_off = remap(img.source_hashes_off)
+        for mi in changed_source_modules:
+            struct.pack_into("<I", out, new_hashes_off + mi * 4, 0)
+
+    for entry in img.builtin_bytecode:
+        record_off = remap(entry["pointer_record_off"])
+        off, length = entry["bytes"]
+        struct.pack_into("<II", out, record_off, remap(off) if length else off, length)
+
+    if img.bytecode_string_table_record_off is not None:
+        record_off = remap(img.bytecode_string_table_record_off)
+        off, length = img.bytecode_string_table
+        struct.pack_into("<II", out, record_off, remap(off) if length else off, length)
+
+    if img.module_info_string_table_record_off is not None:
+        record_off = remap(img.module_info_string_table_record_off)
+        off, length = img.module_info_string_table
+        struct.pack_into("<II", out, record_off, remap(off) if length else off, length)
+
+    # Rewrite the fixed trailer struct. byte_count is exactly the offset of this
+    # struct in the serialized graph.
     struct.pack_into("<Q", out, new_offsets_off, new_offsets_off)
     struct.pack_into("<I", out, new_offsets_off + 8, new_modules_off)
     struct.pack_into("<I", out, new_offsets_off + 12, img.modules_len)
     struct.pack_into("<I", out, new_offsets_off + 16, img.entry_point_id)
     struct.pack_into("<I", out, new_offsets_off + 20, new_compile_argv_off)
     struct.pack_into("<I", out, new_offsets_off + 24, img.compile_argv_len)
-    struct.pack_into("<I", out, new_offsets_off + 28, img.flags)
-    return bytes(out)
+    new_flags = img.flags
+    if zero_length_block:
+        new_flags &= ~BUN_FLAG_SOURCE_TEXT_CONTIGUOUS
+    struct.pack_into("<I", out, new_offsets_off + 28, new_flags)
+    return out
 
 
 def _wrap_section(blob, section_header_size):
+    """Materialize a wrapped section payload for low-level callers/tests."""
     if section_header_size == 8:
-        return struct.pack("<Q", len(blob)) + blob
-    return struct.pack("<I", len(blob)) + blob
+        header = struct.pack("<Q", len(blob))
+    else:
+        header = struct.pack("<I", len(blob))
+    wrapped = bytearray(len(header) + len(blob))
+    wrapped[:len(header)] = header
+    wrapped[len(header):] = blob
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -640,120 +1149,244 @@ def _section_has_payload(s):
     return s["type"] != ELF_SHT_NOBITS and s["size"] > 0
 
 
-def _find_containing_load_segment(elf, sec):
+def _required_file_shift_alignment(elf, bun_end):
+    """Modular alignment every file object shifted after `.bun` must retain.
+
+    A shift divisible by ``sh_addralign`` preserves each section's original
+    file-offset residue (including producer-specific layouts that are not at
+    residue zero). Preserve natural alignment of a relocated ELF header table
+    as well. Every admitted alignment is a power of two, so the maximum is
+    their least common multiple.
+    """
+    required = 1
+    for section in elf.sections:
+        if _section_has_payload(section) and section["foff"] >= bun_end:
+            required = max(required, section["addralign"] or 1)
+    if elf.e_shoff >= bun_end:
+        required = max(required, 8)
+    if elf.e_phoff >= bun_end:
+        required = max(required, 8)
+    return required
+
+
+def _ranges_overlap(a_start, a_end, b_start, b_end):
+    return max(a_start, b_start) < min(a_end, b_end)
+
+
+def _find_containing_load_segments(elf, sec):
     sec_file_end = sec["foff"] + sec["size"]
     sec_virt_end = sec["vaddr"] + sec["size"]
+    result = []
     for seg in elf.segments:
         if seg["type"] != ELF_PT_LOAD:
             continue
-        contains_file = seg["foff"] <= sec["foff"] and sec_file_end <= seg["foff"] + seg["filesz"]
-        contains_virt = seg["vaddr"] <= sec["vaddr"] and sec_virt_end <= seg["vaddr"] + seg["memsz"]
+        contains_file = (
+            seg["foff"] <= sec["foff"]
+            and sec_file_end <= seg["foff"] + seg["filesz"]
+        )
+        contains_virt = (
+            seg["vaddr"] <= sec["vaddr"]
+            and sec_virt_end <= seg["vaddr"] + seg["memsz"]
+        )
         if contains_file and contains_virt:
-            return seg["index"]
-    return None
+            result.append(seg)
+    return result
 
 
-def _repack_section_elf(orig_bytes, wrapped):
-    """Replace the `.bun` section payload with `wrapped` and fix up every ELF
-    field that depends on the section's size, producing a working binary.
+def _validate_elf_patch_layout(elf, bs, *, for_resize):
+    """Validate ownership and, optionally, the nonzero-resize geometry.
 
-    Fixed up, in order:
-      - the `.bun` section header size,
-      - e_shoff and e_phoff (if they sit after `.bun`),
-      - the file offset of every section whose payload sits after `.bun`,
-      - the file offset of every segment that starts after `.bun`,
-      - the containing LOAD segment's filesz and memsz.
-
-    Safety guards (fail closed, symmetric for grow AND shrink):
-      - The rule the dynamic loader itself enforces: for every PT_LOAD segment
-        whose file offset is shifted by the resize, the new offset must still
-        satisfy `(p_offset - p_vaddr) mod p_align == 0`. If it would not,
-        refuse. This rule covers any segment-remapping case we have not
-        implemented (we never adjust p_vaddr) and subsumes naive grow/shrink
-        special cases into one invariant.
-      - Defense in depth: also refuse to shift a later allocated (SHF_ALLOC)
-        section or a later/spanning loadable segment.
-
-    The native Claude layout keeps only non-allocated metadata (`.comment`,
-    `.symtab`, `.strtab`, `.shstrtab`, notes) plus the section-header table
-    after `.bun`, with no later PT_LOAD, so normal patches pass all guards.
+    Returns the unique PT_LOAD containing `.bun`. `for_resize=True` enforces
+    the narrower canonical-writer scope: `.bun` is writable and is the final
+    allocated/mapped payload, so changing its size cannot trample a later
+    virtual mapping whose addresses we do not rewrite.
     """
+    bun_off = bs["foff"]
+    bun_end = bun_off + bs["size"]
+    bun_vaddr = bs["vaddr"]
+    bun_vend = bun_vaddr + bs["size"]
+
+    if not (bs["flags"] & ELF_SHF_ALLOC):
+        raise BunFormatError(".bun section is not allocated into memory")
+    if not (bs["flags"] & ELF_SHF_WRITE):
+        raise BunFormatError(".bun section is not writable")
+
+    overlapping = []
+    for section in elf.sections:
+        if section["index"] == bs["index"] or not _section_has_payload(section):
+            continue
+        if _ranges_overlap(
+                bun_off, bun_end,
+                section["foff"], section["foff"] + section["size"]):
+            overlapping.append(section)
+    if overlapping:
+        raise BunFormatError(
+            ".bun overlaps other section payloads: "
+            + ", ".join(s["name"] or f"<{s['index']}>" for s in overlapping))
+
+    ph_end = elf.e_phoff + elf.e_phentsize * elf.e_phnum
+    sh_end = elf.e_shoff + elf.e_shentsize * elf.e_shnum
+    if _ranges_overlap(bun_off, bun_end, elf.e_phoff, ph_end):
+        raise BunFormatError(".bun overlaps the ELF program-header table")
+    if _ranges_overlap(bun_off, bun_end, elf.e_shoff, sh_end):
+        raise BunFormatError(".bun overlaps the ELF section-header table")
+
+    containing_loads = _find_containing_load_segments(elf, bs)
+    if len(containing_loads) != 1:
+        raise BunFormatError(
+            f".bun must be covered by exactly one PT_LOAD (found {len(containing_loads)})")
+    containing = containing_loads[0]
+    if not (containing["flags"] & ELF_PF_WRITE):
+        raise BunFormatError("the PT_LOAD containing .bun is not writable")
+    if (bs["foff"] - containing["foff"]
+            != bs["vaddr"] - containing["vaddr"]):
+        raise BunFormatError(
+            ".bun file offset and virtual address disagree within its PT_LOAD")
+
+    intersecting_segments = []
+    for seg in elf.segments:
+        if seg["index"] == containing["index"] or seg["filesz"] == 0:
+            continue
+        if _ranges_overlap(
+                bun_off, bun_end,
+                seg["foff"], seg["foff"] + seg["filesz"]):
+            intersecting_segments.append(seg)
+    if intersecting_segments:
+        raise BunFormatError(
+            ".bun intersects unrelated file-backed segments: "
+            + ", ".join(f"{seg['index']}:{seg['type']}" for seg in intersecting_segments))
+
+    if not for_resize:
+        return containing
+
+    # Extending a segment with a pre-existing zero-fill tail would move the
+    # virtual start of that tail without relocating symbols that may point into
+    # it. The shipped section-form Claude layout has no such tail: Bun's final
+    # writable mapping is fully file-backed after injection.
+    if containing["filesz"] != containing["memsz"]:
+        raise BunFormatError(
+            "cannot resize .bun inside a PT_LOAD with a zero-fill memory tail")
+
+    containing_file_end = containing["foff"] + containing["filesz"]
+    mapped_tail = memoryview(elf.data)[bun_end:containing_file_end]
+    if any(mapped_tail):
+        raise BunFormatError(
+            "cannot resize .bun before nonzero unsectioned bytes in its PT_LOAD")
+
+    # A section or auxiliary program header that names bytes after `.bun` has
+    # its own file/virtual-address relationship. The writer shifts file offsets
+    # but intentionally does not rewrite arbitrary sh_addr/p_vaddr consumers,
+    # so admit only anonymous zero padding in the containing mapping's tail and
+    # no independently-described payload after the section.
+    described_tail_sections = [
+        section for section in elf.sections
+        if section["index"] != bs["index"]
+        and _section_has_payload(section)
+        and bun_end <= section["foff"] < containing_file_end
+    ]
+    if described_tail_sections:
+        raise BunFormatError(
+            "cannot resize .bun before section payloads in its PT_LOAD tail: "
+            + ", ".join(s["name"] or f"<{s['index']}>"
+                        for s in described_tail_sections))
+
+    later_aux_segments = [
+        seg for seg in elf.segments
+        if seg["index"] != containing["index"]
+        and seg["type"] != ELF_PT_LOAD
+        and seg["filesz"] > 0
+        and seg["foff"] >= bun_end
+    ]
+    if later_aux_segments:
+        raise BunFormatError(
+            "cannot resize .bun before later file-backed segments: "
+            + ", ".join(f"{seg['index']}:{seg['type']}"
+                        for seg in later_aux_segments))
+
+    # The writer changes neither sh_addr nor any later p_vaddr. Require `.bun`
+    # to be the final allocated section, including SHT_NOBITS sections that have
+    # no file payload but do occupy virtual memory.
+    later_allocated = []
+    overlapping_allocated_vaddr = []
+    for section in elf.sections:
+        if section["index"] == bs["index"] or not (section["flags"] & ELF_SHF_ALLOC):
+            continue
+        section_vend = section["vaddr"] + section["size"]
+        if section["size"] and _ranges_overlap(
+                bun_vaddr, bun_vend, section["vaddr"], section_vend):
+            overlapping_allocated_vaddr.append(section)
+        elif (section["vaddr"] >= bun_vend
+              or (_section_has_payload(section) and section["foff"] >= bun_end)):
+            later_allocated.append(section)
+    if overlapping_allocated_vaddr:
+        raise BunFormatError(
+            ".bun overlaps allocated virtual sections: "
+            + ", ".join(s["name"] or f"<{s['index']}>"
+                        for s in overlapping_allocated_vaddr))
+    if later_allocated:
+        raise BunFormatError(
+            "cannot resize .bun before later allocated sections: "
+            + ", ".join(s["name"] or f"<{s['index']}>" for s in later_allocated))
+
+    load_segments = [seg for seg in elf.segments if seg["type"] == ELF_PT_LOAD]
+    later_loads = [
+        seg for seg in load_segments
+        if seg["index"] != containing["index"]
+        and (
+            seg["index"] > containing["index"]
+            or seg["foff"] + seg["filesz"] > containing["foff"] + containing["filesz"]
+            or seg["vaddr"] + seg["memsz"] > containing["vaddr"] + containing["memsz"]
+        )
+    ]
+    if later_loads:
+        raise BunFormatError(
+            "cannot resize .bun unless its containing PT_LOAD is final: "
+            + ", ".join(str(seg["index"]) for seg in later_loads))
+    return containing
+
+
+def _repack_section_elf_parts(orig_bytes, payload_parts):
+    """Replace `.bun` from bytes-like parts without first joining the payload."""
+    orig_bytes = orig_bytes if isinstance(orig_bytes, bytes) else bytes(orig_bytes)
+    parts = tuple(memoryview(part) for part in payload_parts)
+    payload_size = sum(len(part) for part in parts)
     elf = Elf64(orig_bytes)
-    bs = elf.section(".bun")
-    if bs is None:
-        raise BunFormatError(".bun section not found during repack")
+    bun_sections = [section for section in elf.sections if section["name"] == ".bun"]
+    if len(bun_sections) != 1:
+        raise BunFormatError("expected exactly one .bun section during repack")
+    bs = bun_sections[0]
 
     bun_off = bs["foff"]
     orig_size = bs["size"]
     bun_end = bun_off + orig_size
-    growth = len(wrapped) - orig_size
+    growth = payload_size - orig_size
+    new_file_size = len(orig_bytes) + growth
+    if new_file_size < 0:
+        raise BunFormatError(".bun resize would produce a negative file size")
 
-    # Refuse if any payload-bearing section starts strictly inside the old .bun
-    # span (would indicate an overlapping/garbled layout we must not touch).
-    overlapping = [
-        s for s in elf.sections
-        if s["name"] != ".bun" and _section_has_payload(s)
-        and bun_off < s["foff"] < bun_end
-    ]
-    if overlapping:
+    required_alignment = _required_file_shift_alignment(elf, bun_end)
+    if growth % required_alignment:
         raise BunFormatError(
-            ".bun overlaps later section payloads: "
-            + ", ".join(s["name"] or f"<{s['index']}>" for s in overlapping))
+            f".bun resize delta {growth} violates required file alignment "
+            f"{required_alignment}")
 
-    shifted = [
-        s for s in elf.sections
-        if s["name"] != ".bun" and _section_has_payload(s) and s["foff"] >= bun_end
-    ]
-    shifted_alloc = [s for s in shifted if s["flags"] & ELF_SHF_ALLOC]
-    # Defense in depth: refuse to shift later allocated sections at all. The
-    # alignment check below subsumes this for properly-aligned
-    # shifts, but allocated section shifts are unusual enough that we keep the
-    # narrower refusal too. Symmetric for grow AND shrink, since either changes
-    # foff without vaddr and breaks foff =~ vaddr mod p_align for those sections.
-    if growth != 0 and shifted_alloc:
-        raise BunFormatError(
-            "cannot resize .bun before later allocated sections: "
-            + ", ".join(s["name"] or f"<{s['index']}>" for s in shifted_alloc))
+    containing = _validate_elf_patch_layout(elf, bs, for_resize=bool(growth))
+    if growth:
+        new_filesz = containing["filesz"] + growth
+        new_memsz = containing["memsz"] + growth
+        if new_filesz < 0 or new_memsz < 0 or new_filesz > new_memsz:
+            raise BunFormatError(".bun resize would make the containing PT_LOAD invalid")
 
-    containing = _find_containing_load_segment(elf, bs)
-
-    spanning = [
-        seg for seg in elf.segments
-        if seg["index"] != containing and seg["filesz"] > 0
-        and seg["foff"] < bun_end < seg["foff"] + seg["filesz"]
-    ]
-    if growth != 0 and spanning:
-        raise BunFormatError(
-            "cannot resize .bun inside unrelated segments: "
-            + ", ".join(f"{seg['index']}:{seg['type']}" for seg in spanning))
-
-    # PT_LOAD invariant check: for every PT_LOAD segment whose
-    # file offset is shifted by the resize, the new offset must still satisfy
-    # the loader's congruence `(p_offset - p_vaddr) mod p_align == 0`. This is
-    # the direct invariant that keeps the dynamic loader happy; phrasing the
-    # check this way (instead of "delta divides p_align") collapses grow,
-    # shrink, and any future case where we might also adjust p_vaddr into one
-    # rule. The defense-in-depth ALLOC-section and spanning-segment refusals
-    # above remain, but this is the fundamental check.
-    if growth != 0:
-        for seg in elf.segments:
-            if seg["type"] != ELF_PT_LOAD:
-                continue
-            if seg["foff"] < bun_end:
-                continue  # not shifted by the resize
-            align = seg["align"]
-            if align in (0, 1):
-                continue  # no alignment constraint
-            new_foff = seg["foff"] + growth
-            if (new_foff - seg["vaddr"]) % align != 0:
-                raise BunFormatError(
-                    f"resizing .bun by {growth} would break PT_LOAD invariant "
-                    f"(p_offset - p_vaddr) mod p_align == 0 for segment "
-                    f"{seg['index']} (p_align={align}); this segment-remapping "
-                    f"case is not implemented")
-
-    # Splice the new payload in: [0, bun_off) + wrapped + [bun_end, EOF).
-    new_bytes = bytearray(orig_bytes[:bun_off]) + bytearray(wrapped) + bytearray(orig_bytes[bun_end:])
+    # Allocate exactly one mutable final-size file buffer. The caller may pass
+    # `[length_header, blob_bytearray]`, avoiding a second 100+ MB wrapped copy.
+    new_bytes = bytearray(new_file_size)
+    new_bytes[:bun_off] = orig_bytes[:bun_off]
+    write_at = bun_off
+    for part in parts:
+        new_bytes[write_at:write_at + len(part)] = part
+        write_at += len(part)
+    new_bun_end = write_at
+    new_bytes[new_bun_end:] = orig_bytes[bun_end:]
 
     def shift_if_after(value):
         return value + growth if value >= bun_end else value
@@ -763,24 +1396,36 @@ def _repack_section_elf(orig_bytes, wrapped):
     struct.pack_into("<Q", new_bytes, 32, new_phoff)
     struct.pack_into("<Q", new_bytes, 40, new_shoff)
 
-    for s in elf.sections:
-        ho = new_shoff + s["index"] * elf.e_shentsize
-        if s["index"] == bs["index"]:
-            struct.pack_into("<Q", new_bytes, ho + 32, len(wrapped))
-            continue
-        if _section_has_payload(s) and s["foff"] >= bun_end:
-            struct.pack_into("<Q", new_bytes, ho + 24, s["foff"] + growth)
+    for section in elf.sections:
+        header_off = new_shoff + section["index"] * elf.e_shentsize
+        if section["index"] == bs["index"]:
+            struct.pack_into("<Q", new_bytes, header_off + 32, payload_size)
+        elif _section_has_payload(section) and section["foff"] >= bun_end:
+            struct.pack_into("<Q", new_bytes, header_off + 24, section["foff"] + growth)
 
     for seg in elf.segments:
-        ho = new_phoff + seg["index"] * elf.e_phentsize
-        if seg["index"] == containing:
-            struct.pack_into("<Q", new_bytes, ho + 32, seg["filesz"] + growth)
-            struct.pack_into("<Q", new_bytes, ho + 40, seg["memsz"] + growth)
-            continue
-        if seg["filesz"] > 0 and seg["foff"] >= bun_end:
-            struct.pack_into("<Q", new_bytes, ho + 8, seg["foff"] + growth)
+        header_off = new_phoff + seg["index"] * elf.e_phentsize
+        if seg["index"] == containing["index"]:
+            struct.pack_into("<Q", new_bytes, header_off + 32, seg["filesz"] + growth)
+            struct.pack_into("<Q", new_bytes, header_off + 40, seg["memsz"] + growth)
+        elif seg["filesz"] > 0 and seg["foff"] >= bun_end:
+            struct.pack_into("<Q", new_bytes, header_off + 8, seg["foff"] + growth)
 
     return bytes(new_bytes)
+
+
+def _repack_section_elf(orig_bytes, wrapped):
+    """Replace `.bun` with one already-wrapped bytes-like payload."""
+    return _repack_section_elf_parts(orig_bytes, (wrapped,))
+
+
+def _repack_blob_elf(orig_bytes, blob, section_header_size):
+    """Wrap and repack a blob without materializing a full wrapped copy."""
+    if section_header_size == 8:
+        header = struct.pack("<Q", len(blob))
+    else:
+        header = struct.pack("<I", len(blob))
+    return _repack_section_elf_parts(orig_bytes, (header, blob))
 
 
 # ---------------------------------------------------------------------------
@@ -873,7 +1518,9 @@ def changed_js_modules(original, modified):
 def can_handle(data):
     """Return True if `data` is a bun .bun-section ELF64 we can patch."""
     try:
-        BunImage(data)
+        image = BunImage(data)
+        image.source_modules()
+        _validate_elf_patch_layout(image.elf, image.bun_section, for_resize=True)
         return True
     except (BunFormatError, NotImplementedError):
         return False
@@ -887,10 +1534,13 @@ def extract_js(data):
 def repack_with_js(data, new_js):
     """Return a binary with source edits from extract_js() applied.
 
-    Single-module builds replace the entrypoint contents. Split ESM builds map
-    each edited region back to its original module using the extraction markers.
-    Bytecode remains unchanged; module offsets and ELF metadata are adjusted for
-    the combined source-length delta.
+    Single-module builds replace the entrypoint contents. Multi-module CJS/ESM
+    builds map each edited region back to its original record using the
+    extraction markers.
+    Changed modules have stale source hashes, bytecode, module-info and
+    sourcemaps detached; unchanged modules retain those regions. Module and
+    optional-tail pointers plus ELF metadata are adjusted for the combined
+    source-length delta.
     """
     img = BunImage(data)
     modules = img.source_modules()
@@ -899,11 +1549,13 @@ def repack_with_js(data, new_js):
     if len(modules) == 1:
         if len(records) != 1 or records[0][0] is not None:
             raise BunFormatError("single-module binary received multi-module source")
+        if records[0][2] == img.read_field(modules[0], "contents"):
+            return img.data
         edits = {(modules[0]["index"], "contents"): records[0][2]}
     else:
         if len(records) == 1 and records[0][0] is None:
             raise BunFormatError(
-                "split ESM binary requires the multi-module output from extract_js()")
+                "multi-module binary requires the envelope returned by extract_js()")
         expected = [
             (module["index"], img.read_field(module, "name"))
             for module in modules
@@ -920,8 +1572,7 @@ def repack_with_js(data, new_js):
             return img.data
 
     new_blob = _apply_blob_edits(img, edits)
-    wrapped = _wrap_section(new_blob, img.section_header_size)
-    return _repack_section_elf(img.data, wrapped)
+    return _repack_blob_elf(img.data, new_blob, img.section_header_size)
 
 
 def repack_unchanged(data):
@@ -936,28 +1587,37 @@ def repack_unchanged(data):
         for module in img.source_modules()
     }
     new_blob = _apply_blob_edits(img, edits)
-    wrapped = _wrap_section(new_blob, img.section_header_size)
-    return _repack_section_elf(img.data, wrapped)
+    return _repack_blob_elf(img.data, new_blob, img.section_header_size)
 
 
 def detect_format(data):
-    """Return a short label describing the binary format, for diagnostics."""
+    """Return a short label describing the binary and patchability boundary."""
     non_elf = _detect_non_elf_format(data)
     if non_elf:
         return non_elf
     try:
-        Elf64(data)
+        elf = Elf64(data)
     except NotImplementedError as exc:
         return f"ELF (unsupported variant: {exc})"
     except BunFormatError:
         return "unknown"
+
     try:
-        BunImage(data)
-        return "bun ELF (.bun section, supported)"
+        image = BunImage(data)
     except NotImplementedError as exc:
         return f"bun ELF (unsupported: {exc})"
-    except BunFormatError:
-        return "ELF (no bun .bun section)"
+    except BunFormatError as exc:
+        if elf.section(".bun") is None:
+            return "ELF (no bun .bun section)"
+        return f"bun ELF (malformed: {exc})"
+
+    try:
+        image.source_modules()
+        _validate_elf_patch_layout(
+            image.elf, image.bun_section, for_resize=True)
+    except (BunFormatError, NotImplementedError) as exc:
+        return f"bun ELF (unsupported patch layout: {exc})"
+    return "bun ELF (.bun section, supported)"
 
 
 # ---------------------------------------------------------------------------
@@ -965,9 +1625,9 @@ def detect_format(data):
 # ---------------------------------------------------------------------------
 
 def _selftest(path):
-    """Run the gate checks against a real binary at `path` (read-only):
+    """Run byte-stability checks against a real binary at `path` (read-only):
       1. no-op repack is byte-identical
-      2. a length-changing edit produces a different binary of the expected size
+      2. a length-growing edit round-trips and invalidates stale compiled views
       3. determinism: two identical edits produce identical bytes
     Does NOT execute the produced binary (callers can do that). Returns 0 on pass.
     """
@@ -988,7 +1648,8 @@ def _selftest(path):
     print(f"module struct size: {img.module_struct_size}  section header size: {img.section_header_size}")
     print(f"JS source: {len(js)} bytes across {len(source_modules)} module(s)  "
           f"sha256 {hashlib.sha256(js).hexdigest()[:16]}")
-    print(f"bytecode: {sum(m['bytecode'][1] for m in source_modules)} bytes (left intact)")
+    print(f"bytecode: {sum(m['bytecode'][1] for m in source_modules)} bytes "
+          f"(retained only for unchanged modules)")
 
     # Gate 1: no-op byte identity.
     noop = repack_unchanged(data)
@@ -1018,19 +1679,33 @@ def _selftest(path):
     print(f"GATE 3 determinism (identical bytes across runs): {gate3} "
           f"sha256 {hashlib.sha256(out_a).hexdigest()[:16]}")
 
-    # Gate 2: length-changing edit produces the expected size delta and round-trips.
+    # Gate 2: the source delta is exact; the file may need a small positive
+    # padding delta to keep later bytecode/UTF-16 regions aligned.
     expected_delta = len(patched_js) - len(js)
     actual_delta = len(out_a) - len(data)
-    gate2_size = actual_delta == expected_delta
-    re_extracted = BunImage(out_a).extract_js()
+    gate2_size = actual_delta >= expected_delta > 0
+    after = BunImage(out_a)
+    re_extracted = after.extract_js()
     gate2_roundtrip = re_extracted == patched_js
-    print(f"GATE 2 length-changing edit: size delta {actual_delta} "
-          f"(expected {expected_delta}) match={gate2_size}; "
-          f"re-extract round-trip={gate2_roundtrip}")
-    print("  (run the produced binary with --version to confirm the edit shows; "
-          "that step needs an executable host and is done by the test harness)")
+    changed_records = changed_js_modules(js, patched_js)
+    if len(source_modules) == 1:
+        changed_indices = [source_modules[0]["index"]] if changed_records else []
+    else:
+        changed_indices = [index for index, _name, _contents in changed_records]
+    gate2_invalidated = bool(changed_indices) and all(
+        after.source_hash(index) == 0
+        and after.modules[index]["bytecode"] == (0, 0)
+        and after.modules[index]["moduleInfo"] == (0, 0)
+        and after.modules[index]["sourcemap"] == (0, 0)
+        for index in changed_indices
+    )
+    print(f"GATE 2 length-changing edit: source delta {expected_delta}; "
+          f"file delta {actual_delta} ({actual_delta - expected_delta} alignment bytes); "
+          f"size-valid={gate2_size}; re-extract={gate2_roundtrip}; "
+          f"compiled-state-invalidated={gate2_invalidated}")
+    print("  (runtime behavior is exercised by the standalone test harness)")
 
-    ok = gate1 and gate2_size and gate2_roundtrip and gate3
+    ok = gate1 and gate2_size and gate2_roundtrip and gate2_invalidated and gate3
     print(f"SELFTEST {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 

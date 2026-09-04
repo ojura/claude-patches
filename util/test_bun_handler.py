@@ -1,50 +1,39 @@
 #!/usr/bin/env python3
 """
-Standalone test harness for util/bun_handler.py.
+Standalone adversarial test harness for util/bun_handler.py.
 
-Proves the four gates from the spike against a real linux-x64 bun-packed Claude
-binary, using only the committed handler code (no /tmp prototypes, no third-party
-deps). The handler is exercised through its public API only:
-    extract_js(binary_bytes) -> js_bytes
-    repack_with_js(binary_bytes, new_js) -> binary_bytes
-    repack_unchanged(binary_bytes) -> binary_bytes
-    can_handle / detect_format
+The real-binary gates exercise the supported linux-x64 Claude artifact through
+public APIs (`extract_js`, `repack_with_js`, `repack_unchanged`, `can_handle`,
+`detect_format`). Synthetic fixtures additionally call lower-level helpers so
+malformed ownership, optional-tail pointers, alignment, and ELF geometry can be
+constructed directly.
 
-Real-binary gates (need a native binary; skipped cleanly without one):
-  1. Byte-exact no-op repack: repack_unchanged(b) == b  (cmp-identical).
-  2. Length-GROWING patch: the binary still runs (`claude --version` exits 0)
-     AND the edit is visible in the output.
-  3. Determinism: same input + same edit -> identical output bytes across runs.
-  5. Length-SHRINKING patch (negative delta): fix-ups handle delta < 0, the
-     binary re-extracts and parses.
-  6. Multiple simultaneous edits through _apply_blob_edits (grow + a second
-     module edit): the remap arithmetic is correct, the binary runs, shows the
-     edit, and is deterministic.
-  7. CONTROL-FLOW source edit (Patch-M shape): dropping an operand from a `||`
-     conditional changes which branch executes, observable in --version. Locks
-     in that source control-flow edits do take effect with bytecode left
-     intact, so the architecture's "patch source in place, keep bytecode" path
-     is exercised by CI on every run rather than relying on chat-history
-     archaeology.
+Real-binary gates (skipped cleanly when no native binary is available):
+  1. Byte-exact no-op identity.
+  2. Length-growing source patch runs and is visible.
+  3. Deterministic output for identical input and edit.
+  5. Length-shrinking source patch round-trips and remains patchable.
+  6. Multiple source modules edited in one public-API repack.
+  7. Equal-length control-flow edit changes runtime output.
+  8. Equal-length string-literal edit changes runtime output.
+  9. A newly inserted dependency (ESM static import or CJS require) is parsed
+     and rejected instead of being hidden by stale compiled state.
 
-Always-run gates (self-contained, no native binary needed):
-  4. Format detection / guards: non-bun and truncated inputs rejected clearly.
-  Synthetic fixture tests: a hand-built minimal bun-on-ELF buffer exercises the
-  paths the 238 MB binary cannot reach: the 36-byte module struct form, the u32
-  section-header form, the trailer-with-pad tolerance, entrypoint resolution and
-  not-found, and the fail-closed growth guards actually firing (allocated
-  section shift, overlapping payload, spanning segment), plus malformed inputs
-  (too small, no ELF magic, ELF32, missing .bun, inconsistent length header).
+Gates 7-9 are the stale-compiled-state regression proof: changed modules must
+have their source hash, bytecode, module-info, and sourcemap pointers detached.
+Gate 4 and the synthetic suite always run. They cover 36/52-byte records,
+4/8-byte section headers, current flag-ordered optional records, grow/shrink and
+multi-edit remapping, ownership/terminator/discriminant checks, bytecode and
+UTF-16 alignment, x86-64 scope, and fail-closed ELF mapping geometry.
 
-Finding the binary (first hit wins):
-  - CLAUDE_NATIVE_BINARY environment variable (explicit path), or
-  - first CLI argument, or
-  - common install locations (~/.local/share/claude/versions/<latest>).
+Binary discovery, first hit wins:
+  - CLAUDE_NATIVE_BINARY environment variable,
+  - first file-valued CLI argument,
+  - highest version under ~/.local/share/claude/versions.
 
-If no binary is found, the real-binary gates are SKIPPED (reported as such, not
-failed) so the suite runs in CI without the 238 MB artifact.
-
-Exit code: 0 if every executed gate passed (skips do not fail), 1 otherwise.
+Exit code is 0 only when every executed check passes. A skipped real gate is
+permissive by default and can be promoted to failure with
+CLAUDE_PFG_STRICT_GATES=gateN[,gateN...].
 """
 import glob
 import os
@@ -81,6 +70,98 @@ def find_binary():
     return None
 
 
+def _run_binary(binary_bytes, *args, prefix="pfg-bun-"):
+    """Execute a produced binary and return (CompletedProcess, skip_detail)."""
+    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".bin", delete=False) as tf:
+        tf.write(binary_bytes)
+        tmp = tf.name
+    try:
+        os.chmod(tmp, 0o755)
+        try:
+            return subprocess.run(
+                [tmp, *args], capture_output=True, text=True, timeout=90
+            ), None
+        except OSError as exc:
+            return None, f"cannot exec produced binary on this host ({exc})"
+        except subprocess.TimeoutExpired:
+            return None, "produced binary timed out"
+    finally:
+        os.unlink(tmp)
+
+
+def _rebuild_extracted(records):
+    """Inverse of split_extracted_js for test-generated module replacements."""
+    if len(records) == 1 and records[0][0] is None:
+        return records[0][2]
+    out = bytearray(bun_handler._MULTI_MODULE_HEADER)
+    for index, name, contents in records:
+        if index is None or name is None:
+            raise AssertionError("mixed single/multi-module extraction records")
+        out += bun_handler._MULTI_MODULE_MARKER
+        out += str(index).encode("ascii")
+        out += b" "
+        out += name.hex().encode("ascii")
+        out += b"\n"
+        out += contents
+    return bytes(out)
+
+
+def _replace_extracted_modules(extracted, replacements):
+    records = bun_handler.split_extracted_js(extracted)
+    rebuilt = []
+    seen = set()
+    for index, name, contents in records:
+        key = index
+        if key in replacements:
+            contents = bytes(replacements[key])
+            seen.add(key)
+        rebuilt.append((index, name, contents))
+    missing = set(replacements) - seen
+    if missing:
+        raise AssertionError(f"replacement module ids not present: {sorted(missing)!r}")
+    return _rebuild_extracted(rebuilt)
+
+
+def _changed_module_indices(data, patched_js):
+    img = bun_handler.BunImage(data)
+    original = img.extract_js()
+    changed = bun_handler.changed_js_modules(original, patched_js)
+    modules = img.source_modules()
+    if len(modules) == 1:
+        return [modules[0]["index"]] if changed else []
+    return [index for index, _name, _contents in changed]
+
+
+def _check_changed_modules_invalidated(data, out, patched_js):
+    """Verify that every changed module is detached from stale compiled views."""
+    before = bun_handler.BunImage(data)
+    after = bun_handler.BunImage(out)
+    changed = _changed_module_indices(data, patched_js)
+    if not changed:
+        return False, "patch changed no source module"
+
+    exercised = []
+    for index in changed:
+        old = before.modules[index]
+        new = after.modules[index]
+        old_state = {
+            "hash": before.source_hash(index),
+            "bytecode": old["bytecode"][1],
+            "moduleInfo": old["moduleInfo"][1],
+            "sourcemap": old["sourcemap"][1],
+        }
+        if any(old_state.values()):
+            exercised.append(index)
+        if after.source_hash(index) != 0:
+            return False, f"module[{index}] source hash was not cleared"
+        for field in ("bytecode", "moduleInfo", "sourcemap"):
+            if new[field] != (0, 0):
+                return False, f"module[{index}] stale {field} pointer remains {new[field]}"
+    if not exercised:
+        return False, "changed modules carried no compiled state, so invalidation was not exercised"
+    return True, f"invalidated modules {changed} (compiled state existed on {exercised})"
+
+
 def gate1_noop(data):
     out = bun_handler.repack_unchanged(data)
     if out == data:
@@ -95,38 +176,29 @@ def gate2_length_change(data):
     marker = b"\n(pfg-selftest)"
     if needle not in js:
         return None, "skip: '(Claude Code)' anchor not present in this build"
-    # Insert the marker after EVERY '(Claude Code)'. The bundle carries more than
-    # one copy of the version template (one per CLI entry shape), and `--version`
-    # renders from a specific one; patching all copies guarantees the rendered
-    # site is hit. This is also what the real version-output patch does.
     patched = js.replace(needle, needle + marker)
     out = bun_handler.repack_with_js(data, patched)
 
-    # size + round-trip checks (do not need execution)
-    if len(out) - len(data) != len(patched) - len(js):
-        return False, "size delta mismatch"
+    source_delta = len(patched) - len(js)
+    file_delta = len(out) - len(data)
+    if source_delta <= 0 or file_delta < source_delta:
+        return False, f"unexpected source/file delta {source_delta}/{file_delta}"
     if bun_handler.extract_js(out) != patched:
         return False, "re-extract round-trip mismatch"
+    invalidated, detail = _check_changed_modules_invalidated(data, out, patched)
+    if not invalidated:
+        return False, detail
 
-    # runtime check: write to a temp file, mark executable, run --version
-    with tempfile.NamedTemporaryFile(prefix="pfg-bun-", suffix=".bin", delete=False) as tf:
-        tf.write(out)
-        tmp = tf.name
-    try:
-        os.chmod(tmp, 0o755)
-        try:
-            r = subprocess.run([tmp, "--version"], capture_output=True, text=True, timeout=90)
-        except OSError as exc:
-            return None, f"skip: cannot exec produced binary on this host ({exc})"
-        if r.returncode != 0:
-            return False, f"produced binary exited {r.returncode}: {r.stderr.strip()[:160]}"
-        out_text = r.stdout.strip()
-        shows = "(pfg-selftest)" in r.stdout
-        if not shows:
-            return False, f"edit not visible in --version output: {out_text!r}"
-        return True, f"runs and shows edit: {out_text!r}"
-    finally:
-        os.unlink(tmp)
+    result, skip = _run_binary(out, "--version", prefix="pfg-grow-")
+    if result is None:
+        return None, f"skip: {skip}"
+    if result.returncode != 0:
+        return False, f"produced binary exited {result.returncode}: {result.stderr.strip()[:160]}"
+    if "(pfg-selftest)" not in result.stdout:
+        return False, f"edit not visible in --version output: {result.stdout.strip()!r}"
+    alignment_padding = file_delta - source_delta
+    return True, (f"runs and shows edit; source delta +{source_delta}, file delta "
+                  f"+{file_delta} ({alignment_padding} alignment byte(s)); {detail}")
 
 
 def gate3_determinism(data):
@@ -141,16 +213,7 @@ def gate3_determinism(data):
 
 
 def gate5_shrink(data):
-    """Length-SHRINKING edit (negative delta) on the real binary: the offset and
-    ELF fix-ups must handle delta < 0, not just growth. Cut bytes out of the
-    source, repack, re-extract, and confirm it still parses.
-
-    We verify the round-trip and the negative size delta. We do not require the
-    shrunk binary to run, because removing an arbitrary 100-byte slice from
-    minified JS can break syntax; the goal here is to prove the negative-delta
-    fix-up path is correct, which the no-op gate (delta 0) and grow gate (delta
-    > 0) do not cover.
-    """
+    """Exercise a negative source delta without pretending arbitrary cut JS runs."""
     js = bun_handler.extract_js(data)
     needle = b"(Claude Code)"
     i = js.find(needle)
@@ -159,157 +222,187 @@ def gate5_shrink(data):
     cut_start = i + len(needle)
     shrunk = js[:cut_start] + js[cut_start + 100:]
     out = bun_handler.repack_with_js(data, shrunk)
-    if len(out) - len(data) != -100:
-        return False, f"size delta {len(out) - len(data)} != -100"
+    if len(out) >= len(data):
+        return False, f"negative source delta did not shrink file ({len(out) - len(data):+d})"
     if bun_handler.extract_js(out) != shrunk:
         return False, "re-extract round-trip mismatch after shrink"
     if not bun_handler.can_handle(out):
-        return False, "shrunk binary no longer parses"
-    return True, f"negative delta -100 round-trips; new size {len(out)}"
-
-
-def gate7_control_flow(data):
-    """Control-flow source edit on the real binary: dropping an operand from a
-    `||` conditional changes which branch executes, observable in --version.
-
-    This is the regression test for the bytecode-vs-source-execution question.
-    JSC bytecode reads from the live source buffer for this build, so a real
-    control-flow edit (NOT just a string-literal swap) takes effect with the
-    bytecode left intact. If a future bun runtime ever changes this and runs
-    bytecode authoritatively, this gate fails and the architecture's whole
-    premise (keep bytecode untouched, patch source in place) needs to be
-    revisited rather than discovered through a broken release.
-
-    Mechanism:
-      1. Inject a conditional `if(false||true)return"_MN_TRUE";` into jS's body.
-         The version template renders `${jS()}` so output gains "_MN_TRUE" iff
-         the injected source ran (sanity step, prevents a false GREEN when the
-         edit doesn't land at all).
-      2. Apply Patch-M shape: drop the `||true` operand from that conditional.
-         Output must change from "_MN_TRUE" to "_MN_BASE", proving the
-         control-flow edit altered which branch executes.
-    """
-    import tempfile
-    js = bun_handler.extract_js(data)
-    anchor = b'}.BUILD_REF_NAME){return""}'
-    if anchor not in js:
-        return None, "skip: jS body anchor not present in this build"
-    if js.count(anchor) != 1:
-        return None, f"skip: jS body anchor not unique (count={js.count(anchor)})"
-
-    # Step 1: inject the conditional. Sanity-checks that the edit lands and
-    # that some branch of the source actually executes.
-    sanity_form = b'}.BUILD_REF_NAME){if(false||true)return"_MN_TRUE";return"_MN_BASE"}'
-    js_sanity = js.replace(anchor, sanity_form)
-    out_sanity = bun_handler.repack_with_js(data, js_sanity)
-    with tempfile.NamedTemporaryFile(prefix="pfg-cf-sanity-", suffix=".bin",
-                                     delete=False) as tf:
-        tf.write(out_sanity); tmp_sanity = tf.name
-    try:
-        os.chmod(tmp_sanity, 0o755)
-        try:
-            r1 = subprocess.run([tmp_sanity, "--version"], capture_output=True,
-                                text=True, timeout=90)
-        except OSError as exc:
-            return None, f"skip: cannot exec produced binary ({exc})"
-        if r1.returncode != 0:
-            return False, f"sanity binary exited {r1.returncode}: {r1.stderr.strip()[:160]}"
-        if "_MN_TRUE" not in r1.stdout:
-            return False, (f"sanity step did not show _MN_TRUE; output: "
-                           f"{r1.stdout.strip()!r}. Either the jS body edit did "
-                           f"not land or bytecode is now overriding source.")
-    finally:
-        os.unlink(tmp_sanity)
-
-    # Step 2: Patch-M-shape operand drop. The same conditional with `||true`
-    # removed must take the OTHER branch.
-    patched_m_form = b'}.BUILD_REF_NAME){if(false)return"_MN_TRUE";return"_MN_BASE"}'
-    js_m = js.replace(anchor, patched_m_form)
-    out_m = bun_handler.repack_with_js(data, js_m)
-    with tempfile.NamedTemporaryFile(prefix="pfg-cf-m-", suffix=".bin",
-                                     delete=False) as tf:
-        tf.write(out_m); tmp_m = tf.name
-    try:
-        os.chmod(tmp_m, 0o755)
-        r2 = subprocess.run([tmp_m, "--version"], capture_output=True,
-                            text=True, timeout=90)
-        if r2.returncode != 0:
-            return False, f"Patch-M-shape binary exited {r2.returncode}: {r2.stderr.strip()[:160]}"
-        if "_MN_TRUE" in r2.stdout:
-            return False, (f"Patch-M-shape edit did not change branch; output "
-                           f"still shows _MN_TRUE: {r2.stdout.strip()!r}. "
-                           f"Bytecode appears to be driving control flow for "
-                           f"this site; the architecture's keep-bytecode-intact "
-                           f"premise no longer holds.")
-        if "_MN_BASE" not in r2.stdout:
-            return False, (f"Patch-M-shape edit produced unexpected output: "
-                           f"{r2.stdout.strip()!r}")
-        return True, "operand-drop changes branch: _MN_TRUE -> _MN_BASE"
-    finally:
-        os.unlink(tmp_m)
+        return False, "shrunk binary no longer parses as patchable"
+    invalidated, detail = _check_changed_modules_invalidated(data, out, shrunk)
+    if not invalidated:
+        return False, detail
+    return True, (f"source delta -100 round-trips; file delta "
+                  f"{len(out) - len(data):+d}; {detail}")
 
 
 def gate6_multi_edit(data):
-    """Multiple simultaneous edits through _apply_blob_edits on the real binary.
-    Exercises the remap arithmetic with more than one edit (grow + shrink at
-    different offsets), then runs the result."""
-    img = bun_handler.BunImage(data)
-    ep = img.entrypoint_module()
-    js = img.read_field(ep, "contents")
+    """Edit multiple source modules through the public extraction/repack API."""
+    js = bun_handler.extract_js(data)
+    records = bun_handler.split_extracted_js(js)
+    if len(records) < 2:
+        return None, "skip: binary exposes only one patchable source module"
+
     needle = b"(Claude Code)"
-    if js.count(needle) < 2:
-        return None, "skip: need two anchor sites for a multi-edit"
-    # Edit the entrypoint contents with two changes baked into one new buffer is
-    # the public path; to exercise _apply_blob_edits with multiple field edits we
-    # combine an entrypoint contents grow with an edit to a second module if one
-    # has non-empty contents.
-    others = [m for m in img.modules if m["index"] != ep["index"] and m["contents"][1] > 0]
-    grown = js.replace(needle, needle + b"\n(multi-A)")  # grow all version sites
-    edits = {(ep["index"], "contents"): grown}
-    label_other = "entrypoint-only"
-    if others:
-        om = others[0]
-        oc = img.read_field(om, "contents")
-        edits[(om["index"], "contents")] = oc + b"\n//multi-B-grow"
-        label_other = f"+module[{om['index']}]"
-    new_blob = bun_handler._apply_blob_edits(img, edits)
-    wrapped = bun_handler._wrap_section(new_blob, img.section_header_size)
-    out = bun_handler._repack_section_elf(img.data, wrapped)
+    replacements = {}
+    for index, _name, contents in records:
+        if needle in contents:
+            replacements[index] = contents.replace(needle, needle + b"\n(multi-A)")
+    if not replacements:
+        return None, "skip: '(Claude Code)' anchor not present in any source module"
 
-    # round-trip every edited field
-    img2 = bun_handler.BunImage(out)
-    if img2.read_field(img2.entrypoint_module(), "contents") != grown:
-        return False, "entrypoint content mismatch after multi-edit"
-    for (mi, field), nb in edits.items():
-        rec = [m for m in img2.modules if m["index"] == mi][0]
-        if img2.read_field(rec, field) != nb:
-            return False, f"module[{mi}].{field} mismatch after multi-edit"
+    extra = next((record for record in records if record[0] not in replacements), None)
+    if extra is None:
+        return None, "skip: no independent module available for the second edit"
+    replacements[extra[0]] = extra[2] + b"\n/*pfg-multi-B*/"
+    patched = _replace_extracted_modules(js, replacements)
 
-    # run it; the grown version site must show
-    import tempfile
-    with tempfile.NamedTemporaryFile(prefix="pfg-multi-", suffix=".bin", delete=False) as tf:
-        tf.write(out)
-        tmp = tf.name
-    try:
-        os.chmod(tmp, 0o755)
-        try:
-            r = subprocess.run([tmp, "--version"], capture_output=True, text=True, timeout=90)
-        except OSError as exc:
-            return None, f"skip: cannot exec ({exc})"
-        if r.returncode != 0:
-            return False, f"multi-edit binary exited {r.returncode}: {r.stderr.strip()[:120]}"
-        if "(multi-A)" not in r.stdout:
-            return False, f"multi-edit not visible: {r.stdout.strip()!r}"
-        # determinism under the multi-edit
-        out2 = bun_handler._repack_section_elf(
-            img.data,
-            bun_handler._wrap_section(bun_handler._apply_blob_edits(bun_handler.BunImage(data), edits),
-                                      img.section_header_size))
-        if out2 != out:
-            return False, "multi-edit not deterministic"
-        return True, f"multi-edit ({label_other}) runs, shows edit, deterministic"
-    finally:
-        os.unlink(tmp)
+    out = bun_handler.repack_with_js(data, patched)
+    if bun_handler.extract_js(out) != patched:
+        return False, "multi-module re-extract round-trip mismatch"
+    invalidated, detail = _check_changed_modules_invalidated(data, out, patched)
+    if not invalidated:
+        return False, detail
+
+    result, skip = _run_binary(out, "--version", prefix="pfg-multi-")
+    if result is None:
+        return None, f"skip: {skip}"
+    if result.returncode != 0:
+        return False, f"multi-edit binary exited {result.returncode}: {result.stderr.strip()[:160]}"
+    if "(multi-A)" not in result.stdout:
+        return False, f"multi-edit not visible: {result.stdout.strip()!r}"
+    out2 = bun_handler.repack_with_js(data, patched)
+    if out2 != out:
+        return False, "multi-edit not deterministic"
+    return True, f"edited {len(replacements)} modules, runs, deterministic; {detail}"
+
+
+def gate7_equal_length_control_flow(data):
+    """Equal-length control-flow edit: stale bytecode must not win."""
+    js = bun_handler.extract_js(data)
+    anchor = b'}.BUILD_REF_NAME){return""}'
+    replacement = b'}.BUILD_REF_NAME){return 0}'
+    if len(anchor) != len(replacement):
+        raise AssertionError("equal-length control-flow fixture drifted")
+    if js.count(anchor) != 1:
+        return None, f"skip: control-flow anchor count is {js.count(anchor)}, expected 1"
+
+    patched = js.replace(anchor, replacement)
+    out = bun_handler.repack_with_js(data, patched)
+    if len(out) != len(data):
+        return False, f"equal-length source edit changed file size by {len(out) - len(data)}"
+    if bun_handler.extract_js(out) != patched:
+        return False, "equal-length control-flow edit did not round-trip"
+    invalidated, detail = _check_changed_modules_invalidated(data, out, patched)
+    if not invalidated:
+        return False, detail
+
+    baseline, baseline_skip = _run_binary(data, "--version", prefix="pfg-cf-base-")
+    result, skip = _run_binary(out, "--version", prefix="pfg-cf-equal-")
+    if baseline is None or result is None:
+        return None, f"skip: {baseline_skip or skip}"
+    if baseline.returncode != 0:
+        return False, f"baseline binary exited {baseline.returncode}"
+    if result.returncode != 0:
+        return False, f"patched binary exited {result.returncode}: {result.stderr.strip()[:160]}"
+    expected = baseline.stdout.rstrip("\n") + "0\n"
+    if result.stdout != expected:
+        return False, (f"equal-length branch edit produced {result.stdout!r}; "
+                       f"expected {expected!r}")
+    return True, f"same-size return expression changes output; {detail}"
+
+
+def gate8_equal_length_literal(data):
+    """Equal-length literal edit: stale source hash/bytecode must not win."""
+    js = bun_handler.extract_js(data)
+    before = b"(Claude Code)"
+    after = b"(ClauDe Code)"
+    if before not in js:
+        return None, "skip: version literal anchor not present"
+    if len(before) != len(after):
+        raise AssertionError("equal-length literal fixture drifted")
+    patched = js.replace(before, after)
+    out = bun_handler.repack_with_js(data, patched)
+    if len(out) != len(data):
+        return False, f"equal-length literal edit changed file size by {len(out) - len(data)}"
+    if bun_handler.extract_js(out) != patched:
+        return False, "equal-length literal edit did not round-trip"
+    invalidated, detail = _check_changed_modules_invalidated(data, out, patched)
+    if not invalidated:
+        return False, detail
+
+    result, skip = _run_binary(out, "--version", prefix="pfg-literal-")
+    if result is None:
+        return None, f"skip: {skip}"
+    if result.returncode != 0:
+        return False, f"patched binary exited {result.returncode}: {result.stderr.strip()[:160]}"
+    if "(ClauDe Code)" not in result.stdout or "(Claude Code)" in result.stdout:
+        return False, f"equal-length literal remained stale: {result.stdout.strip()!r}"
+    return True, f"same-size literal is visible at runtime; {detail}"
+
+
+def gate9_dependency_reanalysis(data):
+    """Insert a missing dependency through the target module's real syntax.
+
+    Split ESM builds receive a static import, which specifically proves stale
+    moduleInfo was detached. Older CJS builds wrap the program in a function
+    whose `require` parameter is only in scope inside the wrapper, so inject a
+    require call immediately after that opening brace. In both forms, stale
+    bytecode would silently ignore the new dependency.
+    """
+    js = bun_handler.extract_js(data)
+    records = bun_handler.split_extracted_js(js)
+    anchor = b'}.BUILD_REF_NAME){return""}'
+    targets = [record for record in records if anchor in record[2]]
+    if len(targets) != 1:
+        return None, f"skip: import target anchor matched {len(targets)} modules"
+    target_index, _name, contents = targets[0]
+    image = bun_handler.BunImage(data)
+    if target_index is None:
+        target_module = image.source_modules()[0]
+    else:
+        target_module = image.modules[target_index]
+
+    missing = b"/$bunfs/root/pfg-definitely-missing.js"
+    if target_module["module_format"] == 1:
+        dependency_stmt = b'import"' + missing + b'";'
+        patched_contents = dependency_stmt + contents
+        dependency_kind = "static import"
+    elif target_module["module_format"] == 2:
+        cjs_wrapper = b"(function(exports, require, module, __filename, __dirname) {"
+        if contents.count(cjs_wrapper) != 1:
+            return None, ("skip: CJS wrapper prologue count is "
+                          f"{contents.count(cjs_wrapper)}, expected 1")
+        dependency_stmt = b'require("' + missing + b'");'
+        patched_contents = contents.replace(
+            cjs_wrapper, cjs_wrapper + dependency_stmt, 1)
+        dependency_kind = "CJS require"
+    else:
+        return None, ("skip: target module has unsupported ModuleFormat "
+                      f"{target_module['module_format']}")
+
+    patched = _replace_extracted_modules(
+        js, {target_index: patched_contents})
+    out = bun_handler.repack_with_js(data, patched)
+    if bun_handler.extract_js(out) != patched:
+        return False, f"{dependency_kind} edit did not round-trip"
+    invalidated, detail = _check_changed_modules_invalidated(data, out, patched)
+    if not invalidated:
+        return False, detail
+
+    result, skip = _run_binary(out, "--version", prefix="pfg-import-")
+    if result is None:
+        return None, f"skip: {skip}"
+    combined = result.stdout + result.stderr
+    missing_text = missing.decode("ascii")
+    if result.returncode == 0:
+        return False, (f"inserted missing {dependency_kind} was ignored "
+                       "(stale compiled state likely remained)")
+    if missing_text not in combined or "Cannot find module" not in combined:
+        return False, (f"patched binary failed, but not on inserted "
+                       f"{dependency_kind}: "
+                       f"{combined.strip()[:240]!r}")
+    return True, f"inserted {dependency_kind} is parsed and rejected; {detail}"
+
 
 
 def gate4_format_guards():
@@ -348,7 +441,7 @@ def gate4_format_guards():
 # ---------------------------------------------------------------------------
 # Synthetic bun-on-ELF fixture builder.
 #
-# The 238 MB real binary exercises the happy path but cannot trigger the
+# The real binary exercises the happy path but cannot trigger every
 # fail-closed guards, the 36-byte module form, or the u32 section-header form.
 # This builds a tiny but structurally valid bun-on-ELF buffer that the handler
 # parses, with knobs for those variants and for adversarial section/segment
@@ -373,56 +466,69 @@ _SHF_ALLOC = 0x2
 _TRAILER = b"\n---- Bun! ----\n"
 
 
-def _build_bun_blob(modules, module_struct_size, trailing_pad=True, entry_point_id=0):
-    """Build a bun data blob from a list of module dicts.
+def _build_bun_blob(modules, module_struct_size, runtime_blob_vaddr,
+                    trailing_pad=True, entry_point_id=0, flags=0xF,
+                    builtin_bytecode=None, bytecode_string_table=b"",
+                    startup_module_count=None, module_info_string_table=b"",
+                    compile_argv=b""):
+    """Build a structurally faithful standalone-module-graph blob.
 
-    Each module dict: {name: bytes, contents: bytes, sourcemap: bytes,
-    bytecode: bytes, moduleInfo: bytes, bytecodeOriginPath: bytes,
-    encoding, loader, module_format, side}. Returns (blob_bytes, modules_off,
-    modules_len, offsets_off). Layout mirrors bun closely enough for the parser:
-    a 120-byte zero prefix, then per-module field data with one-byte separators,
-    then the module table, the 32-byte offsets struct, the trailer (+1 pad).
+    `runtime_blob_vaddr` is the mapped address of blob byte zero (after the
+    section's 4/8-byte length header), allowing bytecode and UTF-16 regions to
+    receive the same alignment Bun's serializer requires. Optional records are
+    emitted in flag order immediately after the fixed module table.
     """
     ms = module_struct_size
     field_order = (["name", "contents", "sourcemap", "bytecode", "moduleInfo", "bytecodeOriginPath"]
                    if ms == 52 else ["name", "contents", "sourcemap", "bytecode"])
+    builtin_bytecode = list(builtin_bytecode or [])
 
-    out = bytearray(120)  # zero prefix; offset 0 means "empty"
-    placed = []  # per module: {field: (off, len)}
+    out = bytearray(128)  # offset 0 remains the empty-field tombstone
+
+    def align(alignment):
+        padding = (-(runtime_blob_vaddr + len(out))) % alignment
+        if padding:
+            out.extend(b"\x00" * padding)
+
+    def place(data, *, alignment=1, terminator=0):
+        data = bytes(data)
+        if not data:
+            return (0, 0)
+        align(alignment)
+        off = len(out)
+        out.extend(data)
+        if terminator:
+            out.extend(b"\x00" * terminator)
+        return (off, len(data))
+
+    placed = []
     for m in modules:
         offs = {}
         for field in field_order:
             data = m[field]
-            if len(data) == 0:
-                offs[field] = (0, 0)
-                continue
-            out += b"\x00"  # one-byte separator before each non-empty region
-            offs[field] = (len(out), len(data))
-            out += data
-        # empty fields not in field_order (36-byte form) default to (0, 0)
+            if field == "bytecode":
+                offs[field] = place(data, alignment=128)
+            elif field == "contents" and m["encoding"] == 2:
+                offs[field] = place(data, alignment=2, terminator=2)
+            elif field in ("name", "contents", "bytecodeOriginPath"):
+                offs[field] = place(data, terminator=1)
+            else:
+                offs[field] = place(data)
         for field in ["name", "contents", "sourcemap", "bytecode", "moduleInfo", "bytecodeOriginPath"]:
             offs.setdefault(field, (0, 0))
         placed.append(offs)
 
-    out += b"\x00"
+    builtin_pointers = []
+    for builtin_id, payload in builtin_bytecode:
+        builtin_pointers.append((builtin_id, place(payload, alignment=128)))
+    bytecode_table_ptr = place(bytecode_string_table, alignment=128)
+    module_info_table_ptr = place(module_info_string_table)
+
     modules_off = len(out)
     modules_len = len(modules) * ms
-    out += b"\x00" * modules_len
+    out.extend(b"\x00" * modules_len)
 
-    # compile-exec-argv is empty in our fixtures.
-    out += b"\x00"
-    compile_argv_off = len(out)
-    compile_argv_len = 0
-
-    out += b"\x00"
-    offsets_off = len(out)
-    out += b"\x00" * 32
-
-    out += _TRAILER
-    if trailing_pad:
-        out += b"\x00"
-
-    # Fill the module table.
+    # Fill the module table after every pointer target has its final offset.
     for mi, (m, offs) in enumerate(zip(modules, placed)):
         rc = modules_off + mi * ms
         for field in field_order:
@@ -432,35 +538,83 @@ def _build_bun_blob(modules, module_struct_size, trailing_pad=True, entry_point_
         _struct.pack_into("<BBBB", out, rc,
                           m["encoding"], m["loader"], m["module_format"], m["side"])
 
-    # Offsets struct: byte_count field holds its own offset (parser convention).
+    if flags & bun_handler.BUN_FLAG_HAS_SOURCE_HASHES:
+        for m in modules:
+            out.extend(_struct.pack("<I", m.get("source_hash", 0x12345678)))
+
+    if flags & bun_handler.BUN_FLAG_HAS_BUILTIN_BYTECODE:
+        out.extend(_struct.pack("<I", len(builtin_pointers)))
+        for builtin_id, (off, length) in builtin_pointers:
+            out.extend(_struct.pack("<III", builtin_id, off, length))
+
+    if flags & bun_handler.BUN_FLAG_HAS_BYTECODE_STRING_TABLE:
+        out.extend(_struct.pack("<II", *bytecode_table_ptr))
+
+    if flags & bun_handler.BUN_FLAG_HAS_STARTUP_MODULE_COUNT:
+        count = len(modules) if startup_module_count is None else startup_module_count
+        out.extend(_struct.pack("<I", count))
+
+    if flags & bun_handler.BUN_FLAG_HAS_MODULE_INFO_STRING_TABLE:
+        out.extend(_struct.pack("<II", *module_info_table_ptr))
+
+    compile_argv = bytes(compile_argv)
+    compile_argv_off = len(out)
+    out.extend(compile_argv)
+    out.append(0)
+
+    offsets_off = len(out)
+    out.extend(b"\x00" * 32)
+    out.extend(_TRAILER)
+    if trailing_pad:
+        out.append(0)
+
     _struct.pack_into("<Q", out, offsets_off, offsets_off)
     _struct.pack_into("<I", out, offsets_off + 8, modules_off)
     _struct.pack_into("<I", out, offsets_off + 12, modules_len)
     _struct.pack_into("<I", out, offsets_off + 16, entry_point_id)
     _struct.pack_into("<I", out, offsets_off + 20, compile_argv_off)
-    _struct.pack_into("<I", out, offsets_off + 24, compile_argv_len)
-    _struct.pack_into("<I", out, offsets_off + 28, 0xF)  # flags
+    _struct.pack_into("<I", out, offsets_off + 24, len(compile_argv))
+    _struct.pack_into("<I", out, offsets_off + 28, flags)
     return bytes(out)
 
 
-def _module(name, contents, bytecode=b"", ms=52, origin=b"", module_format=2):
+def _module(name, contents, bytecode=b"", ms=52, origin=b"", module_format=None,
+            module_info=b"", sourcemap=b"", encoding=1, loader=1, side=0,
+            source_hash=0x12345678):
+    name_bytes = name.encode() if isinstance(name, str) else name
+    if module_format is None:
+        # Most synthetic secondary records are inert fixtures, not executable
+        # JavaScript modules. Infer CJS only for the recognizable Claude
+        # entrypoint; tests that intentionally model extra CJS wrappers pass 2
+        # explicitly. This keeps single-module fixture expectations explicit.
+        name_text = name_bytes.decode("ascii", "ignore")
+        origin_bytes = origin.encode() if isinstance(origin, str) else origin
+        is_entry = (
+            bun_handler.BunImage.is_entrypoint_name(name_text)
+            or origin_bytes.endswith(bun_handler.ENTRYPOINT_ORIGIN_SUFFIX.encode("ascii"))
+        )
+        module_format = 2 if is_entry else 0
     return {
-        "name": name.encode() if isinstance(name, str) else name,
+        "name": name_bytes,
         "contents": contents.encode() if isinstance(contents, str) else contents,
-        "sourcemap": b"",
+        "sourcemap": sourcemap,
         "bytecode": bytecode,
-        "moduleInfo": b"",
+        "moduleInfo": module_info,
         "bytecodeOriginPath": origin.encode() if isinstance(origin, str) else origin,
-        "encoding": 1, "loader": 1, "module_format": module_format, "side": 0,
+        "encoding": encoding, "loader": loader, "module_format": module_format,
+        "side": side, "source_hash": source_hash,
     }
 
 
 def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
                   trailing_pad=True, trailing_section=None,
-                  trailing_pt_load=None, entry_point_id=0):
+                  trailing_pt_load=None, entry_point_id=0, flags=0xF,
+                  builtin_bytecode=None, bytecode_string_table=b"",
+                  startup_module_count=None, module_info_string_table=b"",
+                  compile_argv=b""):
     """Assemble a minimal valid bun-on-ELF64 binary (little-endian).
 
-    trailing_section: optional dict {flags, sht, vaddr, size} placed in the file
+    trailing_section: optional dict {flags, sht, vaddr, size, addralign} placed in the file
     AFTER .bun, used to test the growth guards. If its SHF_ALLOC flag is set the
     repack guard must refuse to grow .bun.
 
@@ -472,13 +626,6 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     Returns the binary bytes. Layout is compact but consistent: at least one
     LOAD segment covering .bun, .bun aligned, section header table at EOF.
     """
-    blob = _build_bun_blob(modules, module_struct_size, trailing_pad=trailing_pad,
-                           entry_point_id=entry_point_id)
-    if section_header_size == 8:
-        bun_payload = _struct.pack("<Q", len(blob)) + blob
-    else:
-        bun_payload = _struct.pack("<I", len(blob)) + blob
-
     ehsize = 64
     phentsize = 56
     shentsize = 64
@@ -503,6 +650,26 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     # body_off: start of payloads. Put .bun first, aligned to 16.
     bun_align = 16
     bun_off = (body_off + bun_align - 1) // bun_align * bun_align
+    seg_vaddr = 0x400000
+    bun_vaddr = seg_vaddr + bun_off
+    runtime_blob_vaddr = bun_vaddr + section_header_size
+    blob = _build_bun_blob(
+        modules,
+        module_struct_size,
+        runtime_blob_vaddr,
+        trailing_pad=trailing_pad,
+        entry_point_id=entry_point_id,
+        flags=flags,
+        builtin_bytecode=builtin_bytecode,
+        bytecode_string_table=bytecode_string_table,
+        startup_module_count=startup_module_count,
+        module_info_string_table=module_info_string_table,
+        compile_argv=compile_argv,
+    )
+    if section_header_size == 8:
+        bun_payload = _struct.pack("<Q", len(blob)) + blob
+    else:
+        bun_payload = _struct.pack("<I", len(blob)) + blob
     cursor = bun_off + len(bun_payload)
 
     trailing_off = 0
@@ -510,6 +677,8 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     if trailing_section is not None:
         trailing_size = trailing_section.get("size", 16)
         if trailing_section.get("sht", _SHT_PROGBITS) != _SHT_NOBITS:
+            trailing_align = trailing_section.get("addralign", 1)
+            cursor = (cursor + trailing_align - 1) // trailing_align * trailing_align
             trailing_off = cursor
             cursor += trailing_size
         else:
@@ -554,7 +723,6 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     _struct.pack_into("<H", buf, 62, n_sections - 1)  # e_shstrndx = last (.shstrtab)
 
     # First LOAD segment covers the .bun payload (file and virtual sizes equal).
-    seg_vaddr = 0x400000
     seg_file_end = bun_off + len(bun_payload)
     po = phoff
     _struct.pack_into("<I", buf, po + 0, _PT_LOAD)
@@ -592,7 +760,7 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
     buf[shstr_off:shstr_off + len(names)] = names
 
     # Section headers.
-    def write_sh(idx, name_off, sht, flags, vaddr, off, size):
+    def write_sh(idx, name_off, sht, flags, vaddr, off, size, addralign=0):
         ho = shoff + idx * shentsize
         _struct.pack_into("<I", buf, ho + 0, name_off)
         _struct.pack_into("<I", buf, ho + 4, sht)
@@ -600,24 +768,22 @@ def build_bun_elf(modules, module_struct_size=52, section_header_size=8,
         _struct.pack_into("<Q", buf, ho + 16, vaddr)
         _struct.pack_into("<Q", buf, ho + 24, off)
         _struct.pack_into("<Q", buf, ho + 32, size)
-        # link/info/addralign/entsize left zero except addralign for .bun
-        if sht == _SHT_PROGBITS and name_off == bun_name_off:
-            _struct.pack_into("<Q", buf, ho + 48, 16)  # sh_addralign
+        _struct.pack_into("<Q", buf, ho + 48, addralign)
 
     write_sh(0, 0, _SHT_NULL, 0, 0, 0, 0)
     # .bun section: PROGBITS, WRITE+ALLOC, vaddr inside the LOAD segment.
-    bun_vaddr = seg_vaddr + (bun_off - 0)
     write_sh(1, bun_name_off, _SHT_PROGBITS, _SHF_WRITE | _SHF_ALLOC,
-             bun_vaddr, bun_off, len(bun_payload))
+             bun_vaddr, bun_off, len(bun_payload), 16)
     idx = 2
     if trailing_section is not None:
         write_sh(idx, trailing_name_off,
                  trailing_section.get("sht", _SHT_PROGBITS),
                  trailing_section.get("flags", 0),
                  trailing_section.get("vaddr", 0),
-                 trailing_off, trailing_size)
+                 trailing_off, trailing_size,
+                 trailing_section.get("addralign", 1))
         idx += 1
-    write_sh(idx, shstr_name_off, _SHT_STRTAB, 0, 0, shstr_off, len(names))
+    write_sh(idx, shstr_name_off, _SHT_STRTAB, 0, 0, shstr_off, len(names), 1)
 
     return bytes(buf)
 
@@ -635,6 +801,14 @@ def synthetic_tests():
     print("SYNTHETIC FIXTURE TESTS")
     bh = bun_handler
 
+    def blob_abs(binary, image, relative_offset):
+        section = bh.Elf64(binary).section(".bun")
+        return section["foff"] + image.section_header_size + relative_offset
+
+    def pointer_bytes(image, pointer):
+        off, length = pointer
+        return bytes(image.blob[off:off + length])
+
     # --- baseline: a minimal fixture parses and round-trips (no-op) ---
     mods = [
         _module("/$bunfs/root/src/entrypoints/cli.js",
@@ -651,7 +825,11 @@ def synthetic_tests():
 
     # --- 36-byte module struct form ---
     mods36 = [
-        _module("/$bunfs/root/src/entrypoints/cli.js", "X();", ms=36),
+        _module(
+            "/$bunfs/root/src/entrypoints/cli.js", "X();", ms=36,
+            bytecode=b"legacy-bytecode" * 16,
+            sourcemap=b"legacy-sourcemap",
+        ),
         _module("/$bunfs/root/two.js", "Y();", ms=36),
     ]
     fx36 = build_bun_elf(mods36, module_struct_size=36, section_header_size=8)
@@ -660,6 +838,12 @@ def synthetic_tests():
            f"got {img36.module_struct_size}")
     _check("36-byte form extract_js works", bh.extract_js(fx36) == b"X();")
     _check("36-byte form no-op byte-identical", bh.repack_unchanged(fx36) == fx36)
+    fx36_edit = bh.repack_with_js(fx36, b"Z();")
+    img36_edit = bh.BunImage(fx36_edit)
+    _check("36-byte changed source clears legacy bytecode/sourcemap",
+           img36_edit.modules[0]["bytecode"] == (0, 0)
+           and img36_edit.modules[0]["sourcemap"] == (0, 0))
+    _check("36-byte equal-length edit round-trips", bh.extract_js(fx36_edit) == b"Z();")
 
     # --- zero-length field grow is refused regardless of offset ---
     # Two flavours of zero-length field: (0, 0) tombstone and (N>0, 0)
@@ -709,6 +893,84 @@ def synthetic_tests():
     except bh.BunFormatError as exc:
         raised = "cannot grow zero-length field" in str(exc)
     _check("growing a (N>0, 0) field raises BunFormatError", raised)
+
+    # Empty source modules can be populated: the writer allocates a new owned
+    # NUL-terminated region before the module table and clears stale caches.
+    empty_flags = 0xF | bh.BUN_FLAG_SOURCE_TEXT_CONTIGUOUS | bh.BUN_FLAG_HAS_SOURCE_HASHES
+    empty_mods = [
+        _module(
+            "/$bunfs/root/src/entrypoints/cli.js", b"",
+            bytecode=b"empty-source-bytecode" * 8,
+            sourcemap=b"empty-source-map",
+            source_hash=0xAABBCCDD,
+        )
+    ]
+    fx_empty = build_bun_elf(empty_mods, flags=empty_flags)
+    _check("empty source fixture is patchable", bh.can_handle(fx_empty))
+    populated = b"console.log('(Claude Code)');"
+    out_populated = bh.repack_with_js(fx_empty, populated)
+    img_populated = bh.BunImage(out_populated)
+    _check("zero-length source can grow and round-trip",
+           bh.extract_js(out_populated) == populated)
+    _check("zero-length source allocation is NUL-terminated",
+           img_populated.blob[
+               img_populated.modules[0]["contents"][0]
+               + img_populated.modules[0]["contents"][1]
+           ] == 0)
+    _check("zero-length source growth clears hash and compiled state",
+           img_populated.source_hash(0) == 0
+           and img_populated.modules[0]["bytecode"] == (0, 0)
+           and img_populated.modules[0]["sourcemap"] == (0, 0))
+    _check("zero-length source growth clears contiguous-source promise",
+           not (img_populated.flags & bh.BUN_FLAG_SOURCE_TEXT_CONTIGUOUS))
+    emptied_again = bh.repack_with_js(out_populated, b"")
+    regrown = bh.repack_with_js(emptied_again, b"export{};")
+    _check("source can be emptied and populated again",
+           bh.extract_js(emptied_again) == b""
+           and bh.extract_js(regrown) == b"export{};"
+           and bh.can_handle(regrown))
+
+    # Multiple empty ESM chunks are allocated as distinct owned islands in one
+    # splice. This catches pointer arithmetic that accidentally makes every
+    # zero-length source point at the last inserted module.
+    empty_split_mods = [
+        _module(
+            "/$bunfs/root/src/entrypoints/cli.js", b"",
+            bytecode=b"empty-entry-bytecode" * 8,
+            source_hash=0x11111111,
+            module_format=1,
+        ),
+        _module(
+            "/$bunfs/root/empty-chunk.js", b"",
+            bytecode=b"empty-chunk-bytecode" * 8,
+            source_hash=0x22222222,
+            module_format=1,
+        ),
+    ]
+    fx_empty_split = build_bun_elf(empty_split_mods, flags=empty_flags)
+    extracted_empty_split = bh.extract_js(fx_empty_split)
+    populated_empty_split = _replace_extracted_modules(
+        extracted_empty_split,
+        {0: b'import"/$bunfs/root/empty-chunk.js";',
+         1: b"export const populated=1;"},
+    )
+    out_empty_split = bh.repack_with_js(
+        fx_empty_split, populated_empty_split)
+    img_empty_split = bh.BunImage(out_empty_split)
+    ranges_empty_split = [
+        (m["contents"][0], m["contents"][0] + m["contents"][1])
+        for m in img_empty_split.source_modules()
+    ]
+    _check("multiple zero-length source modules grow independently",
+           bh.extract_js(out_empty_split) == populated_empty_split
+           and ranges_empty_split[0][1] <= ranges_empty_split[1][0])
+    _check("multiple zero-length source modules are NUL-terminated",
+           all(img_empty_split.blob[end] == 0
+               for _start, end in ranges_empty_split))
+    _check("multiple zero-length source modules all shed compiled state",
+           all(img_empty_split.source_hash(i) == 0
+                   and img_empty_split.modules[i]["bytecode"] == (0, 0)
+               for i in (0, 1)))
 
     # --- entry_point_id is preferred over a search by name ---
     # Build a fixture where module 0 is NOT an entrypoint and module 2 IS one,
@@ -788,6 +1050,83 @@ def synthetic_tests():
            img36.bytecode_origin_path(img36.modules[0]) == "",
            f"got {img36.bytecode_origin_path(img36.modules[0])!r}")
 
+    # --- older bundled-CJS builds expose the entrypoint AND CJS wrappers ---
+    # Claude 2.1.234 has this shape: one large CJS entrypoint, three small CJS
+    # native-addon wrappers, and unrelated file assets. The editing surface must
+    # include every executable JS record without sweeping in those assets.
+    cjs_prologue = (
+        b"// @bun @bytecode @bun-cjs\n"
+        b"(function(exports, require, module, __filename, __dirname) {"
+    )
+    cjs_mods = [
+        _module(
+            "/$bunfs/root/cli",
+            cjs_prologue + b'console.log("(Claude Code)");})',
+            bytecode=b"cjs-entry-bytecode" * 10,
+            origin="/$bunfs/root/src/entrypoints/cli.js",
+            module_format=2,
+            source_hash=0x11111111,
+        ),
+        _module(
+            "/$bunfs/root/image-processor.js",
+            cjs_prologue
+            + b'module.exports=require("/$bunfs/root/image-processor.node");})',
+            bytecode=b"cjs-wrapper-bytecode" * 10,
+            module_format=2,
+            source_hash=0x22222222,
+        ),
+        _module(
+            "/$bunfs/root/audio-capture.js",
+            cjs_prologue
+            + b'module.exports=require("/$bunfs/root/audio-capture.node");})',
+            module_format=2,
+            source_hash=0x33333333,
+        ),
+        _module(
+            "/$bunfs/root/chart.umd.min.js", b"/* file asset, not a module */",
+            module_format=0, loader=5, encoding=0, source_hash=0,
+        ),
+    ]
+    cjs_flags = 0xF | bh.BUN_FLAG_HAS_SOURCE_HASHES
+    fx_cjs = build_bun_elf(cjs_mods, flags=cjs_flags)
+    img_cjs = bh.BunImage(fx_cjs)
+    extracted_cjs = bh.extract_js(fx_cjs)
+    cjs_records = bh.split_extracted_js(extracted_cjs)
+    _check("bundled CJS extraction includes entrypoint and wrappers",
+           [(index, name) for index, name, _ in cjs_records] == [
+               (0, b"/$bunfs/root/cli"),
+               (1, b"/$bunfs/root/image-processor.js"),
+               (2, b"/$bunfs/root/audio-capture.js"),
+           ])
+    _check("bundled CJS extraction excludes file assets",
+           all(index != 3 for index, _name, _contents in cjs_records))
+    _check("bundled CJS no-op repack is byte-identical",
+           bh.repack_unchanged(fx_cjs) == fx_cjs)
+
+    old_wrapper = cjs_records[1][2]
+    new_wrapper = old_wrapper.replace(
+        b"image-processor.node", b"image-processor-v2.node")
+    patched_cjs = _replace_extracted_modules(
+        extracted_cjs, {1: new_wrapper})
+    changed_cjs = bh.changed_js_modules(extracted_cjs, patched_cjs)
+    _check("bundled CJS changed-module detection finds only wrapper",
+           [(index, name) for index, name, _ in changed_cjs]
+           == [(1, b"/$bunfs/root/image-processor.js")])
+    out_cjs = bh.repack_with_js(fx_cjs, patched_cjs)
+    img_cjs_after = bh.BunImage(out_cjs)
+    _check("bundled CJS wrapper edit maps to its own module",
+           img_cjs_after.read_field(img_cjs_after.modules[1], "contents")
+           == new_wrapper
+           and img_cjs_after.read_field(img_cjs_after.modules[0], "contents")
+           == img_cjs.read_field(img_cjs.modules[0], "contents"))
+    _check("bundled CJS changed wrapper sheds compiled state",
+           img_cjs_after.source_hash(1) == 0
+           and img_cjs_after.modules[1]["bytecode"] == (0, 0))
+    _check("bundled CJS untouched entrypoint retains compiled state",
+           img_cjs_after.source_hash(0) == img_cjs.source_hash(0)
+           and img_cjs_after.read_field(img_cjs_after.modules[0], "bytecode")
+           == img_cjs.read_field(img_cjs.modules[0], "bytecode"))
+
     # --- Bun 1.4 split ESM builds expose all JavaScript chunks ---
     split_mods = [
         _module("/$bunfs/root/cli",
@@ -843,6 +1182,100 @@ def synthetic_tests():
     except bh.BunFormatError as exc:
         raised = "marker" in str(exc)
     _check("split ESM repack refuses changed module markers", raised)
+
+    # --- current optional-tail layout and changed-module invalidation ---
+    cache_flags = (
+        0xF
+        | bh.BUN_FLAG_HAS_SOURCE_HASHES
+        | bh.BUN_FLAG_HAS_BUILTIN_BYTECODE
+        | bh.BUN_FLAG_HAS_BYTECODE_STRING_TABLE
+        | bh.BUN_FLAG_HAS_STARTUP_MODULE_COUNT
+        | bh.BUN_FLAG_HAS_MODULE_INFO_STRING_TABLE
+    )
+    cache_mods = [
+        _module(
+            "/$bunfs/root/cli",
+            'import{answer}from"/$bunfs/root/chunk.js";console.log(answer);',
+            bytecode=b"entry-bytecode" * 10,
+            module_info=b"entry-module-info",
+            sourcemap=b"entry-sourcemap",
+            origin="/$bunfs/root/src/entrypoints/cli.js",
+            module_format=1,
+            source_hash=0x11111111,
+        ),
+        _module(
+            "/$bunfs/root/chunk.js",
+            "export let answer=1;",
+            bytecode=b"chunk-bytecode" * 10,
+            module_info=b"chunk-module-info",
+            sourcemap=b"chunk-sourcemap",
+            origin="/$bunfs/root/chunk.js",
+            module_format=1,
+            source_hash=0x22222222,
+        ),
+    ]
+    fx_cache = build_bun_elf(
+        cache_mods,
+        flags=cache_flags,
+        builtin_bytecode=[(7, b"builtin-cache" * 20)],
+        bytecode_string_table=b"bytecode-string-table" * 20,
+        startup_module_count=1,
+        module_info_string_table=b"module-info-string-table",
+        compile_argv=b"--smol",
+    )
+    before_cache = bh.BunImage(fx_cache)
+    _check("optional-tail fixture is patchable", bh.can_handle(fx_cache))
+    _check("optional-tail no-op remains byte-identical",
+           bh.repack_unchanged(fx_cache) == fx_cache)
+    _check("source hashes parse in module order",
+           [before_cache.source_hash(i) for i in range(2)]
+           == [0x11111111, 0x22222222])
+    _check("startup-module count parses", before_cache.startup_module_count == 1)
+    _check("compile argv parses",
+           bytes(before_cache.blob[
+               before_cache.compile_argv_off:
+               before_cache.compile_argv_off + before_cache.compile_argv_len
+           ]) == b"--smol")
+
+    cache_js = bh.extract_js(fx_cache)
+    cache_patched = cache_js.replace(
+        b"export let answer=1;", b"export let answer=1000;")
+    cache_out = bh.repack_with_js(fx_cache, cache_patched)
+    after_cache = bh.BunImage(cache_out)
+    _check("optional-tail source edit round-trips",
+           bh.extract_js(cache_out) == cache_patched)
+    _check("changed module source hash is cleared",
+           after_cache.source_hash(1) == 0)
+    _check("changed module compiled pointers are detached",
+           all(after_cache.modules[1][field] == (0, 0)
+               for field in ("bytecode", "moduleInfo", "sourcemap")))
+    _check("unchanged module source hash is retained",
+           after_cache.source_hash(0) == 0x11111111)
+    _check("unchanged module compiled payloads are retained",
+           all(after_cache.read_field(after_cache.modules[0], field)
+               == before_cache.read_field(before_cache.modules[0], field)
+               for field in ("bytecode", "moduleInfo", "sourcemap")))
+    _check("builtin bytecode pointer remaps and payload survives",
+           after_cache.builtin_bytecode[0]["bytes"]
+               != before_cache.builtin_bytecode[0]["bytes"]
+           and pointer_bytes(after_cache, after_cache.builtin_bytecode[0]["bytes"])
+               == pointer_bytes(before_cache, before_cache.builtin_bytecode[0]["bytes"]))
+    _check("bytecode string-table pointer remaps and payload survives",
+           after_cache.bytecode_string_table != before_cache.bytecode_string_table
+           and pointer_bytes(after_cache, after_cache.bytecode_string_table)
+               == pointer_bytes(before_cache, before_cache.bytecode_string_table))
+    _check("module-info string-table pointer remaps and payload survives",
+           after_cache.module_info_string_table != before_cache.module_info_string_table
+           and pointer_bytes(after_cache, after_cache.module_info_string_table)
+               == pointer_bytes(before_cache, before_cache.module_info_string_table))
+    _check("compile argv remaps and survives",
+           after_cache.compile_argv_off != before_cache.compile_argv_off
+           and bytes(after_cache.blob[
+               after_cache.compile_argv_off:
+               after_cache.compile_argv_off + after_cache.compile_argv_len
+           ]) == b"--smol")
+    _check("alignment padding keeps remapped cache regions valid",
+           bh.can_handle(cache_out), f"file delta={len(cache_out) - len(fx_cache)}")
 
     # --- 36-vs-52 disambiguation when the table length divides both ---
     # 13 * 36 == 9 * 52 == 468. Record 0 is identical through its first four
@@ -948,6 +1381,49 @@ def synthetic_tests():
     _check("synthetic shrink smaller file", len(out_shrink) < len(fx),
            f"{len(out_shrink)} vs {len(fx)}")
 
+    # A one-byte source growth before an 8-byte-aligned metadata section must
+    # acquire seven bytes of anonymous Bun padding. Runtime bytecode alignment
+    # is not the only alignment contract in the file.
+    fx_file_align = build_bun_elf(
+        mods,
+        trailing_section={"flags": 0, "sht": _SHT_PROGBITS,
+                          "vaddr": 0, "size": 32, "addralign": 8},
+    )
+    js_file_align = bh.extract_js(fx_file_align)
+    out_file_align = bh.repack_with_js(fx_file_align, js_file_align + b"X")
+    elf_file_align = bh.Elf64(out_file_align)
+    trail_file_align = elf_file_align.section(".trail")
+    _check("ELF metadata alignment padding rounds +1 source delta to +8",
+           len(out_file_align) - len(fx_file_align) == 8)
+    _check("shifted section and section-header table remain aligned",
+           trail_file_align["foff"] % trail_file_align["addralign"] == 0
+           and elf_file_align.e_shoff % 8 == 0)
+
+    # The low-level ELF splice is guarded too; callers cannot bypass the Bun
+    # edit planner and produce a misaligned metadata tail.
+    raw_wrapped = bytearray(
+        fx_file_align[
+            bh.Elf64(fx_file_align).section(".bun")["foff"]:
+            bh.Elf64(fx_file_align).section(".bun")["foff"]
+            + bh.Elf64(fx_file_align).section(".bun")["size"]
+        ]
+    )
+    raw_wrapped.append(0)
+    misaligned_low_level_rejected = False
+    try:
+        bh._repack_section_elf(fx_file_align, raw_wrapped)
+    except bh.BunFormatError as exc:
+        misaligned_low_level_rejected = "file alignment" in str(exc)
+    _check("low-level ELF repack rejects misaligned section delta",
+           misaligned_low_level_rejected)
+
+    fx_bad_addralign = bytearray(fx_file_align)
+    bad_addralign_trail = bh.Elf64(bytes(fx_bad_addralign)).section(".trail")
+    _struct.pack_into(
+        "<Q", fx_bad_addralign, bad_addralign_trail["hdr_off"] + 48, 3)
+    _check("non-power-of-two sh_addralign is rejected",
+           not bh.can_handle(bytes(fx_bad_addralign)))
+
     # --- multiple simultaneous edits via _apply_blob_edits ---
     img2 = bh.BunImage(fx)
     e_idx = img2.entrypoint_module()["index"]
@@ -1029,31 +1505,253 @@ def synthetic_tests():
         raised = "overlap" in str(exc)
     _check("guard: refuse overlapping payload section", raised)
 
-    # --- SAFETY GUARD: spanning segment must refuse on growth ---
-    # Add a second LOAD segment that starts after .bun and spans bun_end while
-    # growing. Easiest: corrupt the existing single segment so it does NOT
-    # contain .bun (forcing containing=None) yet spans bun_end, then grow.
-    fx_span = bytearray(build_bun_elf(mods))
+    # --- SAFETY GUARD: an unrelated file-backed segment intersecting .bun ---
+    # Keep both LOAD headers individually valid, but move the second segment's
+    # file view inside .bun. The writer must reject the overlapping ownership.
+    fx_span = bytearray(build_bun_elf(
+        mods, trailing_pt_load={"p_align": 1, "p_filesz": 64}))
     elf_s = bh.Elf64(bytes(fx_span))
     bun_s = elf_s.section(".bun")
-    seg = elf_s.segments[0]
-    # Shrink the segment so it starts after .bun start but still crosses bun_end,
-    # and does not satisfy the containing test (vaddr/file range no longer covers
-    # the whole .bun). Set p_offset just past bun start.
-    new_seg_off = bun_s["foff"] + 8
-    new_seg_filesz = (bun_s["foff"] + bun_s["size"]) - new_seg_off + 4  # crosses bun_end
-    _struct.pack_into("<Q", fx_span, seg["hdr_off"] + 8, new_seg_off)
-    _struct.pack_into("<Q", fx_span, seg["hdr_off"] + 32, new_seg_filesz)
+    seg2 = elf_s.segments[1]
+    _struct.pack_into("<Q", fx_span, seg2["hdr_off"] + 8, bun_s["foff"] + 8)
     raised = False
     try:
         img_span = bh.BunImage(bytes(fx_span))
-        ep_s = img_span.entrypoint_module()
-        big = bh.extract_js(bytes(fx_span)) + b"Y" * 300
-        nb = bh._apply_blob_edits(img_span, {(ep_s["index"], "contents"): big})
-        bh._repack_section_elf(img_span.data, bh._wrap_section(nb, img_span.section_header_size))
+        bh._repack_section_elf(
+            img_span.data,
+            bh._wrap_section(bytes(img_span.blob), img_span.section_header_size),
+        )
     except bh.BunFormatError as exc:
-        raised = "unrelated segments" in str(exc)
-    _check("guard: refuse growth inside spanning segment", raised)
+        raised = "intersects unrelated" in str(exc)
+    _check("guard: refuse unrelated segment intersecting .bun", raised)
+
+    # --- adversarial structure acceptance: every writer precondition ---
+    # byte_count must identify the offsets structure exactly; accepting another
+    # value used to make a no-op rewrite silently canonicalize the input.
+    fx_byte_count = bytearray(fx)
+    img_byte_count = bh.BunImage(fx)
+    _struct.pack_into(
+        "<Q", fx_byte_count,
+        blob_abs(fx, img_byte_count, img_byte_count.offsets_off),
+        img_byte_count.offsets_off + 1,
+    )
+    _check("mismatched byte_count is rejected", not bh.can_handle(bytes(fx_byte_count)))
+
+    fx_unknown_flags = bytearray(fx)
+    _struct.pack_into(
+        "<I", fx_unknown_flags,
+        blob_abs(fx, img_byte_count, img_byte_count.offsets_off + 28),
+        img_byte_count.flags | (1 << 31),
+    )
+    _check("unknown optional-record flag bits are rejected",
+           not bh.can_handle(bytes(fx_unknown_flags)))
+
+    table_abs = blob_abs(fx, img_byte_count, img_byte_count.modules_off)
+    first_name = img_byte_count.modules[0]["name"]
+    first_contents = img_byte_count.modules[0]["contents"]
+
+    fx_duplicate_name = bytearray(fx)
+    _struct.pack_into(
+        "<II", fx_duplicate_name,
+        table_abs + img_byte_count.module_struct_size,
+        *first_name,
+    )
+    _check("duplicate module names are rejected",
+           not bh.can_handle(bytes(fx_duplicate_name)))
+
+    fx_aliased_contents = bytearray(fx)
+    _struct.pack_into(
+        "<II", fx_aliased_contents,
+        table_abs + img_byte_count.module_struct_size + 8,
+        *first_contents,
+    )
+    _check("aliased module contents are rejected",
+           not bh.can_handle(bytes(fx_aliased_contents)))
+
+    fx_table_contents = bytearray(fx)
+    _struct.pack_into(
+        "<II", fx_table_contents,
+        table_abs + img_byte_count.module_struct_size + 8,
+        img_byte_count.modules_off, 1,
+    )
+    _check("module contents intersecting the module table are rejected",
+           not bh.can_handle(bytes(fx_table_contents)))
+
+    fx_misaligned_bytecode = bytearray(fx)
+    bytecode_off, bytecode_len = img_byte_count.modules[0]["bytecode"]
+    _struct.pack_into(
+        "<II", fx_misaligned_bytecode,
+        table_abs + 24,
+        bytecode_off + 1, bytecode_len - 1,
+    )
+    _check("misaligned bytecode pointers are rejected",
+           not bh.can_handle(bytes(fx_misaligned_bytecode)))
+
+    fx_bad_terminator = bytearray(fx)
+    name_end = blob_abs(
+        fx, img_byte_count, first_name[0] + first_name[1])
+    fx_bad_terminator[name_end] = ord("X")
+    _check("missing module-name terminator is rejected",
+           not bh.can_handle(bytes(fx_bad_terminator)))
+
+    fx_interior_name_nul = bytearray(fx)
+    interior_name_at = blob_abs(fx, img_byte_count, first_name[0] + 10)
+    fx_interior_name_nul[interior_name_at] = 0
+    _check("interior NUL in a module name is rejected",
+           not bh.can_handle(bytes(fx_interior_name_nul)))
+
+    fx_interior_argv_nul = build_bun_elf(
+        mods, compile_argv=b"--smol\x00--inspect")
+    _check("interior NUL in compile argv is rejected",
+           not bh.can_handle(fx_interior_argv_nul))
+
+    fx_bad_loader = bytearray(fx)
+    fx_bad_loader[table_abs + 49] = bh.BUN_MAX_LOADER + 1
+    _check("invalid Loader discriminants are rejected",
+           not bh.can_handle(bytes(fx_bad_loader)))
+
+    fx_arm64 = bytearray(fx)
+    _struct.pack_into("<H", fx_arm64, 18, 0xB7)
+    _check("non-x86-64 ELF is rejected", not bh.can_handle(bytes(fx_arm64)))
+
+    fx_freebsd = bytearray(fx)
+    fx_freebsd[7] = 9  # ELFOSABI_FREEBSD
+    _check("non-Linux ELF OSABI is rejected", not bh.can_handle(bytes(fx_freebsd)))
+
+    utf16_mods = [
+        _module(
+            "/$bunfs/root/src/entrypoints/cli.js",
+            "console.log('(Claude Code)');".encode("utf-16le"),
+            encoding=2,
+        )
+    ]
+    fx_utf16 = build_bun_elf(utf16_mods)
+    utf16_parses = False
+    utf16_extract_rejected = False
+    try:
+        bh.BunImage(fx_utf16)
+        utf16_parses = True
+        bh.extract_js(fx_utf16)
+    except NotImplementedError:
+        utf16_extract_rejected = True
+    _check("UTF-16 graph structure parses", utf16_parses)
+    _check("UTF-16 patchable source is explicitly unsupported",
+           utf16_extract_rejected and not bh.can_handle(fx_utf16))
+
+    latin1_non_ascii = build_bun_elf([
+        _module("/$bunfs/root/src/entrypoints/cli.js", b"x=\xe9;")
+    ])
+    _check("non-ASCII Latin-1 source is rejected pending UTF-16 support",
+           not bh.can_handle(latin1_non_ascii))
+    non_ascii_edit_rejected = False
+    try:
+        bh.repack_with_js(fx, bh.extract_js(fx) + "é".encode("utf-8"))
+    except NotImplementedError:
+        non_ascii_edit_rejected = True
+    _check("non-ASCII source edits are rejected instead of mis-encoded",
+           non_ascii_edit_rejected)
+
+    # Full interval checks cover equal-start and containing sections, not only a
+    # second section whose start lies strictly inside `.bun`.
+    for mode in ("same-start", "contains"):
+        candidate = bytearray(build_bun_elf(
+            mods, trailing_section={"flags": 0, "sht": _SHT_PROGBITS,
+                                    "vaddr": 0, "size": 32}))
+        candidate_elf = bh.Elf64(bytes(candidate))
+        candidate_bun = candidate_elf.section(".bun")
+        candidate_trail = candidate_elf.section(".trail")
+        if mode == "same-start":
+            new_off, new_size = candidate_bun["foff"], 8
+        else:
+            new_off = candidate_bun["foff"] - 8
+            new_size = candidate_bun["size"] + 16
+        _struct.pack_into("<Q", candidate, candidate_trail["hdr_off"] + 24, new_off)
+        _struct.pack_into("<Q", candidate, candidate_trail["hdr_off"] + 32, new_size)
+        _check(f"{mode} section overlap is rejected",
+               not bh.can_handle(bytes(candidate)))
+
+    fx_nobits_alloc = build_bun_elf(
+        mods,
+        trailing_section={"flags": _SHF_ALLOC, "sht": _SHT_NOBITS,
+                          "vaddr": 0x900000, "size": 64},
+    )
+    _check("later allocated NOBITS section makes resize unsupported",
+           not bh.can_handle(fx_nobits_alloc))
+
+    fx_readonly_section = bytearray(fx)
+    readonly_elf = bh.Elf64(bytes(fx_readonly_section))
+    readonly_bun = readonly_elf.section(".bun")
+    _struct.pack_into(
+        "<Q", fx_readonly_section, readonly_bun["hdr_off"] + 8,
+        readonly_bun["flags"] & ~bh.ELF_SHF_WRITE,
+    )
+    _check("read-only .bun section is rejected",
+           not bh.can_handle(bytes(fx_readonly_section)))
+
+    fx_readonly_segment = bytearray(fx)
+    readonly_seg = bh.Elf64(bytes(fx_readonly_segment)).segments[0]
+    _struct.pack_into(
+        "<I", fx_readonly_segment, readonly_seg["hdr_off"] + 4,
+        readonly_seg["flags"] & ~bh.ELF_PF_WRITE,
+    )
+    _check("read-only containing PT_LOAD is rejected",
+           not bh.can_handle(bytes(fx_readonly_segment)))
+
+    fx_bad_mapping_relation = bytearray(fx)
+    relation_elf = bh.Elf64(bytes(fx_bad_mapping_relation))
+    relation_bun = relation_elf.section(".bun")
+    _struct.pack_into(
+        "<Q", fx_bad_mapping_relation, relation_bun["hdr_off"] + 16,
+        relation_bun["vaddr"] + 1,
+    )
+    _check(".bun sh_addr must match its PT_LOAD file mapping",
+           not bh.can_handle(bytes(fx_bad_mapping_relation)))
+
+    fx_zero_fill_tail = bytearray(fx)
+    zero_fill_segment = bh.Elf64(bytes(fx_zero_fill_tail)).segments[0]
+    _struct.pack_into(
+        "<Q", fx_zero_fill_tail, zero_fill_segment["hdr_off"] + 40,
+        zero_fill_segment["memsz"] + 64,
+    )
+    _check("PT_LOAD zero-fill tail makes resize unsupported",
+           not bh.can_handle(bytes(fx_zero_fill_tail)))
+
+    # Extend the containing PT_LOAD over a zeroed non-ALLOC section after
+    # `.bun`. Even though the bytes are harmless padding-like zeros, the section
+    # independently describes their file position, whose virtual relation this
+    # writer does not rewrite.
+    fx_described_tail = bytearray(build_bun_elf(
+        mods, trailing_section={"flags": 0, "sht": _SHT_PROGBITS,
+                                "vaddr": 0, "size": 32}))
+    described_elf = bh.Elf64(bytes(fx_described_tail))
+    described_bun = described_elf.section(".bun")
+    described_trail = described_elf.section(".trail")
+    described_segment = described_elf.segments[0]
+    fx_described_tail[
+        described_trail["foff"]:
+        described_trail["foff"] + described_trail["size"]
+    ] = b"\x00" * described_trail["size"]
+    described_end = described_trail["foff"] + described_trail["size"]
+    _struct.pack_into(
+        "<Q", fx_described_tail, described_segment["hdr_off"] + 32,
+        described_end - described_segment["foff"],
+    )
+    _struct.pack_into(
+        "<Q", fx_described_tail, described_segment["hdr_off"] + 40,
+        described_end - described_segment["foff"],
+    )
+    _check("section-described PT_LOAD tail makes resize unsupported",
+           not bh.can_handle(bytes(fx_described_tail)))
+
+    # A later non-LOAD program header also carries its own p_offset/p_vaddr
+    # relationship. Turn the fixture's second LOAD into PT_NOTE to prove the
+    # generic auxiliary-segment guard, not only the later-LOAD guard.
+    fx_aux_segment = bytearray(build_bun_elf(
+        mods, trailing_pt_load={"p_align": 4, "p_filesz": 64}))
+    aux_segment = bh.Elf64(bytes(fx_aux_segment)).segments[1]
+    _struct.pack_into("<I", fx_aux_segment, aux_segment["hdr_off"], 4)  # PT_NOTE
+    _check("later auxiliary file-backed segment makes resize unsupported",
+           not bh.can_handle(bytes(fx_aux_segment)))
 
     # --- malformed inputs ---
     _check("too-small file rejected", not bh.can_handle(b"\x7fELF\x02\x01"))
@@ -1074,67 +1772,53 @@ def synthetic_tests():
     _struct.pack_into("<Q", fx_badlen, bun_bl["foff"], 0xDEADBEEF)
     _check("inconsistent length header rejected", not bh.can_handle(bytes(fx_badlen)))
 
-    # --- unified PT_LOAD invariant gate: for any nonzero .bun delta, every
-    #     later PT_LOAD must keep `(p_offset - p_vaddr) mod p_align == 0`. The
-    #     guard fires symmetrically on grow AND shrink, and lets aligned deltas
-    #     and the no-op delta through. ---
+    # --- resize geometry: any later PT_LOAD makes a nonzero resize unsafe ---
+    # Page congruence alone is insufficient: growing the containing mapping can
+    # overlap a later mapping even when the later p_offset stays congruent to its
+    # p_vaddr. Reject aligned and unaligned grow/shrink symmetrically.
     def _try_resize(fx_bytes, contents_delta):
-        """Attempt a .bun resize by editing the entrypoint's contents by
-        `contents_delta` bytes. Returns (BunFormatError_message, output_size)."""
         img_loc = bh.BunImage(fx_bytes)
-        ep_loc = img_loc.entrypoint_module()
         js_loc = bh.extract_js(fx_bytes)
-        new_js = js_loc + b"P" * contents_delta if contents_delta > 0 else js_loc[:contents_delta]
+        new_js = (js_loc + b"P" * contents_delta
+                  if contents_delta > 0 else js_loc[:contents_delta])
         try:
             out = bh.repack_with_js(fx_bytes, new_js)
             return None, len(out)
         except bh.BunFormatError as exc:
             return str(exc), None
 
-    # Fixture A: trailing PT_LOAD with p_align=0x1000. Page-aligned delta passes;
-    # a 7-byte non-page-aligned grow must fire the invariant.
-    fx_load = build_bun_elf(mods, trailing_pt_load={"p_align": 0x1000, "p_filesz": 64})
-    err_grow7, _ = _try_resize(fx_load, +7)
-    _check("gate fires on non-page-aligned grow (delta=+7, p_align=0x1000)",
-           err_grow7 is not None and "PT_LOAD invariant" in err_grow7, repr(err_grow7))
-
-    err_shrink5, _ = _try_resize(fx_load, -5)
-    _check("gate fires on non-page-aligned shrink (delta=-5, p_align=0x1000)",
-           err_shrink5 is not None and "PT_LOAD invariant" in err_shrink5, repr(err_shrink5))
-
-    # No-op pipeline (delta == 0) still proceeds.
-    img_noop = bh.BunImage(fx_load)
-    out_noop = bh.repack_unchanged(fx_load)
-    _check("gate does not block delta == 0 (no-op identical)", out_noop == fx_load)
-
-    # An aligned delta with a later PT_LOAD passes the gate. Build a fixture with
-    # a small p_align (4) so a small delta (multiple of 4) is admissible without
-    # forcing 4 KB of edit padding.
-    fx_load_small = build_bun_elf(mods, trailing_pt_load={"p_align": 4, "p_filesz": 64})
-    err_grow4, sz_grow4 = _try_resize(fx_load_small, +4)
-    _check("gate admits aligned grow (delta=+4, p_align=4)",
-           err_grow4 is None and sz_grow4 is not None,
-           repr(err_grow4) if err_grow4 else f"size={sz_grow4}")
-
-    # Page-aligned grow/shrink with the realistic p_align=0x1000 must also pass.
-    # This locks the implementation against a too-conservative "reject any
-    # nonzero delta whenever a later PT_LOAD exists" reading of the gate.
-    # We need the entrypoint's contents to be large enough to shrink by 0x1000.
     big_js = b"console.log('(Claude Code)');" + b"X" * 0x2000
     big_mods = [
         _module("/$bunfs/root/src/entrypoints/cli.js", big_js,
                 bytecode=b"\xd4zFT" + b"\x00" * 40),
         _module("/$bunfs/root/helper.js", "module.exports={};"),
     ]
-    fx_page = build_bun_elf(big_mods, trailing_pt_load={"p_align": 0x1000, "p_filesz": 64})
-    err_grow_page, sz_grow_page = _try_resize(fx_page, +0x1000)
-    _check("gate admits page-aligned grow (delta=+0x1000, p_align=0x1000)",
-           err_grow_page is None and sz_grow_page is not None,
-           repr(err_grow_page) if err_grow_page else f"size={sz_grow_page}")
-    err_shrink_page, sz_shrink_page = _try_resize(fx_page, -0x1000)
-    _check("gate admits page-aligned shrink (delta=-0x1000, p_align=0x1000)",
-           err_shrink_page is None and sz_shrink_page is not None,
-           repr(err_shrink_page) if err_shrink_page else f"size={sz_shrink_page}")
+    fx_load = build_bun_elf(
+        big_mods, trailing_pt_load={"p_align": 0x1000, "p_filesz": 64})
+    for delta, label in (
+        (+7, "unaligned grow +7"),
+        (-9, "unaligned shrink -9"),
+        (+0x1000, "page-aligned grow +0x1000"),
+        (-0x1000, "page-aligned shrink -0x1000"),
+    ):
+        error, _size = _try_resize(fx_load, delta)
+        _check(
+            f"later PT_LOAD rejected for {label}",
+            error is not None and "containing PT_LOAD is final" in error,
+            repr(error),
+        )
+
+    # A five-byte source shrink is exactly absorbed by five bytes of metadata
+    # alignment padding, so the ELF section does not resize and no later
+    # segment moves. This is safe even though general nonzero resizing of the
+    # layout is unsupported.
+    zero_delta_error, zero_delta_size = _try_resize(fx_load, -5)
+    _check("alignment padding may turn a source shrink into ELF delta zero",
+           zero_delta_error is None and zero_delta_size == len(fx_load),
+           repr(zero_delta_error))
+
+    _check("later PT_LOAD does not block delta == 0",
+           bh.repack_unchanged(fx_load) == fx_load)
 
     # --- bounds checks: a crafted modules_len that overruns the blob must raise
     #     BunFormatError, NOT let struct.error escape ---
@@ -1200,10 +1884,11 @@ def main():
 
     binary = find_binary()
     if not binary:
-        print("GATE 1-3: SKIPPED (no native binary found; set CLAUDE_NATIVE_BINARY "
-              "or pass a path, or install under ~/.local/share/claude/versions)")
+        print("REAL GATES 1-3,5-9: SKIPPED (no native binary found; set "
+              "CLAUDE_NATIVE_BINARY, pass a path, or install under "
+              "~/.local/share/claude/versions)")
         ok = all(results)
-        print(f"\nSUITE {'PASS' if ok else 'FAIL'} (gate 4 only; 1-3 skipped)")
+        print(f"\nSUITE {'PASS' if ok else 'FAIL'} (synthetic + gate 4 only; real gates skipped)")
         return 0 if ok else 1
 
     print(f"binary: {binary}")
@@ -1211,7 +1896,7 @@ def main():
         data = f.read()
     print(f"format: {bun_handler.detect_format(data)}  ({len(data)} bytes)")
     if not bun_handler.can_handle(data):
-        print("GATE 1-3: cannot run, handler does not support this binary")
+        print("REAL GATES: cannot run; handler does not support this binary")
         print("\nSUITE FAIL")
         return 1
 
@@ -1219,7 +1904,7 @@ def main():
     # SKIP -> FAIL for the listed gate ids; CLAUDE_PFG_STRICT_GATES_WAIVE=gate7
     # overrides strict mode for that gate (SKIP stays SKIP). Intended for CI
     # release synthesis (per plan section 6 step 11b) so the gates that prove
-    # the most (esp. gate 7's control-flow proof) cannot silently degrade when
+    # the most (especially gates 7-9's stale-cache proofs) cannot silently degrade when
     # a future Anthropic bundle bump moves the anchor. Default with no env var is
     # unchanged: skip-permissive for local dev.
     strict_gates = set(g.strip() for g in os.environ.get(
@@ -1231,8 +1916,10 @@ def main():
         ("gate2", "GATE 2 length-changing + runs + shows edit", gate2_length_change),
         ("gate3", "GATE 3 determinism", gate3_determinism),
         ("gate5", "GATE 5 shrinking edit (negative delta)", gate5_shrink),
-        ("gate6", "GATE 6 multi-edit remap + runs", gate6_multi_edit),
-        ("gate7", "GATE 7 control-flow edit (Patch-M shape)", gate7_control_flow),
+        ("gate6", "GATE 6 public multi-module edit + runs", gate6_multi_edit),
+        ("gate7", "GATE 7 equal-length control-flow edit", gate7_equal_length_control_flow),
+        ("gate8", "GATE 8 equal-length literal edit", gate8_equal_length_literal),
+        ("gate9", "GATE 9 dependency re-analysis", gate9_dependency_reanalysis),
     ]:
         ok, detail = fn(data)
         if ok is None:
