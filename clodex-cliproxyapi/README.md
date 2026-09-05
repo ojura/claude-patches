@@ -23,6 +23,9 @@ Durable architecture, evidence, and localhost reliability probes for the Claude 
   canonical focused evidence for queue/normalization behavior and direct translation.
 - [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md) —
   absorbed focused narrative retained for readable sequencing.
+- [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md) —
+  source-confirmed map of Claude Messages requests through Codex Responses requests and
+  back to Claude streaming and non-streaming responses.
 - [`tools/repair_empty_text_blocks.py`](tools/repair_empty_text_blocks.py) — finds and
   repairs the empty text content blocks that make a proxied session unresumable on a
   Claude model. See [Repairing a transcript](#repairing-a-transcript).

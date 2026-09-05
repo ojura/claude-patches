@@ -2,8 +2,9 @@
 
 This index records the durable corpus retained from the 2026-08-05 Claude Code
 2.1.220 → CLIProxyAPI → Codex investigation, including evidence corrections, the
-direct-path steering additions completed on 2026-08-10, and the automated permission
-reviewer findings completed on 2026-08-11.
+direct-path steering additions completed on 2026-08-10, the automated permission
+reviewer findings completed on 2026-08-11, and the full request/response translation
+source audit completed on 2026-09-05.
 The current system architecture and decisions live in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); focused permission-reviewer findings live in
 [`CLASSIFIER.md`](CLASSIFIER.md). This document records provenance, evidence class,
@@ -24,12 +25,15 @@ durable corpus or integrity manifest.
    accepted architecture.
 4. [`reports/corpus-absorption-checklist.md`](reports/corpus-absorption-checklist.md)
    maps each consolidation correction to its durable destination or explicit open item.
-5. [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md)
+5. [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md)
+   is the source-confirmed map of the current Claude Messages to Codex Responses request
+   and response converters at the separately pinned 2026-09-05 source revision.
+6. [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md)
    is an absorbed focused narrative. Its current conclusions are carried independently by
    the architecture and the two steering evidence files.
-6. The two `workflow12-*` reports are dated experiment snapshots. Read later findings
+7. The two `workflow12-*` reports are dated experiment snapshots. Read later findings
    and this index before treating their scoped or provisional wording as current.
-7. Evidence captures establish only the fields they retain. Report prose, source
+8. Evidence captures establish only the fields they retain. Report prose, source
    analysis, and composed controls are not interchangeable with a raw executable
    capture.
 
@@ -95,6 +99,7 @@ no real key-shaped material before or after corpus consolidation.
 | [`reports/founding-experiments-and-evidence-gaps.md`](reports/founding-experiments-and-evidence-gaps.md) | Project-authored from the session record and surviving probes | Durable classification of admission, custom-base, and replacement-crash founding results, including what raw evidence was not retained |
 | [`reports/corpus-absorption-checklist.md`](reports/corpus-absorption-checklist.md) | Project-authored consolidation record | Finding-by-finding map of architecture, evidence-class, provenance, completeness, reproduction, and documentation corrections to durable destinations or explicit open items |
 | [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md) | Project-authored from the 2026-08-10 bundle/source audit and localhost captures | Absorbed focused narrative retained for readable sequencing; current conclusions and evidence classifications live independently in `ARCHITECTURE.md` and the two steering evidence files |
+| [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md) | Project-authored from CLIProxyAPI commit `5a87e084ca274d53dcdf98f8de3b993228354239`; cited source paths matched that commit while unrelated `scripts/` changes made the working tree dirty | Source-confirmed map of request construction, system-role conversion, messages, thinking, tools, model aliases, streaming and non-streaming responses, IDs, usage, errors, and token counting; no new end-to-end runtime capture |
 
 ## Provenance
 
