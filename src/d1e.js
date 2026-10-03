@@ -294,10 +294,16 @@ async function d1e(_session, _opts) {
       let _lpuWalk = $pfg.walkToRoot(_lpu, _index);
       if (_lpuWalk.reason !== "cycle" || !_lpuWalk.path.some((_rec) => _rec.uuid === _boundary.uuid)) continue;
 
+      // The predecessor comes from the boundary's own chain: a sidechain record written
+      // between the main line's last record and the boundary belongs to a worker, and taking
+      // it would hang the preserved window, and everything after it, under that worker.
       let _window = new Set(_uuids), _predUuid = null;
       for (let _j = _i - 1; _j >= 0; _j--) {
-        let _uuid = _parsed[_j]?.uuid;
-        if (_uuid && _inFileUuids.has(_uuid) && !_window.has(_uuid)) { _predUuid = _uuid; break; }
+        let _rec = _parsed[_j], _uuid = _rec?.uuid;
+        if (!_uuid || !_inFileUuids.has(_uuid) || _window.has(_uuid)) continue;
+        if (!!_rec.isSidechain !== !!_boundary.isSidechain) continue;
+        _predUuid = _uuid;
+        break;
       }
       if (!_predUuid) continue; // boundary-at-file-start still needs J/K1/K2 evidence
 

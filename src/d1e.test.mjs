@@ -297,13 +297,16 @@ const _k2Deps = (corpus, dir) => ({
   GY: (parsed) => parsed,
 });
 
-function preservedCycleFixture({ secondOrigin = false, boundaryFirst = false } = {}) {
+function preservedCycleFixture({ secondOrigin = false, boundaryFirst = false, sidechainBeforeBoundary = false } = {}) {
   const team = { teamName: "session-deadbeef", agentName: "researcher", sessionId: "team-session" };
   const before = [
     { ...team, uuid: "O", type: "user", parentUuid: null, message: { role: "user", content: "the teammate assignment" } },
     { ...team, uuid: "PRE", type: "assistant", parentUuid: "O", message: { role: "assistant", content: "the pre-compaction reply" } },
   ];
   if (secondOrigin) before.push({ ...team, uuid: "O2", type: "user", parentUuid: null, message: { role: "user", content: "a second possible origin" } });
+  // A worker's record written between the main line's last record and the boundary, as an
+  // older main file could hold one: in the file, but not on the boundary's chain.
+  if (sidechainBeforeBoundary) before.push({ ...team, uuid: "SIDE", type: "user", parentUuid: null, isSidechain: true, agentId: "worker-1", message: { role: "user", content: "a worker's brief" } });
   const boundary = {
     ...team,
     uuid: "BND01234",
@@ -340,6 +343,17 @@ test("d1e: repairs an in-file lpu-into-preserved-tail cycle and reaches the team
   assert.equal(walk.terminus.uuid, "O", "the repaired teammate chain reaches its first assignment");
   assert.equal(rootTrusted(walk), true);
   assert.equal(out.find((r) => r.uuid === "BND01234").__pfgkPreservedCycleRepair.proven, true);
+});
+
+test("d1e: a sidechain record written just before the boundary is not taken as the preserved window's predecessor", async () => {
+  const d1e = d1eWith(_k2Deps(preservedCycleFixture({ sidechainBeforeBoundary: true }), "/pc4"));
+  const out = await d1e({}, { dir: "/pc4" });
+  const ghost = out.find((r) => r.uuid === "pfgk-seamClean-BND01234");
+  assert.ok(ghost, "the repair stays verified: the predecessor is the main line's record, which reaches the origin");
+  assert.equal(ghost.parentUuid, "PRE", "the marker reconnects to the main line, skipping the sidechain record");
+  const walk = walkToRoot("LEAF", byUuid(out));
+  assert.equal(walk.terminus.uuid, "O");
+  assert.ok(!walk.path.some((r) => r.uuid === "SIDE"), "the worker's record stays off the main chain");
 });
 
 test("d1e: a preserved-tail repair with multiple possible origins stays unproven", async () => {
