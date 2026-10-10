@@ -3,9 +3,9 @@
 Date: 2026-08-11
 
 > **Status: provisional design.** This document separates verified observations from an
-> unfinished process draft. It does not change the accepted decisions in
-> [`ARCHITECTURE.md`](ARCHITECTURE.md), does not authorize an implementation, and must not
-> be cited as proof that the proposed replay process works.
+> unfinished process draft. It does not change the rules in
+> [`ARCHITECTURE.md`](ARCHITECTURE.md#route), does not authorize an implementation, and
+> must not be cited as proof that the proposed replay process works.
 
 The question under study is whether a Claude Code compaction request can be translated to
 OpenAI `/responses/compact`, with the resulting Codex `ResponseItem` history stored in
@@ -486,5 +486,5 @@ This document does not decide:
 - that native compaction belongs in the immediate implementation work.
 
 Until the experiments above succeed and the results are incorporated into accepted
-architecture, decision D003 in [`ARCHITECTURE.md`](ARCHITECTURE.md#recorded-decisions)
-remains the current position.
+architecture, the compaction rule in [`ARCHITECTURE.md`](ARCHITECTURE.md#route) remains
+the current position.

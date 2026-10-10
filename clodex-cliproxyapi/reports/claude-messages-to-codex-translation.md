@@ -7,9 +7,7 @@ into OpenAI Responses API requests for Codex, then converts Codex output back in
 Claude Messages responses.
 
 The findings are **source-confirmed**. The request and response paths were traced in the
-source tree, but this report does not claim a new end-to-end executable reproduction.
-Existing runtime findings remain classified separately in
-[`../ARCHITECTURE.md`](../ARCHITECTURE.md) and the retained evidence files.
+source tree; no end-to-end run reproduced them.
 
 ## Source identity
 
@@ -32,9 +30,9 @@ M  scripts/swap-local-proxy.sh
 The translator, executor, routing, thinking, utility, and handler paths cited in this
 report matched `HEAD` at the time of inspection.
 
-Line references below identify this source revision. Earlier project documents pin
-CLIProxyAPI `v7.2.116`; their line numbers and version-specific claims remain tied to
-that older revision.
+Line references below identify this source revision. By 2048218c (2026-10-10) the 23
+cited files had gained 2,240 lines and lost 562, so line numbers and details may have
+moved; the report has not been rechecked against that revision.
 
 ## End-to-end path
 
