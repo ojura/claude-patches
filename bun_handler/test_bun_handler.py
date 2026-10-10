@@ -48,11 +48,14 @@ import bun_handler  # noqa: E402
 
 def find_binary():
     env = os.environ.get("CLAUDE_NATIVE_BINARY")
-    if env and os.path.isfile(env):
+    if env:
+        if not os.path.isfile(env):
+            raise ValueError(f"explicit CLAUDE_NATIVE_BINARY is not a file: {env}")
         return env
-    for arg in sys.argv[1:]:
-        if os.path.isfile(arg):
-            return arg
+    if sys.argv[1:]:
+        if len(sys.argv[1:]) != 1 or not os.path.isfile(sys.argv[1]):
+            raise ValueError("explicit native binary path is invalid")
+        return sys.argv[1]
     versions_dir = os.path.expanduser("~/.local/share/claude/versions")
     if os.path.isdir(versions_dir):
         candidates = sorted(glob.glob(os.path.join(versions_dir, "*")))
@@ -72,14 +75,31 @@ def find_binary():
 
 def _run_binary(binary_bytes, *args, prefix="pfg-bun-"):
     """Execute a produced binary and return (CompletedProcess, skip_detail)."""
-    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".bin", delete=False) as tf:
+    with tempfile.NamedTemporaryFile(prefix=prefix, suffix=".exe" if binary_bytes[:2] == b"MZ" else ".bin", delete=False) as tf:
         tf.write(binary_bytes)
         tmp = tf.name
     try:
         os.chmod(tmp, 0o755)
         try:
+            command = [tmp, *args]
+            if binary_bytes[:2] == b"MZ" and os.name != "nt":
+                wine = os.environ.get("BUN_HANDLER_WINE") or os.environ.get("WINE_BINARY")
+                if not wine or not os.path.isfile(wine):
+                    return None, "Windows native gate requires BUN_HANDLER_WINE executable"
+                command.insert(0, wine)
+            if binary_bytes[:2] == b"MZ":
+                # Wine services can inherit stderr and outlive the CLI. PIPE
+                # communicate() then waits for unrelated service EOF. Regular
+                # files capture the same streams without that lifecycle coupling.
+                with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                    result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=90)
+                    stdout.seek(0); stderr.seek(0)
+                    result.stdout = stdout.read().decode("utf-8", "replace").replace("\r\n", "\n")
+                    result.stderr = stderr.read().decode("utf-8", "replace").replace("\r\n", "\n")
+                    return result, None
             return subprocess.run(
-                [tmp, *args], capture_output=True, text=True, timeout=90
+                command, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=90
             ), None
         except OSError as exc:
             return None, f"cannot exec produced binary on this host ({exc})"
@@ -162,6 +182,29 @@ def _check_changed_modules_invalidated(data, out, patched_js):
     return True, f"invalidated modules {changed} (compiled state existed on {exercised})"
 
 
+def _same_source_storage_size(data, out):
+    if data[:2] != b"MZ":
+        return len(data) == len(out)
+    before, after = bun_handler.Pe64(data), bun_handler.Pe64(out)
+    return (before.bun_section["size"] == after.bun_section["size"]
+            and before.bun_section["raw_size"] == after.bun_section["raw_size"]
+            and after.certificate_size == 0
+            and len(out) == len(data) - before.certificate_size - before.certificate_gap)
+
+
+def _pe_resize_valid(data, out, source_delta):
+    before, after = bun_handler.Pe64(data), bun_handler.Pe64(out)
+    a, b = before.bun_section, after.bun_section
+    # These gates use ASCII source: extra graph bytes can only be alignment.
+    padding = b["size"] - a["size"] - source_delta
+    raw_expected = ((b["size"] + before.file_alignment - 1)
+                    // before.file_alignment * before.file_alignment)
+    return (padding >= 0 and b["raw_size"] == raw_expected
+            and len(out) - len(data) == b["raw_size"] - a["raw_size"]
+                - before.certificate_size - before.certificate_gap
+            and after.certificate_size == 0)
+
+
 def gate1_noop(data):
     out = bun_handler.repack_unchanged(data)
     if out == data:
@@ -181,7 +224,8 @@ def gate2_length_change(data):
 
     source_delta = len(patched) - len(js)
     file_delta = len(out) - len(data)
-    if source_delta <= 0 or file_delta < source_delta:
+    if source_delta <= 0 or (not _pe_resize_valid(data, out, source_delta)
+            if data[:2] == b"MZ" else file_delta < source_delta):
         return False, f"unexpected source/file delta {source_delta}/{file_delta}"
     if bun_handler.extract_js(out) != patched:
         return False, "re-extract round-trip mismatch"
@@ -196,9 +240,9 @@ def gate2_length_change(data):
         return False, f"produced binary exited {result.returncode}: {result.stderr.strip()[:160]}"
     if "(pfg-selftest)" not in result.stdout:
         return False, f"edit not visible in --version output: {result.stdout.strip()!r}"
-    alignment_padding = file_delta - source_delta
-    return True, (f"runs and shows edit; source delta +{source_delta}, file delta "
-                  f"+{file_delta} ({alignment_padding} alignment byte(s)); {detail}")
+    return True, (f"runs and shows edit; source delta {source_delta:+d}, "
+                  f"file delta {file_delta:+d}; PE certificate/alignment accounted "
+                  f"for where applicable; {detail}")
 
 
 def gate3_determinism(data):
@@ -222,7 +266,12 @@ def gate5_shrink(data):
     cut_start = i + len(needle)
     shrunk = js[:cut_start] + js[cut_start + 100:]
     out = bun_handler.repack_with_js(data, shrunk)
-    if len(out) >= len(data):
+    if data[:2] == b"MZ":
+        if not _pe_resize_valid(data, out, -100):
+            return False, "invalid PE shrink geometry"
+        if bun_handler.Pe64(out).bun_section["size"] >= bun_handler.Pe64(data).bun_section["size"]:
+            return False, "negative source delta did not shrink PE graph"
+    elif len(out) >= len(data):
         return False, f"negative source delta did not shrink file ({len(out) - len(data):+d})"
     if bun_handler.extract_js(out) != shrunk:
         return False, "re-extract round-trip mismatch after shrink"
@@ -288,7 +337,7 @@ def gate7_equal_length_control_flow(data):
 
     patched = js.replace(anchor, replacement)
     out = bun_handler.repack_with_js(data, patched)
-    if len(out) != len(data):
+    if not _same_source_storage_size(data, out):
         return False, f"equal-length source edit changed file size by {len(out) - len(data)}"
     if bun_handler.extract_js(out) != patched:
         return False, "equal-length control-flow edit did not round-trip"
@@ -322,7 +371,7 @@ def gate8_equal_length_literal(data):
         raise AssertionError("equal-length literal fixture drifted")
     patched = js.replace(before, after)
     out = bun_handler.repack_with_js(data, patched)
-    if len(out) != len(data):
+    if not _same_source_storage_size(data, out):
         return False, f"equal-length literal edit changed file size by {len(out) - len(data)}"
     if bun_handler.extract_js(out) != patched:
         return False, "equal-length literal edit did not round-trip"
@@ -362,7 +411,8 @@ def gate9_dependency_reanalysis(data):
     else:
         target_module = image.modules[target_index]
 
-    missing = b"/$bunfs/root/pfg-definitely-missing.js"
+    missing = (b"B:/~BUN/root/pfg-definitely-missing.js" if data[:2] == b"MZ"
+               else b"/$bunfs/root/pfg-definitely-missing.js")
     if target_module["module_format"] == 1:
         dependency_stmt = b'import"' + missing + b'";'
         patched_contents = dependency_stmt + contents
@@ -1011,8 +1061,9 @@ def synthetic_tests():
     ]
     fx232 = build_bun_elf(mods232)
     img232 = bh.BunImage(fx232)
-    _check("2.1.232 module name alone is not recognized",
-           not bh.BunImage.is_entrypoint_name("/$bunfs/root/cli"))
+    _check("modern plain cli module name is recognized on both platforms",
+           bh.BunImage.is_entrypoint_name("/$bunfs/root/cli")
+           and bh.BunImage.is_entrypoint_name("B:/~BUN/root/cli"))
     _check("2.1.232 shape resolves via bytecodeOriginPath",
            img232.entrypoint_module()["index"] == 0)
     _check("2.1.232 shape extract_js works",
@@ -1626,30 +1677,24 @@ def synthetic_tests():
         )
     ]
     fx_utf16 = build_bun_elf(utf16_mods)
-    utf16_parses = False
-    utf16_extract_rejected = False
-    try:
-        bh.BunImage(fx_utf16)
-        utf16_parses = True
-        bh.extract_js(fx_utf16)
-    except NotImplementedError:
-        utf16_extract_rejected = True
-    _check("UTF-16 graph structure parses", utf16_parses)
-    _check("UTF-16 patchable source is explicitly unsupported",
-           utf16_extract_rejected and not bh.can_handle(fx_utf16))
+    _check("UTF-16 graph structure parses", bh.can_handle(fx_utf16))
+    _check("UTF-16 source decodes and no-op preserves storage",
+           bh.extract_js(fx_utf16) == b"console.log('(Claude Code)');"
+           and bh.repack_unchanged(fx_utf16) == fx_utf16
+           and bh.repack_with_js(fx_utf16, bh.extract_js(fx_utf16)) == fx_utf16)
 
     latin1_non_ascii = build_bun_elf([
         _module("/$bunfs/root/src/entrypoints/cli.js", b"x=\xe9;")
     ])
-    _check("non-ASCII Latin-1 source is rejected pending UTF-16 support",
-           not bh.can_handle(latin1_non_ascii))
-    non_ascii_edit_rejected = False
-    try:
-        bh.repack_with_js(fx, bh.extract_js(fx) + "é".encode("utf-8"))
-    except NotImplementedError:
-        non_ascii_edit_rejected = True
-    _check("non-ASCII source edits are rejected instead of mis-encoded",
-           non_ascii_edit_rejected)
+    _check("non-ASCII Latin-1 source decodes to UTF-8 without a no-op rewrite",
+           bh.extract_js(latin1_non_ascii) == "x=é;".encode("utf-8")
+           and bh.repack_with_js(latin1_non_ascii,
+                                 bh.extract_js(latin1_non_ascii)) == latin1_non_ascii)
+    unicode_source = bh.extract_js(fx) + "//é".encode("utf-8")
+    unicode_out = bh.repack_with_js(fx, unicode_source)
+    _check("non-ASCII edits use encoding 0 and round-trip",
+           bh.extract_js(unicode_out) == unicode_source
+           and bh.BunImage(unicode_out).entrypoint_module()["encoding"] == 0)
 
     # Full interval checks cover equal-start and containing sections, not only a
     # second section whose start lies strictly inside `.bun`.
@@ -1874,6 +1919,23 @@ def main():
     print("=== bun_handler standalone test harness ===")
     results = []
 
+    # Strict-mode gate runner: CLAUDE_PFG_STRICT_GATES=gate7[,gateN...] promotes
+    # SKIP -> FAIL for the listed gate ids; CLAUDE_PFG_STRICT_GATES_WAIVE=gate7
+    # overrides strict mode for that gate (SKIP stays SKIP). Intended for CI
+    # release synthesis (per plan section 6 step 11b) so the gates that prove
+    # the most (especially gates 7-9's stale-cache proofs) cannot silently degrade when
+    # a future Anthropic bundle bump moves the anchor. Default with no env var is
+    # unchanged: skip-permissive for local dev.
+    strict_gates = set(g.strip() for g in os.environ.get(
+        "CLAUDE_PFG_STRICT_GATES", "").split(",") if g.strip())
+    waived_gates = set(g.strip() for g in os.environ.get(
+        "CLAUDE_PFG_STRICT_GATES_WAIVE", "").split(",") if g.strip())
+    valid_gates = {"gate1", "gate2", "gate3", "gate4", "gate5", "gate6", "gate7", "gate8", "gate9"}
+    if (strict_gates | waived_gates) - valid_gates:
+        print("SUITE FAIL: unrecognized strict/waived gate id")
+        return 1
+    required_native = (strict_gates - waived_gates) - {"gate4"}
+
     # Synthetic fixture tests (self-contained; always run).
     results.append(synthetic_tests())
 
@@ -1882,8 +1944,16 @@ def main():
     print(f"GATE 4 format detection / guards: {'PASS' if ok4 else 'FAIL'}  ({d4})")
     results.append(ok4)
 
-    binary = find_binary()
+    try:
+        binary = find_binary()
+    except ValueError as exc:
+        print(f"SUITE FAIL: {exc}")
+        return 1
     if not binary:
+        if required_native:
+            print("SUITE FAIL: no native binary for required gates: "
+                  + ", ".join(sorted(required_native)))
+            return 1
         print("REAL GATES 1-3,5-9: SKIPPED (no native binary found; set "
               "CLAUDE_NATIVE_BINARY, pass a path, or install under "
               "~/.local/share/claude/versions)")
@@ -1900,17 +1970,6 @@ def main():
         print("\nSUITE FAIL")
         return 1
 
-    # Strict-mode gate runner: CLAUDE_PFG_STRICT_GATES=gate7[,gateN...] promotes
-    # SKIP -> FAIL for the listed gate ids; CLAUDE_PFG_STRICT_GATES_WAIVE=gate7
-    # overrides strict mode for that gate (SKIP stays SKIP). Intended for CI
-    # release synthesis (per plan section 6 step 11b) so the gates that prove
-    # the most (especially gates 7-9's stale-cache proofs) cannot silently degrade when
-    # a future Anthropic bundle bump moves the anchor. Default with no env var is
-    # unchanged: skip-permissive for local dev.
-    strict_gates = set(g.strip() for g in os.environ.get(
-        "CLAUDE_PFG_STRICT_GATES", "").split(",") if g.strip())
-    waived_gates = set(g.strip() for g in os.environ.get(
-        "CLAUDE_PFG_STRICT_GATES_WAIVE", "").split(",") if g.strip())
     for gate_id, label, fn in [
         ("gate1", "GATE 1 no-op byte-identical", gate1_noop),
         ("gate2", "GATE 2 length-changing + runs + shows edit", gate2_length_change),

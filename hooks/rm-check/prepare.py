@@ -4,7 +4,7 @@
 Usage: prepare.py <claude-executable> <version>
        prepare.py --discover-only <extracted.js>
 
-Extracts the bundle to /tmp/claude-<version>.js with util/bun_handler.py
+Extracts the bundle to /tmp/claude-<version>.js with bun_handler/bun_handler.py
 (unless that file already exists), writes its modules to
 /tmp/claude-<version>-rmcheck/, and exports the Bash tool's permission
 function from its chunk as __ccRmCheckBashPermission. The function is found by
@@ -33,7 +33,7 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.join(REPO, "util"))
+sys.path.insert(0, os.path.join(REPO, "bun_handler"))
 
 import bun_handler  # noqa: E402
 from pfg import jslex  # noqa: E402

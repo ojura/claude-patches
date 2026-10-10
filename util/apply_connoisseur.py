@@ -35,6 +35,7 @@ VERSIONS_DIR = os.path.expanduser("~/.local/share/claude/versions")
 BACKUP_SUFFIX = ".orig-unpatched"
 
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
 import bun_handler  # noqa: E402
 
 

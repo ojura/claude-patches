@@ -1,0 +1,27 @@
+{
+  "status": "unresolved_matching_commit_pin",
+  "compiler_revision_reported_by_fixture": "8c28b3167",
+  "fixture_sha256": "5c4735937844e84f8a93306e841a5b0e12252909b07870f789b190468da147ab",
+  "requested_source": "src/standalone_graph/StandaloneModuleGraph.rs",
+  "prior_evidence": "The shipped schema note and supplied review record a read of mutable upstream main plus serialized-byte and runtime checks, not a compiler-revision pin.",
+  "retrievals": [
+    {
+      "url": "https://raw.githubusercontent.com/oven-sh/bun/8c28b3167/src/standalone_graph/StandaloneModuleGraph.rs",
+      "result": "Web tool did not return source bytes."
+    },
+    {
+      "url": "https://github.com/oven-sh/bun/commit/8c28b3167",
+      "result": "Web tool returned cache miss."
+    },
+    {
+      "url": "https://api.github.com/repos/oven-sh/bun/commits?path=src%2Fstandalone_graph%2FStandaloneModuleGraph.rs&per_page=1",
+      "result": "Web tool did not return usable history; container HTTP had DNS failure; dedicated downloader did not retrieve it."
+    },
+    {
+      "url": "https://raw.githubusercontent.com/oven-sh/bun/main/src/standalone_graph/StandaloneModuleGraph.rs",
+      "result": "Web tool returned an unpinned snapshot with a different Flags declaration limited to four autoload bits. It cannot substantiate a source pin for 0x800/0x1000. A raw-byte download did not succeed."
+    }
+  ],
+  "conclusion": "No immutable upstream revision is claimed. The parsed snapshot does not identify the compiler used for the fixture and does not invalidate observed bytes or runtime results. Preserve existing rejection/option handling; do not use the unmatched source snapshot to change production.",
+  "followup_requirement": "Obtain an immutable upstream commit containing both records, retain exact file bytes and hash, and separately establish whether it matches the executable compiler revision. A commit containing the schema alone would be corroboration, not proof of compiler provenance."
+}

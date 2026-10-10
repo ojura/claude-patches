@@ -16,28 +16,28 @@ These layers are complementary, not interchangeable. A standalone `patch_*.py` f
 
 ### Path and purpose
 
-`util/bun_handler.py` is the canonical stdlib-only handler for the Linux x64 Bun-compiled native executable. It:
+`bun_handler/bun_handler.py` is the stdlib-only handler for Claude Code's Bun-compiled native executables (Linux x64 ELF and Windows x64 PE). `bun_handler/README.md` lists the layouts it accepts, its command line and its tests. A script in `util/` imports it after adding `../bun_handler` to `sys.path`:
 
-- Parses little-endian ELF64.
-- Locates the `.bun` section and Bun entrypoint module.
-- Extracts the bundled JavaScript.
-- Replaces source while leaving JavaScriptCore bytecode untouched.
-- Rewrites Bun module ranges, offsets, section sizes, ELF section offsets, and affected segment sizes.
-- Fails closed on unsupported layouts.
+```python
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+import bun_handler
+```
 
-Control-flow source edits work despite the preserved bytecode. The executable control-flow gate in `util/test_bun_handler.py:171-249` verifies that premise.
+When a module's source changes, the handler writes the new source and drops that module's bytecode, source hash, module info and source map, so Bun compiles the new source instead of running stale bytecode. It then updates the Bun offsets and the container's section and segment sizes. Unchanged modules keep their compiled state, and an unchanged repack is byte-identical. Layouts it does not recognize are refused with `BunFormatError` or `NotImplementedError`.
 
 ### Public API
 
-Defined in `util/bun_handler.py:716-779`:
-
 ```python
 can_handle(data) -> bool
-extract_js(data) -> bytes
-repack_with_js(data, new_js) -> bytes
-repack_unchanged(data) -> bytes
 detect_format(data) -> str
+extract_js(data) -> bytes
+extract_js_with_digest(data) -> (sha256_hex, bytes)
+repack_with_js(data, new_js, *, expected_sha256=None) -> bytes
+repack_unchanged(data) -> bytes
 ```
+
+`extract_js()` returns the bundle's JavaScript: a single module's source as it is, or every module joined with marker lines when there are several. `repack_with_js()` writes back only the modules whose text changed. Pass the digest from `extract_js_with_digest()` as `expected_sha256` to make the repack refuse a binary that changed since extraction. `split_extracted_js()`, `changed_js_modules()` and `repack_module_sources()` work on individual modules.
 
 Lower-level types include:
 
@@ -45,9 +45,8 @@ Lower-level types include:
 BunFormatError
 BunImage
 Elf64
+Pe64
 ```
-
-A patch that changes only the entrypoint JavaScript should use `extract_js()` and `repack_with_js()` rather than the internal multi-module APIs.
 
 ### Encoding contract
 
@@ -403,10 +402,10 @@ This proves the patch changed semantics as intended rather than merely producing
 
 ### Bun repack gates
 
-Follow `util/test_bun_handler.py`:
+Follow `bun_handler/test_bun_handler.py`:
 
 - Re-extracted JavaScript equals the patched JavaScript.
-- Binary size delta equals source size delta.
+- The binary grows or shrinks by the source size delta plus any alignment padding.
 - Two identical patch runs produce identical bytes.
 - The patched binary parses through `BunImage`.
 - An observable CLI workflow exercises the changed branch.

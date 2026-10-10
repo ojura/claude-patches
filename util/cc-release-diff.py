@@ -49,6 +49,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
 
 RELEASES = "https://downloads.claude.ai/claude-code-releases"
 PLATFORM = "linux-x64"

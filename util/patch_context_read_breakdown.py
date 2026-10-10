@@ -105,6 +105,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
 
 

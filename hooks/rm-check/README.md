@@ -34,7 +34,7 @@ by walking up its parent processes to the executable under
 
 The first time the hook sees a version, `prepare.py`:
 
-1. extracts the bundle to `/tmp/claude-<version>.js` with `util/bun_handler.py`,
+1. extracts the bundle to `/tmp/claude-<version>.js` with `bun_handler/bun_handler.py`,
    unless that file exists;
 2. finds the Bash tool's permission function by structure with the pfg matcher:
    the anchor on the tool's `checkPermissions` method must match exactly once

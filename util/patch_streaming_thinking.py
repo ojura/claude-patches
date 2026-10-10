@@ -219,6 +219,7 @@ CONNOISSEUR_TS = os.path.join(
 )
 sys.path.insert(0, HERE)
 sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
 from pfg import jslex  # noqa: E402  (lexer-aware brace matching for callsite spans)
 
