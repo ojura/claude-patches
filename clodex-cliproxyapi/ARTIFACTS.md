@@ -3,8 +3,8 @@
 This index records the durable corpus retained from the 2026-08-05 Claude Code
 2.1.220 → CLIProxyAPI → Codex investigation, including evidence corrections, the
 direct-path steering additions completed on 2026-08-10, the automated permission
-reviewer findings completed on 2026-08-11, and the full request/response translation
-source audit completed on 2026-09-05.
+reviewer findings completed on 2026-08-11, the full request/response translation
+source audit completed on 2026-09-05, and the GPT context-window check of 2026-10-10.
 The current system architecture and decisions live in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); focused permission-reviewer findings live in
 [`CLASSIFIER.md`](CLASSIFIER.md). This document records provenance, evidence class,
@@ -28,12 +28,16 @@ durable corpus or integrity manifest.
 5. [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md)
    is the source-confirmed map of the current Claude Messages to Codex Responses request
    and response converters at the separately pinned 2026-09-05 source revision.
-6. [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md)
+6. [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md) records the
+   context window and compaction point of GPT sessions in Claude Code 2.1.296, the
+   catalog values, the input sizes Codex accepted and rejected, and the launcher
+   settings. For current Claude Code versions it replaces the 2.1.220 Rung 0 profile.
+7. [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md)
    is an absorbed focused narrative. Its current conclusions are carried independently by
    the architecture and the two steering evidence files.
-7. The two `workflow12-*` reports are dated experiment snapshots. Read later findings
+8. The two `workflow12-*` reports are dated experiment snapshots. Read later findings
    and this index before treating their scoped or provisional wording as current.
-8. Evidence captures establish only the fields they retain. Report prose, source
+9. Evidence captures establish only the fields they retain. Report prose, source
    analysis, and composed controls are not interchangeable with a raw executable
    capture.
 
@@ -100,6 +104,7 @@ no real key-shaped material before or after corpus consolidation.
 | [`reports/corpus-absorption-checklist.md`](reports/corpus-absorption-checklist.md) | Project-authored consolidation record | Finding-by-finding map of architecture, evidence-class, provenance, completeness, reproduction, and documentation corrections to durable destinations or explicit open items |
 | [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md) | Project-authored from the 2026-08-10 bundle/source audit and localhost captures | Absorbed focused narrative retained for readable sequencing; current conclusions and evidence classifications live independently in `ARCHITECTURE.md` and the two steering evidence files |
 | [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md) | Project-authored from CLIProxyAPI commit `5a87e084ca274d53dcdf98f8de3b993228354239`; cited source paths matched that commit while unrelated `scripts/` changes made the working tree dirty | Source-confirmed map of request construction, system-role conversion, messages, thinking, tools, model aliases, streaming and non-streaming responses, IDs, usage, errors, and token counting; no new end-to-end runtime capture |
+| [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md) | Project-authored on 2026-10-10 from the Claude Code 2.1.296 bundle, CLIProxyAPI `2048218c`, Codex `b741e480e`, the user's settings, proxy request logs and transcripts, and session 897ba623's live model-list query of 2026-10-07 | Source-confirmed window and threshold arithmetic, checked against recorded compactions; observed largest accepted inputs and the 2026-09-19 `context_length_exceeded` rejections; no new end-to-end run of recovery from a Codex context error |
 
 ## Provenance
 
@@ -123,7 +128,7 @@ bytes, not pristine upstream independently of source confirmation.
 | [`evidence/claude/context-hint-durability.json`](evidence/claude/context-hint-durability.json) | `/tmp/claude-context-hint-durability-result.json` | Executable-reproduced | 422 retry uses wrappers; fresh resume restores raw results and offers the hint again |
 | [`evidence/claude/context-hint-precompute-stale.json`](evidence/claude/context-hint-precompute-stale.json) | `/tmp/claude-hint-precompute-stale-result.json` | Executable-reproduced | Hint wrappers are not retained across turns and a boundary-compatible pre-hint summary is later consumed |
 | [`evidence/claude/precompute-cross-model.json`](evidence/claude/precompute-cross-model.json) | `/tmp/claude-precompute-cross-model-result.json` | Executable-reproduced with retained-ordering gap | Luna→Terra stale-summary reuse was verified in the original raw sequence; the focused JSON alone does not disambiguate the later Terra compact |
-| [`evidence/claude/replacement-crash-window-summary.json`](evidence/claude/replacement-crash-window-summary.json) | Project-authored from retained report prose | Report-derived summary, not raw capture | Records the 0–50 ms omission / 100–500 ms reconstruction sweep and explicitly marks missing per-delay raw results |
+| [`evidence/claude/replacement-crash-window-summary.json`](evidence/claude/replacement-crash-window-summary.json) | Project-authored from retained report prose | Report-derived summary, not raw capture | Records the 0-50 ms omission / 100-500 ms reconstruction sweep and explicitly marks missing per-delay raw results |
 | [`evidence/claude/rewind-successor-100ms.json`](evidence/claude/rewind-successor-100ms.json) | `/tmp/claude-rewind-successor-100.json` | Executable control | Once the new branch record commits, fresh resume follows it; delay exists only in the filename |
 | [`evidence/claude/rewind-successor-500ms.json`](evidence/claude/rewind-successor-500ms.json) | `/tmp/claude-rewind-successor-500.json` | Executable control | Same control at 500 ms; delay exists only in the filename |
 | [`evidence/claude/rewind-successor-1000ms.json`](evidence/claude/rewind-successor-1000ms.json) | `/tmp/claude-rewind-successor-1000.json` | Executable control | Same control at 1,000 ms; the separately reported 0-ms omission had no distinct durable result left to copy |

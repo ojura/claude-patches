@@ -235,11 +235,11 @@ available, expiry is the practical way to prevent indefinite reuse.
 
 Every claim in this document belongs to one of three evidence classes:
 
-1. **Executable-reproduced** — observed with the installed 2.1.220 binary, local
+1. **Executable-reproduced**: observed with the installed 2.1.220 binary, local
    CLIProxy tests, or local fake providers.
-2. **Source-confirmed** — statically reachable in the pinned source, but the
+2. **Source-confirmed**: statically reachable in the pinned source, but the
    branch was not induced end to end.
-3. **Runtime/provider-dependent** — cannot be closed from local source alone.
+3. **Runtime/provider-dependent**: cannot be closed from local source alone.
 
 The installed 2.1.220 binary carries a pre-existing local patch whose exact delta was
 not retained. Executable results against it are valid observations of that pinned
@@ -260,7 +260,7 @@ an old report cannot silently reintroduce them.
 
 | Earlier claim | Corrected conclusion |
 |---|---|
-| A replacement crash restores the original raw tool body | The exercised 0–50-ms window omitted the entire assistant/tool turn after the model had seen the wrapper; raw restoration was not reproduced in that fixture |
+| A replacement crash restores the original raw tool body | The exercised 0-50-ms window omitted the entire assistant/tool turn after the model had seen the wrapper; raw restoration was not reproduced in that fixture |
 | Credential-refresh WebSocket behavior is inconclusive | Two executable controls plus source-confirmed service glue establish stale same-ID handshake reuse; one end-to-end watcher→service→request fixture is still absent |
 | Unknown-outcome WebSocket resend is unexercised | After the upstream read 65,536 bytes of a 32-MiB request, the full request was resent; duplicate execution risk is executable-reproduced |
 | Tombstone interruption and >50-MiB fallback are source-only | Both broad suffix truncation and silent large-file failure are executable-reproduced; the interruption used an instrumentation-widened pause |
@@ -269,6 +269,8 @@ an old report cannot silently reintroduce them.
 | Rewind requires a separate successor-marker repair | Withdrawn: once the new user record commits, the tested branch resumes correctly; only the ordinary early write window remains |
 | CCS effort suffixes always override Claude `/effort` | Route-dependent: normal CodexReasoningProxy translation preserves Claude-native effort, while fallback suffix handling can override it |
 | `uZc` teaches Claude Code a 372k input window | False in 2.1.220: discovered `max_input_tokens` has no production consumer; `uZc` is output-cap discovery only |
+| Codex's 272k context window is a stale baked fallback | 272,000 is the current default in Codex's catalog and in the backend's model list, with 872,000 as the maximum; see [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md) |
+| GPT-5.6 raw input capacity is 372,000 | The number comes from CLIProxy's provider registry; Codex accepted 921,105 tokens on gpt-5.6-sol and rejected less than 1,000 more on 2026-09-19; see the same report |
 | Claude `/v1/models` emits IDs only | Obsolete: current handler emits display and numeric token fields, subject to last-writer, synthetic-default, route, and cloaking caveats |
 | One nonzero `Oe` scalar can reconcile hint savings | Rejected: admission and prefix diagnostics require different anchor-aware accounting |
 
@@ -304,7 +306,7 @@ The 20k output reservation remained active in admission but was absent from that
 branch. Operative headroom was therefore approximately -9.7k while the display showed
 +10.3k: wrong sign, not merely a stale magnitude. The difference is exactly the omitted
 reservation: `+10.3k - 20k = -9.7k`. The authoritative bundle implements this in `jLo`
-(`/tmp/claude-2.1.220.js:16915`, relevant bytes approximately 10,337,200–10,339,000):
+(`/tmp/claude-2.1.220.js:16915`, relevant bytes approximately 10,337,200 to 10,339,000):
 when auto-compaction is disabled it sets
 the reserved category to `ZMu=3000` (`"Compact buffer"`) and computes free space as
 `max(0, window - projected - reserved)`. The readable orientation source names the
@@ -384,7 +386,7 @@ gpt-5.6-terra
 gpt-5.6-luna
 ```
 
-the intended contract is:
+the intended limits are:
 
 ```text
 raw input capacity:   372,000
@@ -394,9 +396,12 @@ hard safety margin:   retain the existing 3,000 unless separately justified
 ```
 
 This does not assert that every provider request near 372k plus a requested 128k
-output succeeds. The independent catalog shape and local admission policy are
-separate from the live provider contract. Direct boundary experiments remain the
-provider-level evidence.
+output succeeds. The catalog values and local admission policy are separate from what
+the provider accepts. Direct boundary experiments remain the provider-level evidence.
+
+The 372,000 figure came from CLIProxy's provider registry. The backend's model list gives
+272,000 as the default and 872,000 as the maximum, and Codex has accepted 921,105 tokens on
+gpt-5.6-sol; see [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md).
 
 The exact-model condition is essential. Do not globally remove the 20k reserve for
 Claude models or arbitrary custom providers.
@@ -419,7 +424,7 @@ original ladder lacked.
 Dependency order is part of the architecture:
 
 ```text
-0–2
+0-2
   ↓
 3
   ↓
@@ -437,13 +442,13 @@ transport, and credential-affinity work.
 
 | Earlier rung | Current location | Decision |
 |---|---|---|
-| Rung 0 — profile configuration | Rung 0 | Retained |
-| Rung 0.5 — model-capabilities switch | Separate capability-discovery project | Deferred; output-only, cache-identity and cloaking prerequisites |
-| Rung 1 — input-only admission | Rung 1 | Retained as first independently shippable patch |
-| Rung 2 — `/context` correction | Rung 2 | Retained as additive observability; scalar substitution rejected |
-| Rung 3 — CLIProxy 422 handshake | Rung 5 | Retained only as controlled activation after replay and durability prerequisites |
-| Rung 4 — eager pre-admission clearing/accounting | Rung 5, heavily revised | Original generic `Oe` design rejected |
-| Rung 5 — `previous_response_id` | Rung 6 | Optional and last |
+| Rung 0: profile configuration | Rung 0 | Retained |
+| Rung 0.5: model-capabilities switch | Separate capability-discovery project | Deferred; output-only, cache-identity and cloaking prerequisites |
+| Rung 1: input-only admission | Rung 1 | Retained as first independently shippable patch |
+| Rung 2: `/context` correction | Rung 2 | Retained as additive observability; scalar substitution rejected |
+| Rung 3: CLIProxy 422 handshake | Rung 5 | Retained only as controlled activation after replay and durability prerequisites |
+| Rung 4: eager pre-admission clearing/accounting | Rung 5, heavily revised | Original generic `Oe` design rejected |
+| Rung 5: `previous_response_id` | Rung 6 | Optional and last |
 
 ## Rung 0: coherent profile
 
@@ -471,6 +476,11 @@ operating state. The explicit auto window keeps profile intent visible and avoid
 ambient default changing compact timing without an explicit profile setting; the input-only patch still controls
 whether the false 20k reserve is subtracted.
 
+For Claude Code 2.1.29x the launcher exports `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` and
+neither of the other two variables, and the per-model `autoCompactWindow` settings set the
+compaction point. [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md) gives
+the reasons and the resulting thresholds.
+
 ### Effort handling
 
 Bare IDs remain the default. On the direct path, CLIProxy derives Codex reasoning from
@@ -492,8 +502,8 @@ CLIProxy request boundary rather than inferring them from the configured model s
 Introduce one exact-model predicate and one policy helper for output reservation.
 Apply it at both:
 
-- `vSe` — effective automatic-compaction window;
-- `Fny` — hard-input fallback.
+- `vSe`: effective automatic-compaction window;
+- `Fny`: hard-input fallback.
 
 Recheck the separate `s$t → exceeds200kTokens → LP` branch that controls the
 `opusplan` plan-mode Opus upgrade. It tests total assistant usage
@@ -541,11 +551,11 @@ Codex constants.
 
 ### Effect of widening limits before durability work
 
-Rungs 0–2 expose truthful 372k capacity and move Claude's current automatic/hard
+Rungs 0-2 expose truthful 372k capacity and move Claude's current automatic/hard
 boundaries later. That widens operation over native durability and stale-precompute
 known behavior today. Initial rollout should therefore keep warning and automatic policy
 conservative, disable precompute until Rung 5 integrity is available, keep context-hint
-activation off until Rungs 3–4, and monitor transcript growth/tombstone failures. The
+activation off until Rungs 3-4, and monitor transcript growth/tombstone failures. The
 capacity correction is independently valid; maximum utilization is not the rollout
 objective.
 
@@ -1610,7 +1620,7 @@ Summarizes a prefix and preserves recent groups and attachments. Used by manual
 A cached future reactive result, optionally persisted in `.precompact.json`. It is
 not a third transcript format. It becomes semantic only when consumed.
 
-### Physical transcript GC — source-observed and excluded
+### Physical transcript GC: source-observed and excluded
 
 Claude source can rewrite JSONL storage after semantic compaction in a particular
 `sdkUrl`/remote-session initialization path. The 6,003,800-byte ordinary local fixture
@@ -1694,7 +1704,7 @@ For multi-site changes:
 - fail on partial application;
 - obtain pristine input independently of the currently installed patched binary;
 - keep the bytecode untouched;
-- do not use `node --check` on this bundle—Node 22 cannot parse the newer `using`
+- do not use `node --check` on this bundle; Node 22 cannot parse the newer `using`
   syntax; use exact extraction/diff plus real binary execution.
 
 This project should eventually plug into the repository's shared linker/codec
@@ -1807,9 +1817,10 @@ For Sol, Terra, and Luna:
 
 ### Independent comparison checks
 
-- **Offline catalog:** the Codex baked fallback and remote catalog both report the
-  intended active window; a successful remote refresh cannot hide a stale 272k baked
-  fallback.
+- **Catalog values:** compare each catalog with its own source. Codex's bundled catalog
+  and the backend's model list both give 272,000 as the default and 872,000 as the
+  maximum, so a 272,000 default is not a fallback defect
+  ([`reports/gpt-context-windows.md`](reports/gpt-context-windows.md)).
 - **Codex math:** expose and verify raw context, 90% automatic threshold, and 95%
   effective limit as distinct values (372k → 334,800 / 353,400 in the pinned source).
 - **Tri-transport equivalence:** HTTP JSON, HTTP SSE, and Responses WebSocket produce
@@ -1824,6 +1835,7 @@ The durable corpus now lives inside this project:
 - [`reports/founding-experiments-and-evidence-gaps.md`](reports/founding-experiments-and-evidence-gaps.md)
 - [`reports/corpus-absorption-checklist.md`](reports/corpus-absorption-checklist.md)
 - [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md)
+- [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md)
 - [`evidence/claude/midturn-steering-order.json`](evidence/claude/midturn-steering-order.json)
 - [`evidence/cliproxy/direct-midturn-translation.json`](evidence/cliproxy/direct-midturn-translation.json)
 - [`evidence/provenance/source-pins.json`](evidence/provenance/source-pins.json)
@@ -1911,7 +1923,7 @@ A wholesale rerun of the Claude durability workflow is unnecessary.
 
 ## Immediate implementation scope
 
-The first implementation batch may include only Rungs 0–2:
+The first implementation batch may include only Rungs 0-2:
 
 ```text
 coherent profile
@@ -1986,7 +1998,10 @@ Local source cannot establish:
   revisions are silent;
 - provider behavior when two distinct valid encrypted reasoning items are supplied;
 - provider prompt-cache isolation and content validation;
-- real aggregate input/output boundary behavior near 372k/128k;
+- Codex's input limit for each model and plan: gpt-5.6-sol on the Plus account accepted
+  921,105 tokens and rejected less than 1,000 more on 2026-09-19, and no other model has
+  a rejection on record ([`reports/gpt-context-windows.md`](reports/gpt-context-windows.md));
+  requests carry no output limit;
 - response-ID cancellation and idempotency semantics required by future continuation;
 - active production feature flags for every account/session;
 - remote service ordering, UUID immutability, event projection, and catch-up repair;
@@ -2010,7 +2025,7 @@ cross-protocol workflow
     ↓
 static policy workflow
     ↓
-Rungs 0–2 implementation
+Rungs 0-2 implementation
     ↓
 Rung 3 proxy replay compatibility
     ↓

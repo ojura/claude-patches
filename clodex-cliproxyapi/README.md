@@ -5,31 +5,35 @@ Durable architecture, evidence, and localhost reliability probes for the Claude 
 
 ## Start here
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — current system model, evidence taxonomy,
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): current system model, evidence taxonomy,
   findings, decisions, rejected designs, rollout ladder, and remaining work.
-- [`CLASSIFIER.md`](CLASSIFIER.md) — Claude auto mode, Codex Guardian, direct
+- [`CLASSIFIER.md`](CLASSIFIER.md): Claude auto mode, Codex Guardian, direct
   CLIProxyAPI reviewer translation, responsibility boundaries, cache behavior, and
   regression checks.
-- [`NATIVE_COMPACTION.md`](NATIVE_COMPACTION.md) — provisional native-compaction
+- [`NATIVE_COMPACTION.md`](NATIVE_COMPACTION.md): provisional native-compaction
   investigation; separates verified observations from unfinished process drafts and is
   not an accepted architecture decision.
-- [`ARTIFACTS.md`](ARTIFACTS.md) — provenance, evidence classification, exclusions,
+- [`ARTIFACTS.md`](ARTIFACTS.md): provenance, evidence classification, exclusions,
   retention gaps, and reproduction constraints.
-- [`reports/corpus-absorption-checklist.md`](reports/corpus-absorption-checklist.md) —
+- [`reports/corpus-absorption-checklist.md`](reports/corpus-absorption-checklist.md):
   finding-by-finding map from consolidation corrections to durable destinations and
   explicit open items.
 - [`evidence/claude/midturn-steering-order.json`](evidence/claude/midturn-steering-order.json)
-  and [`evidence/cliproxy/direct-midturn-translation.json`](evidence/cliproxy/direct-midturn-translation.json) —
+  and [`evidence/cliproxy/direct-midturn-translation.json`](evidence/cliproxy/direct-midturn-translation.json):
   canonical focused evidence for queue/normalization behavior and direct translation.
-- [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md) —
+- [`reports/midturn-steering-direct-path.md`](reports/midturn-steering-direct-path.md):
   absorbed focused narrative retained for readable sequencing.
-- [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md) —
+- [`reports/claude-messages-to-codex-translation.md`](reports/claude-messages-to-codex-translation.md):
   source-confirmed map of Claude Messages requests through Codex Responses requests and
   back to Claude streaming and non-streaming responses.
-- [`tools/repair_empty_text_blocks.py`](tools/repair_empty_text_blocks.py) — finds and
+- [`reports/gpt-context-windows.md`](reports/gpt-context-windows.md): what sets a GPT
+  session's context window and compaction point in Claude Code 2.1.296, what the catalogs
+  advertise, what Codex accepted and rejected, and why the launcher exports
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` and no compaction window.
+- [`tools/repair_empty_text_blocks.py`](tools/repair_empty_text_blocks.py): finds and
   repairs the empty text content blocks that make a proxied session unresumable on a
   Claude model. See [Repairing a transcript](#repairing-a-transcript).
-- [`SHA256SUMS`](SHA256SUMS) — integrity manifest for the durable current corpus.
+- [`SHA256SUMS`](SHA256SUMS): integrity manifest for the durable current corpus.
 
 ## Layout
 
