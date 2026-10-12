@@ -30,14 +30,21 @@ function fail(msg) {
 
 // The Claude Code executable and version: the nearest ancestor process whose
 // executable is .../claude/versions/<version> (native install) or is named claude.
+// An update deletes the binary that running sessions started from, and the
+// kernel then reports their executable as "<path> (deleted)". The file stays
+// readable through /proc/<pid>/exe for as long as the process runs, so that link
+// is what gets read and executed in that case.
 function claudeExecutable() {
   let pid = process.ppid;
   for (let i = 0; i < 10 && pid > 1; i++) {
-    let exe;
-    try { exe = readlinkSync(`/proc/${pid}/exe`); } catch { break; }
-    const v = /\/claude\/versions\/(\d+\.\d+\.\d+)$/.exec(exe);
+    let link;
+    try { link = readlinkSync(`/proc/${pid}/exe`); } catch { break; }
+    const deleted = link.endsWith(" (deleted)");
+    const name = deleted ? link.slice(0, -" (deleted)".length) : link;
+    const exe = deleted ? `/proc/${pid}/exe` : link;
+    const v = /\/claude\/versions\/(\d+\.\d+\.\d+)$/.exec(name);
     if (v) return { exe, version: v[1] };
-    if (/\/claude$/.test(exe)) {
+    if (/\/claude$/.test(name)) {
       const out = spawnSync(exe, ["--version"], { encoding: "utf8", timeout: 20000 });
       const m = /(\d+\.\d+\.\d+)/.exec(out.stdout ?? "");
       if (m) return { exe, version: m[1] };

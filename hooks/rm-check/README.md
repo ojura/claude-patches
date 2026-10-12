@@ -28,7 +28,11 @@ In `~/.claude/settings.json`:
 
 It needs `bun`, `python3` and this repository. It finds the Claude Code version
 by walking up its parent processes to the executable under
-`~/.local/share/claude/versions/`.
+`~/.local/share/claude/versions/`. An update deletes the binary that running
+sessions started from, and the kernel then reports their executable as
+`<path> (deleted)`. The hook strips that suffix to read the version, and
+`prepare.py` reads the binary through `/proc/<pid>/exe`, which stays readable
+while the process runs.
 
 ## How it finds the check
 
