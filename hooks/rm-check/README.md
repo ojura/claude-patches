@@ -50,8 +50,15 @@ The first time the hook sees a version, `prepare.py`:
 The hook then imports the chunk with bun, calls the function on the command,
 and denies when the result carries the `dangerousRemoval` safety check. A new
 version with the same structure needs no edit. If the vendor changes it,
-`prepare.py` fails naming the anchor, the hook exits 1, Claude Code reports a
-hook error and the harness prompt applies as before.
+`prepare.py` fails naming the anchor.
+
+Any failure of the hook, including that one and unexpected exceptions, fails
+open: the hook shows a "⚠ rm-check hook FAILED" warning with the cause in the
+session (`systemMessage`), rings the terminal bell (`terminalSequence`), posts a
+critical desktop notification with `notify-send`, and exits 0 without a
+decision. The command then goes on to Claude Code's own permission check, so a
+flagged rm gets the harness prompt as it would without the hook. The warning
+repeats on every command that mentions `rm` until the hook is fixed.
 
 The anchors match 2.1.281 through 2.1.296. After re-anchoring for a new
 version, run `check_versions.py <new> <old>`: it runs 20 commands through the
