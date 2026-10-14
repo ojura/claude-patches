@@ -47,8 +47,16 @@ The first time the hook sees a version, `prepare.py`:
 3. writes the bundle's modules to `/tmp/claude-<version>-rmcheck/` and exports
    that function from its chunk.
 
-The hook then imports the chunk with bun, calls the function on the command,
-and denies when the result carries the `dangerousRemoval` safety check. A new
+Importing that chunk takes about 0.45 s, because it pulls in a large part of
+the bundle; one check then takes 2 to 50 ms. `rm-check-server.mjs` keeps a
+version's check loaded and answers over the Unix socket
+`$XDG_RUNTIME_DIR/rm-check/<version>.sock`, in a directory only this user can
+enter. The hook asks that server; when none answers, it starts one and waits for
+it, and when no server can be started it imports the chunk itself
+(`rm-check-lib.mjs` holds the code both use). A server runs one check at a time,
+because the check reads the process's working directory, and exits after
+`RMCHECK_IDLE_SECONDS` (default 600) without a request, removing its socket. The
+hook denies when the result carries the `dangerousRemoval` safety check. A new
 version with the same structure needs no edit. If the vendor changes it,
 `prepare.py` fails naming the anchor.
 
@@ -74,8 +82,10 @@ hook for each version and reports whether the verdicts agree.
 
 ## Cost and limits
 
-- A command the hook checks takes about 0.5 s longer; other commands about
-  0.04 s. On 2026-10-14 the check ran for 164 of 6,972 Bash calls. Preparing a version takes 1 to 2 s, once.
+- A command the hook checks takes about 0.04 s with a running server and about
+  0.6 s when the hook starts one; other commands take about 0.03 s. A loaded
+  server holds about 190 MB until it exits. On 2026-10-14 the check ran for 164
+  of 6,972 Bash calls. Preparing a version takes 1 to 2 s, once.
 - Only the session's working directory is passed to the check. A directory
   added with `--add-dir` or `/add-dir` is unknown to the hook, so removing it or
   one of its parents still gets the harness prompt.
@@ -84,5 +94,6 @@ hook for each version and reports whether the verdicts agree.
   command instead of waiting for an answer.
 
 Checked live on 2.1.296 in bypass mode: a flagged `rm` from the main agent and
-from a background subagent was denied in about 0.5 s with no prompt, and an
-`rm` on an ordinary literal path ran.
+from a background subagent was denied with no prompt, and an `rm` on an
+ordinary literal path ran. Five hooks started at once against no server all
+returned the verdict and left one server running.

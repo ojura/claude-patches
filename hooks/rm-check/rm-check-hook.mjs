@@ -10,7 +10,11 @@
 // paths, passes through untouched.
 //
 // prepare.py (next to this file) extracts the version's bundle and exports the
-// function; it runs once per version. When the hook itself fails, it fails open:
+// function; it runs once per version. Importing that function takes about
+// 0.45 s, so rm-check-server.mjs keeps it loaded per version and answers over a
+// Unix socket; the hook starts the server when none answers, and the server
+// exits after an idle period. When no server answers, the hook runs the check
+// in its own process. When the hook itself fails, it fails open:
 // it warns in the session, rings the terminal bell and sends a desktop
 // notification, then exits 0 without a decision, so the command goes on to
 // Claude Code's own permission check and a flagged rm gets the harness prompt.
@@ -18,10 +22,12 @@
 // The hook passes only the session's working directory. Directories added with
 // --add-dir or /add-dir are unknown to it, so removing one of those (or a parent
 // of one) passes here and still gets the harness prompt.
-import { readFileSync, readlinkSync, statSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { readFileSync, readlinkSync, statSync, existsSync, mkdirSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadCheck } from "./rm-check-lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -78,24 +84,20 @@ function claudeExecutable() {
   return null;
 }
 
-// The result carries a dangerousRemoval safety check somewhere in its decision
-// reason (compound commands nest them under subcommandResults). Returns the
-// message of the innermost result that carries it.
-function dangerousRemovalMessage(result) {
-  const isDanger = (r) => r?.type === "safetyCheck" &&
-    (r.circuitBreaker === "dangerousRemoval" || (r.also ?? []).includes("dangerousRemoval"));
-  const walk = (res) => {
-    const r = res?.decisionReason;
-    if (r?.type === "subcommandResults" && r.reasons instanceof Map) {
-      for (const sub of r.reasons.values()) {
-        const found = walk(sub);
-        if (found !== undefined) return found;
-      }
-    }
-    if (isDanger(r)) return String(res.message ?? r.reason ?? "");
-    return undefined;
-  };
-  return walk(result);
+// Sends one request to the server at sockPath and returns its reply, or null
+// when no server answers within timeoutMs.
+function ask(sockPath, request, timeoutMs) {
+  return new Promise((resolve) => {
+    let buf = "";
+    const sock = net.createConnection(sockPath);
+    const done = (v) => { clearTimeout(timer); sock.destroy(); resolve(v); };
+    const timer = setTimeout(() => done(null), timeoutMs);
+    sock.setEncoding("utf8");
+    sock.on("connect", () => sock.write(JSON.stringify(request) + "\n"));
+    sock.on("data", (d) => { buf += d; });
+    sock.on("end", () => { try { done(JSON.parse(buf)); } catch { done(null); } });
+    sock.on("error", () => done(null));
+  });
 }
 
 const input = JSON.parse(readFileSync(0, "utf8"));
@@ -106,7 +108,8 @@ const command = String(input.tool_input?.command ?? "");
 // starts with $ or a brace expansion. Such a script is flagged with "runs rm"
 // although its text never contains rm, for example an awk program whose
 // `&& \$5 !~ ...` the check reads as a command named $5. Every other command
-// skips the check, which costs about 0.5 s per run.
+// skips the check: a check costs about 0.04 s with a running server and about
+// 0.6 s when the hook has to start one.
 const SHELL_C = /(?:^|[^\w.-])(?:(?:ba|z|da|mk|k|a|hu|rba)?sh|busybox|toybox|su|runuser)\b[^;&|\n]*?\s-[A-Za-z]*c(?![\w-])/;
 if (!/\brm(?:dir)?\b/i.test(command) && !SHELL_C.test(command)) process.exit(0);
 
@@ -125,34 +128,41 @@ if (!existsSync(join(dir, "manifest.json"))) {
 const st = statSync(dir);
 if (st.uid !== process.getuid() || (st.mode & 0o022) !== 0)
   failOpen(`${dir} is not owned by this user or is writable by others`);
-const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+const request = { command, cwd: input.cwd, mode: input.permission_mode ?? "default" };
 
-try {
-  if (input.cwd) process.chdir(input.cwd);
-} catch { /* keep the hook's own cwd */ }
+// The server's socket lives in a directory only this user can enter.
+const sockDir = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`, "rm-check");
+mkdirSync(sockDir, { recursive: true, mode: 0o700 });
+const sd = statSync(sockDir);
+if (sd.uid !== process.getuid() || (sd.mode & 0o077) !== 0)
+  failOpen(`${sockDir} is not owned by this user or is open to others`);
+const sockPath = join(sockDir, `${found.version}.sock`);
 
-let result;
-try {
-  const mod = await import(join(dir, manifest.chunk));
-  const check = mod[manifest.export];
-  if (typeof check !== "function") failOpen(`${manifest.chunk} does not export ${manifest.export}`);
-  const toolPermissionContext = {
-    mode: input.permission_mode ?? "default",
-    additionalWorkingDirectories: new Map(),
-    alwaysAllowRules: {}, alwaysDenyRules: {}, alwaysAskRules: {},
-    isBypassPermissionsModeAvailable: true,
-    mcpPermissionModeOverrides: {},
-  };
-  result = await check({ command }, {
-    getAppState: () => ({ toolPermissionContext }),
-    abortController: new AbortController(),
-  });
-} catch (e) {
-  failOpen(`the ${found.version} permission check threw: ${e?.stack ?? e}`);
+let reply = await ask(sockPath, request, 5000);
+if (reply === null) {
+  // Start a server and wait for it to load the check (about 0.5 s). Two hooks
+  // starting one at the same moment is harmless: the second server finds the
+  // first one answering and exits. When the server this hook started exits,
+  // one more request decides whether another server answers.
+  const child = spawn(process.execPath, [join(HERE, "rm-check-server.mjs"), dir, sockPath],
+    { detached: true, stdio: "ignore" });
+  let exited = false;
+  child.on("exit", () => { exited = true; });
+  child.unref();
+  for (let waited = 0; reply === null && !exited && waited < 10000; waited += 100) {
+    await new Promise((r) => setTimeout(r, 100));
+    reply = await ask(sockPath, request, 5000);
+  }
+  if (reply === null && exited) reply = await ask(sockPath, request, 5000);
 }
+if (reply === null) {
+  try { reply = { message: await (await loadCheck(dir))(request) }; }
+  catch (e) { failOpen(`the ${found.version} permission check threw: ${e?.stack ?? e}`); }
+}
+if (reply.error !== undefined) failOpen(`the ${found.version} rm-check server failed: ${reply.error}`);
 
-const message = dangerousRemovalMessage(result);
-if (message !== undefined) {
+const message = reply.message;
+if (message !== null && message !== undefined) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
