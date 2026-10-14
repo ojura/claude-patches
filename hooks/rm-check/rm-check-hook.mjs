@@ -101,8 +101,14 @@ function dangerousRemovalMessage(result) {
 const input = JSON.parse(readFileSync(0, "utf8"));
 if (input.tool_name !== "Bash") process.exit(0);
 const command = String(input.tool_input?.command ?? "");
-// The check itself only looks at commands that mention rm or rmdir.
-if (!/\brm(?:dir)?\b/i.test(command)) process.exit(0);
+// The check flags commands that mention rm or rmdir, and shell -c scripts it
+// cannot fully check when a word in command position could be rm: a word that
+// starts with $ or a brace expansion. Such a script is flagged with "runs rm"
+// although its text never contains rm, for example an awk program whose
+// `&& \$5 !~ ...` the check reads as a command named $5. Every other command
+// skips the check, which costs about 0.5 s per run.
+const SHELL_C = /(?:^|[^\w.-])(?:(?:ba|z|da|mk|k|a|hu|rba)?sh|busybox|toybox|su|runuser)\b[^;&|\n]*?\s-[A-Za-z]*c(?![\w-])/;
+if (!/\brm(?:dir)?\b/i.test(command) && !SHELL_C.test(command)) process.exit(0);
 
 // RMCHECK_CLAUDE_VERSION runs another installed version's check (for testing).
 const forced = process.env.RMCHECK_CLAUDE_VERSION;
@@ -157,7 +163,9 @@ if (message !== undefined) {
         "it would wait for a person to approve it. Rewrite the removal so the check " +
         "passes, as its text below advises (usually a literal absolute path or a " +
         "${VAR:?} guard), and run it again. Deleting with python3 -I (pathlib unlink, " +
-        "shutil.rmtree) on a literal absolute path you have checked also works.\n\n" +
+        "shutil.rmtree) on a literal absolute path you have checked also works. When " +
+        "the check names a shell -c script it could not check, write the script to a " +
+        "file and run it with sh <file>, or run its commands without sh -c.\n\n" +
         "The check's text: " + message,
     },
   }));

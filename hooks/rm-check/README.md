@@ -58,7 +58,15 @@ session (`systemMessage`), rings the terminal bell (`terminalSequence`), posts a
 critical desktop notification with `notify-send`, and exits 0 without a
 decision. The command then goes on to Claude Code's own permission check, so a
 flagged rm gets the harness prompt as it would without the hook. The warning
-repeats on every command that mentions `rm` until the hook is fixed.
+repeats on every command the hook checks until the hook is fixed.
+
+The hook runs the check on commands that mention `rm` or `rmdir` and on shell
+`-c` scripts (`sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `hush`,
+`rbash`, `busybox`, `toybox`, `su`, `runuser`). The check also flags a `-c`
+script it cannot fully check when a word in command position could be `rm`: a
+word that starts with `$`, or a brace expansion. Its message then says the
+script "runs rm" although the text never contains `rm`; an awk program with
+`&& \$5 !~ ...` inside `sh -c '...'` is enough.
 
 The anchors match 2.1.281 through 2.1.296. After re-anchoring for a new
 version, run `check_versions.py <new> <old>`: it runs 20 commands through the
@@ -66,8 +74,8 @@ hook for each version and reports whether the verdicts agree.
 
 ## Cost and limits
 
-- A command that mentions `rm` or `rmdir` takes about 0.5 s longer; other
-  commands about 0.04 s. Preparing a version takes 1 to 2 s, once.
+- A command the hook checks takes about 0.5 s longer; other commands about
+  0.04 s. On 2026-10-14 the check ran for 164 of 6,972 Bash calls. Preparing a version takes 1 to 2 s, once.
 - Only the session's working directory is passed to the check. A directory
   added with `--add-dir` or `/add-dir` is unknown to the hook, so removing it or
   one of its parents still gets the harness prompt.
