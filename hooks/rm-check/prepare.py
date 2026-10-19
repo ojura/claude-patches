@@ -93,6 +93,35 @@ def discover(data):
     return name.decode().split("/$bunfs/root/", 1)[-1], fn, records
 
 
+def prune(keep):
+    """Remove module caches the hook no longer needs: ~/.cache/rm-check/<version>
+    for each version that is not `keep`, not installed under
+    ~/.local/share/claude/versions/, and not the executable of a running process
+    (an update deletes the binary of sessions that keep running it), and the
+    /tmp/claude-<version>-rmcheck directories that earlier revisions wrote."""
+    needed = {keep}
+    installed = os.path.expanduser("~/.local/share/claude/versions")
+    if os.path.isdir(installed):
+        needed.update(os.listdir(installed))
+    for pid in os.listdir("/proc"):
+        try:
+            link = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            continue
+        m = re.search(r"/claude/versions/(\d+\.\d+\.\d+)(?: \(deleted\))?$", link)
+        if m:
+            needed.add(m.group(1))
+    base = os.path.dirname(version_dir(keep))
+    for v in os.listdir(base):
+        if re.fullmatch(r"\d+\.\d+\.\d+", v) and v not in needed:
+            shutil.rmtree(os.path.join(base, v), ignore_errors=True)
+    for name in os.listdir("/tmp"):
+        p = os.path.join("/tmp", name)
+        if (re.fullmatch(r"claude-\d+\.\d+\.\d+-rmcheck", name)
+                and not os.path.islink(p) and os.stat(p).st_uid == os.getuid()):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def extract(exe, vdir):
     js_path = os.path.join(vdir, "claude.js")
     if os.path.exists(js_path):
@@ -167,6 +196,8 @@ def main(argv):
         if os.path.exists(work):
             shutil.rmtree(work)
         raise
+    # A new version is when older caches become unused.
+    prune(version)
 
 
 if __name__ == "__main__":

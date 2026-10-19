@@ -51,6 +51,12 @@ The first time the hook sees a version, `prepare.py`:
 The hook imports and runs code from these files, so they are kept under your
 home directory, where other accounts cannot create or change them.
 
+After preparing a new version, `prepare.py` removes the cache directory of
+each version that is neither installed under `~/.local/share/claude/versions/`
+nor the executable of a running process, and the
+`/tmp/claude-<version>-rmcheck/` directories that earlier revisions of the hook
+wrote.
+
 Importing that chunk takes about 0.45 s, because it pulls in a large part of
 the bundle; one check then takes 2 to 50 ms. `rm-check-server.mjs` keeps a
 version's check loaded and answers over the Unix socket
