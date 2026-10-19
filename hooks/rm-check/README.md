@@ -39,7 +39,9 @@ while the process runs.
 The first time the hook sees a version, `prepare.py`:
 
 1. extracts the bundle to `/tmp/claude-<version>.js` with `bun_handler/bun_handler.py`,
-   unless that file exists;
+   unless that file exists, belongs to this user, and only this user can write
+   to it. A copy that fails that test, such as one another tool wrote with
+   umask 002, is extracted again and replaced;
 2. finds the Bash tool's permission function by structure with the pfg matcher:
    the anchor on the tool's `checkPermissions` method must match exactly once
    (`pfg.discovery._one`), and the function's body, brace-matched by
@@ -61,7 +63,7 @@ version with the same structure needs no edit. If the vendor changes it,
 `prepare.py` fails naming the anchor.
 
 Any failure of the hook, including that one and unexpected exceptions, fails
-open: the hook shows a "⚠ rm-check hook FAILED" warning with the cause in the
+open: the hook shows a "⚠ The rm-check hook failed" warning with the cause in the
 session (`systemMessage`), rings the terminal bell (`terminalSequence`), posts a
 critical desktop notification with `notify-send`, and exits 0 without a
 decision. The command then goes on to Claude Code's own permission check, so a

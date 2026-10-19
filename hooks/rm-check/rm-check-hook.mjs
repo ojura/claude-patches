@@ -42,14 +42,14 @@ function failOpen(msg) {
   const brief = (lines.length > 1 ? `${lines[0]} ${lines.at(-1)}` : lines[0] ?? "").slice(0, 300);
   try {
     spawnSync("notify-send", ["-u", "critical", "-a", "Claude Code rm-check", "-i", "dialog-warning",
-      "rm-check hook failed", `${brief}\nThe command went on to Claude Code's own check.`],
+      "rm-check hook failed", `${brief}\nClaude Code's own permission check still runs on the command.`],
       { timeout: 3000, stdio: "ignore" });
   } catch { /* the session warning below still reaches the user */ }
   process.stdout.write(JSON.stringify({
     systemMessage:
-      "⚠ rm-check hook FAILED; this command was not checked by it and goes on to " +
-      "Claude Code's own permission check, where a flagged rm shows the approval " +
-      `prompt again. Fix it in ~/claude-patches/hooks/rm-check (see its README).\n${text}`,
+      "⚠ The rm-check hook failed and did not check this command. Claude Code's own " +
+      "permission check still runs, and asks for approval when it flags an rm. " +
+      `To fix the hook, see ~/claude-patches/hooks/rm-check/README.md.\n${text}`,
     terminalSequence: "\x07",
   }));
   process.exit(0);
@@ -126,8 +126,11 @@ if (!existsSync(join(dir, "manifest.json"))) {
   if (prep.status !== 0) failOpen(`prepare.py failed for ${found.version}:\n${prep.stderr}`);
 }
 const st = statSync(dir);
-if (st.uid !== process.getuid() || (st.mode & 0o022) !== 0)
-  failOpen(`${dir} is not owned by this user or is writable by others`);
+if (st.uid !== process.getuid())
+  failOpen(`refusing to load modules from ${dir}: it belongs to uid ${st.uid}, not to this user (uid ${process.getuid()})`);
+if ((st.mode & 0o022) !== 0)
+  failOpen(`refusing to load modules from ${dir}: it has mode ${(st.mode & 0o777).toString(8)}, ` +
+    "so users other than its owner can write to it. Delete it and the hook prepares it again.");
 const request = { command, cwd: input.cwd, mode: input.permission_mode ?? "default" };
 
 // The server's socket lives in a directory only this user can enter.
@@ -135,7 +138,9 @@ const sockDir = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid(
 mkdirSync(sockDir, { recursive: true, mode: 0o700 });
 const sd = statSync(sockDir);
 if (sd.uid !== process.getuid() || (sd.mode & 0o077) !== 0)
-  failOpen(`${sockDir} is not owned by this user or is open to others`);
+  failOpen(`refusing to use the socket directory ${sockDir}: it belongs to uid ${sd.uid} ` +
+    `with mode ${(sd.mode & 0o777).toString(8)}, and it must belong to this user ` +
+    `(uid ${process.getuid()}) with mode 700`);
 const sockPath = join(sockDir, `${found.version}.sock`);
 
 let reply = await ask(sockPath, request, 5000);

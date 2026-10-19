@@ -5,7 +5,8 @@ Usage: prepare.py <claude-executable> <version>
        prepare.py --discover-only <extracted.js>
 
 Extracts the bundle to /tmp/claude-<version>.js with bun_handler/bun_handler.py
-(unless that file already exists), writes its modules to
+(unless that file already exists, belongs to this user, and only this user can
+write to it), writes its modules to
 /tmp/claude-<version>-rmcheck/, and exports the Bash tool's permission
 function from its chunk as __ccRmCheckBashPermission. The function is found by
 structure with the pfg matcher, so the minified names of each new version are
@@ -55,8 +56,16 @@ EXPORT_NAME = "__ccRmCheckBashPermission"
 BUNFS = b"/$bunfs/root/"
 
 
-def owned_by_me(st):
-    return st.st_uid == os.getuid() and not st.st_mode & 0o022
+def distrust_reason(p):
+    """Return why p cannot be trusted, or None when this user owns it and only
+    this user can write to it."""
+    st = os.stat(p)
+    if st.st_uid != os.getuid():
+        return f"{p} belongs to uid {st.st_uid}, not to this user (uid {os.getuid()})"
+    if st.st_mode & 0o022:
+        return (f"{p} has mode {st.st_mode & 0o777:o}, so users other than its owner "
+                "can write to it")
+    return None
 
 
 def discover(data):
@@ -92,10 +101,9 @@ def discover(data):
 
 def extract(exe, version):
     js_path = f"/tmp/claude-{version}.js"
-    if os.path.exists(js_path):
-        if not owned_by_me(os.stat(js_path)):
-            raise SystemExit(f"[rmcheck prepare] {js_path} is not owned by this user "
-                             "or is writable by others; refusing to use it")
+    # The file is only a cache. Another tool may have written it with a umask
+    # that leaves it group-writable; such a copy is extracted again and replaced.
+    if os.path.exists(js_path) and distrust_reason(js_path) is None:
         with open(js_path, "rb") as f:
             return f.read()
     with open(exe, "rb") as f:
@@ -103,7 +111,12 @@ def extract(exe, version):
     fd, tmp = tempfile.mkstemp(prefix=f"claude-{version}.js.", dir="/tmp")
     with os.fdopen(fd, "wb") as out:
         out.write(data)
-    os.replace(tmp, js_path)
+    try:
+        os.replace(tmp, js_path)
+    except PermissionError:
+        # /tmp is sticky, so another user's file cannot be replaced; the
+        # extracted data is still used, without a cache.
+        os.unlink(tmp)
     return data
 
 
@@ -144,9 +157,10 @@ def main(argv):
         raise SystemExit(f"[rmcheck prepare] bad version {version!r}")
     final = f"/tmp/claude-{version}-rmcheck"
     if os.path.exists(os.path.join(final, "manifest.json")):
-        if not owned_by_me(os.stat(final)):
-            raise SystemExit(f"[rmcheck prepare] {final} is not owned by this user or is "
-                             "writable by others; refusing to use it")
+        reason = distrust_reason(final)
+        if reason is not None:
+            raise SystemExit(f"[rmcheck prepare] refusing to load modules from {final}: "
+                             f"{reason}. Delete it and the hook prepares it again.")
         return
     data = extract(exe, version)
     chunk, fn, records = discover(data)
