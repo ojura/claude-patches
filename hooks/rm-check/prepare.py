@@ -4,10 +4,10 @@
 Usage: prepare.py <claude-executable> <version>
        prepare.py --discover-only <extracted.js>
 
-Extracts the bundle to /tmp/claude-<version>.js with bun_handler/bun_handler.py
-(unless that file already exists, belongs to this user, and only this user can
-write to it), writes its modules to
-/tmp/claude-<version>-rmcheck/, and exports the Bash tool's permission
+Extracts the bundle to ~/.cache/rm-check/<version>/claude.js (under
+$XDG_CACHE_HOME when it is set) with bun_handler/bun_handler.py, unless that
+file already exists, writes its modules to ~/.cache/rm-check/<version>/modules/,
+and exports the Bash tool's permission
 function from its chunk as __ccRmCheckBashPermission. The function is found by
 structure with the pfg matcher, so the minified names of each new version are
 resolved without editing this file:
@@ -56,16 +56,10 @@ EXPORT_NAME = "__ccRmCheckBashPermission"
 BUNFS = b"/$bunfs/root/"
 
 
-def distrust_reason(p):
-    """Return why p cannot be trusted, or None when this user owns it and only
-    this user can write to it."""
-    st = os.stat(p)
-    if st.st_uid != os.getuid():
-        return f"{p} belongs to uid {st.st_uid}, not to this user (uid {os.getuid()})"
-    if st.st_mode & 0o022:
-        return (f"{p} has mode {st.st_mode & 0o777:o}, so users other than its owner "
-                "can write to it")
-    return None
+def version_dir(version):
+    """The cache directory of one version; rm-check-hook.mjs computes the same path."""
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "rm-check", version)
 
 
 def discover(data):
@@ -99,24 +93,17 @@ def discover(data):
     return name.decode().split("/$bunfs/root/", 1)[-1], fn, records
 
 
-def extract(exe, version):
-    js_path = f"/tmp/claude-{version}.js"
-    # The file is only a cache. Another tool may have written it with a umask
-    # that leaves it group-writable; such a copy is extracted again and replaced.
-    if os.path.exists(js_path) and distrust_reason(js_path) is None:
+def extract(exe, vdir):
+    js_path = os.path.join(vdir, "claude.js")
+    if os.path.exists(js_path):
         with open(js_path, "rb") as f:
             return f.read()
     with open(exe, "rb") as f:
         data = bun_handler.extract_js(f.read())
-    fd, tmp = tempfile.mkstemp(prefix=f"claude-{version}.js.", dir="/tmp")
+    fd, tmp = tempfile.mkstemp(prefix="claude.js.", dir=vdir)
     with os.fdopen(fd, "wb") as out:
         out.write(data)
-    try:
-        os.replace(tmp, js_path)
-    except PermissionError:
-        # /tmp is sticky, so another user's file cannot be replaced; the
-        # extracted data is still used, without a cache.
-        os.unlink(tmp)
+    os.replace(tmp, js_path)
     return data
 
 
@@ -155,16 +142,14 @@ def main(argv):
     exe, version = argv
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise SystemExit(f"[rmcheck prepare] bad version {version!r}")
-    final = f"/tmp/claude-{version}-rmcheck"
+    vdir = version_dir(version)
+    final = os.path.join(vdir, "modules")
     if os.path.exists(os.path.join(final, "manifest.json")):
-        reason = distrust_reason(final)
-        if reason is not None:
-            raise SystemExit(f"[rmcheck prepare] refusing to load modules from {final}: "
-                             f"{reason}. Delete it and the hook prepares it again.")
         return
-    data = extract(exe, version)
+    os.makedirs(vdir, exist_ok=True)
+    data = extract(exe, vdir)
     chunk, fn, records = discover(data)
-    work = tempfile.mkdtemp(prefix=f"claude-{version}-rmcheck.", dir="/tmp")
+    work = tempfile.mkdtemp(prefix="modules.", dir=vdir)
     try:
         # Import paths point at the final directory, so the tree only loads once
         # renamed there; the rename also makes a half-written tree invisible.

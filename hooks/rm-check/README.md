@@ -38,16 +38,18 @@ while the process runs.
 
 The first time the hook sees a version, `prepare.py`:
 
-1. extracts the bundle to `/tmp/claude-<version>.js` with `bun_handler/bun_handler.py`,
-   unless that file exists, belongs to this user, and only this user can write
-   to it. A copy that fails that test, such as one another tool wrote with
-   umask 002, is extracted again and replaced;
+1. extracts the bundle to `~/.cache/rm-check/<version>/claude.js` (under
+   `$XDG_CACHE_HOME` when it is set) with `bun_handler/bun_handler.py`, unless
+   that file exists;
 2. finds the Bash tool's permission function by structure with the pfg matcher:
    the anchor on the tool's `checkPermissions` method must match exactly once
    (`pfg.discovery._one`), and the function's body, brace-matched by
    `pfg.jslex`, must test for `"dangerousRemoval"`;
-3. writes the bundle's modules to `/tmp/claude-<version>-rmcheck/` and exports
-   that function from its chunk.
+3. writes the bundle's modules to `~/.cache/rm-check/<version>/modules/` and
+   exports that function from its chunk.
+
+The hook imports and runs code from these files, so they are kept under your
+home directory, where other accounts cannot create or change them.
 
 Importing that chunk takes about 0.45 s, because it pulls in a large part of
 the bundle; one check then takes 2 to 50 ms. `rm-check-server.mjs` keeps a

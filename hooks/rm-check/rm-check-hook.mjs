@@ -119,18 +119,14 @@ const found = forced
   ? { exe: join(process.env.HOME ?? "", ".local/share/claude/versions", forced), version: forced }
   : claudeExecutable();
 if (found === null) failOpen("could not find the Claude Code executable among the parent processes");
-const dir = `/tmp/claude-${found.version}-rmcheck`;
+// prepare.py computes the same directory (version_dir).
+const cacheBase = process.env.XDG_CACHE_HOME || join(process.env.HOME ?? "", ".cache");
+const dir = join(cacheBase, "rm-check", found.version, "modules");
 if (!existsSync(join(dir, "manifest.json"))) {
   const prep = spawnSync("python3", ["-I", join(HERE, "prepare.py"), found.exe, found.version],
     { encoding: "utf8", timeout: 300000 });
   if (prep.status !== 0) failOpen(`prepare.py failed for ${found.version}:\n${prep.stderr}`);
 }
-const st = statSync(dir);
-if (st.uid !== process.getuid())
-  failOpen(`refusing to load modules from ${dir}: it belongs to uid ${st.uid}, not to this user (uid ${process.getuid()})`);
-if ((st.mode & 0o022) !== 0)
-  failOpen(`refusing to load modules from ${dir}: it has mode ${(st.mode & 0o777).toString(8)}, ` +
-    "so users other than its owner can write to it. Delete it and the hook prepares it again.");
 const request = { command, cwd: input.cwd, mode: input.permission_mode ?? "default" };
 
 // The server's socket lives in a directory only this user can enter.
