@@ -8,11 +8,13 @@ No synthetic executable is executed by this test file.
 import contextlib
 import hashlib
 import io
+import json
 import os
 import random
 import tempfile
 import struct
 import unittest
+from unittest import mock
 
 import bun_handler as h
 from test_bun_handler import _module, build_bun_elf
@@ -309,7 +311,7 @@ class InteropTests(unittest.TestCase):
         with self.assertRaisesRegex(h.BunFormatError, 'original pre-table'):
             h.compact_with_reference(twice, self.appended)
 
-    def test_utf16_selftest_uses_physical_storage_delta(self):
+    def test_utf16_byte_stability_gates_use_physical_storage_delta(self):
         text = 'console.log("(Claude Code) café");' + '/*' + 'long '*100 + '*/'
         data = build_bun_elf([_module('/$bunfs/root/cli', text.encode('utf-16-le'), encoding=2, module_format=1)])
         with tempfile.TemporaryDirectory() as directory:
@@ -318,8 +320,54 @@ class InteropTests(unittest.TestCase):
                 stream.write(data)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(h._selftest(path), 0)
+                self.assertEqual(h._byte_stability_gates(path), 0)
             self.assertIn('storage delta -', output.getvalue())
+
+    def test_selftest_runs_the_harness_on_the_given_binary(self):
+        # A stub stands in for test_bun_handler.py so this suite never executes
+        # a Claude binary. It records its arguments and CLAUDE_NATIVE_BINARY.
+        data = build_bun_elf([_module('/$bunfs/root/cli', 'console.log("(Claude Code)");', module_format=1)])
+        with tempfile.TemporaryDirectory() as directory:
+            binary, record = os.path.join(directory, 'fixture'), os.path.join(directory, 'record')
+            with open(binary, 'wb') as stream: stream.write(data)
+            for harness_exit, selftest_exit, verdict in (
+                    (0, 0, 'SELFTEST PASS'), (3, 1, 'SELFTEST FAIL (test harness exit code 3)')):
+                with self.subTest(harness_exit=harness_exit):
+                    harness = os.path.join(directory, f'harness{harness_exit}.py')
+                    with open(harness, 'w') as stream:
+                        stream.write('import json, os, sys\n'
+                                     f'with open({record!r}, "w") as out:\n'
+                                     '    json.dump([sys.argv[1:], os.environ["CLAUDE_NATIVE_BINARY"]], out)\n'
+                                     f'sys.exit({harness_exit})\n')
+                    output = io.StringIO()
+                    with mock.patch.object(h, 'TEST_HARNESS', harness), \
+                            mock.patch.dict(os.environ, {'CLAUDE_NATIVE_BINARY': '/inherited/other-binary'}), \
+                            contextlib.redirect_stdout(output):
+                        self.assertEqual(h._selftest(binary), selftest_exit)
+                    with open(record) as stream:
+                        self.assertEqual(json.load(stream), [[binary], binary])
+                    self.assertIn('BYTE-STABILITY GATES PASS', output.getvalue())
+                    self.assertEqual(output.getvalue().splitlines()[-1], verdict)
+
+    def test_selftest_fails_without_the_harness_or_after_a_failed_check(self):
+        data = build_bun_elf([_module('/$bunfs/root/cli', 'console.log("(Claude Code)");', module_format=1)])
+        with tempfile.TemporaryDirectory() as directory:
+            binary, not_bun = os.path.join(directory, 'fixture'), os.path.join(directory, 'not-bun')
+            harness, record = os.path.join(directory, 'harness.py'), os.path.join(directory, 'record')
+            with open(binary, 'wb') as stream: stream.write(data)
+            with open(not_bun, 'wb') as stream: stream.write(b'not a bun executable')
+            with open(harness, 'w') as stream: stream.write(f'open({record!r}, "w").close()\n')
+            output = io.StringIO()
+            with mock.patch.object(h, 'TEST_HARNESS', harness), contextlib.redirect_stdout(output):
+                self.assertEqual(h._selftest(not_bun), 1)
+            self.assertFalse(os.path.exists(record))
+            self.assertEqual(output.getvalue().splitlines()[-2:],
+                             ['test harness not run because the byte-stability checks failed', 'SELFTEST FAIL'])
+            output = io.StringIO()
+            missing = os.path.join(directory, 'missing.py')
+            with mock.patch.object(h, 'TEST_HARNESS', missing), contextlib.redirect_stdout(output):
+                self.assertEqual(h._selftest(binary), 1)
+            self.assertEqual(output.getvalue(), f'SELFTEST FAIL: test harness not found: {missing}\n')
 
     def test_exclusive_output_publication(self):
         with tempfile.TemporaryDirectory() as directory:

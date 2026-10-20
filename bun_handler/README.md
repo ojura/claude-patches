@@ -2,8 +2,8 @@
 
 `bun_handler.py` reads and rewrites the JavaScript inside Claude Code's native
 executables, which `bun build --compile` produces. It uses only the Python
-standard library (`hashlib`, `os`, `struct`, `sys`, `tempfile`). Every other file
-in this directory tests or validates it.
+standard library (`hashlib`, `os`, `struct`, `subprocess`, `sys`, `tempfile`).
+Every other file in this directory tests or validates it.
 
 Scripts in `util/` and `hooks/` import it after adding this directory to
 `sys.path`.
@@ -29,6 +29,14 @@ module format and side. Use it instead of parsing the table by hand. Bun has use
 bounds-checks every field. A hand parser that assumes the wrong size reads
 misaligned fields as offsets and lengths, and copying those ranges for every
 record can need many times the binary's size in memory.
+
+`selftest` first runs three byte-stability checks on the binary: a no-op repack
+is byte-identical, a length-changing edit round-trips and drops the changed
+modules' compiled state, and two identical edits produce identical bytes. When
+they pass, it runs `test_bun_handler.py` on the same binary, which must sit next
+to `bun_handler.py`, and passes only if the harness passes too. The harness runs
+patched copies of the binary with `--version`; for 2.1.304 the whole command
+takes about 13 seconds and 1.8 GB of memory.
 
 ## Library
 
@@ -122,12 +130,13 @@ attempts.
 ## Tests
 
 ```sh
-# 345 synthetic tests; none runs a native binary.
+# 347 synthetic tests; none runs a Claude binary.
 python3 -m unittest discover -s bun_handler -v
 
 # 130 synthetic checks plus the gates on a real binary. The gates run patched
 # copies of it. CLAUDE_PFG_STRICT_GATES=gate1,gate2,... turns a skipped gate into
-# a failure.
+# a failure. `bun_handler.py selftest <binary>` runs this harness after its
+# byte-stability checks.
 python3 bun_handler/test_bun_handler.py ~/.local/share/claude/versions/<version>
 
 # Randomized ELF, PE and new-record fixtures.

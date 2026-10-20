@@ -46,6 +46,7 @@ Why changed modules must shed compiled state:
 import hashlib
 import os
 import struct
+import subprocess
 import sys
 import tempfile
 
@@ -2677,12 +2678,13 @@ def detect_format(data):
 # Self-test / CLI
 # ---------------------------------------------------------------------------
 
-def _selftest(path):
+def _byte_stability_gates(path):
     """Run byte-stability checks against a real binary at `path` (read-only):
       1. no-op repack is byte-identical
       2. a length-growing edit round-trips and invalidates stale compiled views
       3. determinism: two identical edits produce identical bytes
-    Does NOT execute the produced binary (callers can do that). Returns 0 on pass.
+    Does NOT execute the produced binary; `_selftest` runs the test harness for
+    that. Returns 0 on pass.
     """
     with open(path, "rb") as f:
         data = f.read()
@@ -2772,11 +2774,54 @@ def _selftest(path):
           f"({geometry_detail}); "
           f"size-valid={gate2_size}; re-extract={gate2_roundtrip}; "
           f"compiled-state-invalidated={gate2_invalidated}")
-    print("  (runtime behavior is exercised by the standalone test harness)")
 
     ok = gate1 and gate2_size and gate2_roundtrip and gate2_invalidated and gate3
-    print(f"SELFTEST {'PASS' if ok else 'FAIL'}")
+    print(f"BYTE-STABILITY GATES {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
+
+
+# The standalone harness next to this file. It runs the synthetic checks, the
+# format guards and the real-binary gates, which execute patched copies of the
+# binary with --version.
+TEST_HARNESS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_bun_handler.py")
+
+
+def _run_test_harness(path):
+    """Run TEST_HARNESS on the binary at `path` and return its exit code.
+
+    CLAUDE_NATIVE_BINARY is set to `path`, so an inherited value cannot make the
+    harness test a different binary. CLAUDE_PFG_STRICT_GATES and
+    CLAUDE_PFG_STRICT_GATES_WAIVE are inherited, so they can still turn a skipped
+    gate into a failure. The harness writes to this process's stdout and stderr.
+    """
+    binary = os.path.abspath(path)
+    flags = [flag for flag, on in (("-I", sys.flags.isolated),
+                                   ("-B", sys.flags.dont_write_bytecode)) if on]
+    sys.stdout.flush()
+    return subprocess.run([sys.executable, *flags, TEST_HARNESS, binary],
+                          env=dict(os.environ, CLAUDE_NATIVE_BINARY=binary)).returncode
+
+
+def _selftest(path):
+    """Run the byte-stability gates, then the test harness, on the binary at `path`.
+
+    The harness runs only when the byte-stability checks pass. Returns 0 only
+    when both pass.
+    """
+    if not os.path.isfile(TEST_HARNESS):
+        print(f"SELFTEST FAIL: test harness not found: {TEST_HARNESS}")
+        return 1
+    if _byte_stability_gates(path) != 0:
+        print("test harness not run because the byte-stability checks failed")
+        print("SELFTEST FAIL")
+        return 1
+    print()
+    rc = _run_test_harness(path)
+    if rc != 0:
+        print(f"SELFTEST FAIL (test harness exit code {rc})")
+        return 1
+    print("SELFTEST PASS")
+    return 0
 
 
 def _write_new_file(path, data, *, mode=0o600):
@@ -2814,7 +2859,7 @@ def _usage():
     print("  modules <binary>                list the module table as TSV", file=sys.stderr)
     print("  extract <binary> [out.js]       extract complete patchable JS", file=sys.stderr)
     print("  extract-tweakcc <binary> [new-out.js]  read recognized rebuild source", file=sys.stderr)
-    print("  selftest <binary>               run byte-stability gates", file=sys.stderr)
+    print("  selftest <binary>               run byte-stability gates, then test_bun_handler.py", file=sys.stderr)
     print("  recover-tweakcc <binary> <new-output> [--reference <original>]", file=sys.stderr)
     print("  compact <binary> <reference> <new-output>  recover verified append overhead", file=sys.stderr)
 
