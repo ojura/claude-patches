@@ -12,10 +12,9 @@ Scripts in `util/` and `hooks/` import it after adding this directory to
 
 ```sh
 python3 bun_handler.py detect <binary>
-python3 bun_handler.py modules <binary>
-python3 bun_handler.py extract <binary> [out.js]
+python3 bun_handler.py modules [--strict] <binary>
+python3 bun_handler.py extract [--strict] <binary> [out.js]
 python3 bun_handler.py selftest <binary>
-python3 bun_handler.py extract-tweakcc <binary> [out.js]
 python3 bun_handler.py recover-tweakcc <binary> <new-output> [--reference <original>]
 python3 bun_handler.py compact <binary> <reference> <new-output>
 ```
@@ -109,9 +108,12 @@ attempts.
 
 ## Repairing other tools' output
 
-- `extract-tweakcc` reads a binary rebuilt by tweakcc's full serializer (main at
-  `a806feb`), including source that tweakcc stored as UTF-8 under a stale Latin-1
-  tag.
+- `extract` and `modules` read a binary rebuilt by tweakcc's full serializer
+  (main at `a806feb`) with a separate reader and say so on stderr. `extract` also
+  recovers source that tweakcc stored as UTF-8 under a stale Latin-1 tag. With
+  `--strict` both refuse such a binary. The library's strict entry points
+  (`extract_js`, `repack_with_js` and the others) refuse it with an error that
+  says to run `recover-tweakcc`; `extract_tweakcc_js()` reads it.
 - `recover-tweakcc` with `--reference <original>` checks that everything except
   the edited sources matches the original, then replays the edited sources onto
   the original with the normal writer, which restores the optional records tweakcc
@@ -130,7 +132,7 @@ attempts.
 ## Tests
 
 ```sh
-# 347 synthetic tests; none runs a Claude binary.
+# 349 synthetic tests; none runs a Claude binary.
 python3 -m unittest discover -s bun_handler -v
 
 # 130 synthetic checks plus the gates on a real binary. The gates run patched

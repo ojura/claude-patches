@@ -2080,7 +2080,7 @@ def repack_module_sources(data, replacements, *, expected_sha256):
     """
     data = _immutable_bytes(data, "binary")
     _check_source_digest(data, expected_sha256)
-    img = BunImage(data)
+    img = _bun_image(data)
     allowed = {m["index"] for m in img.source_modules()}
     edits = {}
     for replacement in replacements:
@@ -2199,7 +2199,7 @@ def compact_with_reference(data, reference_data, *, expected_sha256=None,
     reference_data = _immutable_bytes(reference_data, "reference binary")
     _check_source_digest(data, expected_sha256)
     _check_source_digest(reference_data, reference_sha256)
-    current, reference = BunImage(data), BunImage(reference_data)
+    current, reference = _bun_image(data), _bun_image(reference_data)
     current_sources, reference_sources = current.source_modules(), reference.source_modules()
     _verify_reference_container(current, reference)
     if (current.module_struct_size, current.modules_len, current.entry_point_id) != (
@@ -2315,8 +2315,9 @@ class _TweakccRebuildImage(BunImage):
     offset; records follow the fields, followed immediately by argv and offsets.
     It has no optional records even when flags advertise them. Compiled payloads
     are read ONLY as opaque bounded bytes, never executed or treated as caches.
-    Ordinary BunImage remains strict. This reader is used only by explicit
-    recovery/extraction APIs, never as a permissive fallback in normal repacking.
+    Ordinary BunImage remains strict. This reader serves recovery,
+    extract_tweakcc_js(), and the modules and extract commands, which fall back
+    to it unless --strict is given. Repacking never falls back to it.
     """
 
     def _parse_optional_records(self):
@@ -2569,6 +2570,36 @@ def recover_tweakcc(data, reference_data=None, *, expected_sha256=None,
 
 
 
+def _tweakcc_rebuild_or_none(data):
+    """Return the tweakcc reader's image of `data`, or None when `data` is not a
+    recognized tweakcc full rebuild."""
+    try:
+        return _TweakccRebuildImage(data)
+    except (BunFormatError, NotImplementedError):
+        return None
+
+
+def _bun_image(data, *, tweakcc=False):
+    """Parse `data` with the strict reader.
+
+    When the strict reader refuses a recognized tweakcc full rebuild, raise an
+    error that names it, or with `tweakcc=True` return the tweakcc reader's
+    image for reading. recover_tweakcc() turns such a binary into one the
+    writer can patch.
+    """
+    try:
+        return BunImage(data)
+    except BunFormatError as exc:
+        rebuild = _tweakcc_rebuild_or_none(data)
+        if rebuild is None:
+            raise
+        if tweakcc:
+            return rebuild
+        raise BunFormatError(
+            f"tweakcc full rebuild; run recover-tweakcc to make it patchable "
+            f"(strict reader: {exc})") from exc
+
+
 def can_handle(data):
     """Return True if `data` is a bun .bun-section ELF64 we can patch."""
     try:
@@ -2582,7 +2613,7 @@ def can_handle(data):
 
 def extract_js(data):
     """Extract the complete patchable JavaScript source from a bun binary."""
-    return BunImage(data).extract_js()
+    return _bun_image(data).extract_js()
 
 
 def repack_with_js(data, new_js, *, expected_sha256=None):
@@ -2598,7 +2629,7 @@ def repack_with_js(data, new_js, *, expected_sha256=None):
     """
     data = _immutable_bytes(data, "binary")
     _check_source_digest(data, expected_sha256)
-    img = BunImage(data)
+    img = _bun_image(data)
     modules = img.source_modules()
     records = split_extracted_js(new_js, single_module=len(modules) == 1)
 
@@ -2637,7 +2668,7 @@ def repack_unchanged(data):
     The result must equal the input exactly for both single-module and split ESM
     builds. This checks every source-module range that the public API can edit.
     """
-    img = BunImage(data)
+    img = _bun_image(data)
     edits = {
         (module["index"], "contents"): img.read_source(module)
         for module in img.source_modules()
@@ -2666,9 +2697,7 @@ def detect_format(data):
     except NotImplementedError as exc:
         return f"bun {kind} (unsupported: {exc})"
     except BunFormatError as exc:
-        try:
-            _TweakccRebuildImage(data)
-        except (BunFormatError, NotImplementedError):
+        if _tweakcc_rebuild_or_none(data) is None:
             return f"bun {kind} (malformed: {exc})"
         return f"bun {kind} (tweakcc full rebuild; explicit recover-tweakcc required)"
     return f"bun {kind} (PE32+ x64, .bun section, supported)" if kind == "PE/COFF" else f"bun {kind} (.bun section, supported)"
@@ -2856,12 +2885,30 @@ def _write_new_executable(path, data):
 def _usage():
     print("usage: bun_handler.py <command> <binary> [args]", file=sys.stderr)
     print("  detect <binary>                 print detected format", file=sys.stderr)
-    print("  modules <binary>                list the module table as TSV", file=sys.stderr)
-    print("  extract <binary> [out.js]       extract complete patchable JS", file=sys.stderr)
-    print("  extract-tweakcc <binary> [new-out.js]  read recognized rebuild source", file=sys.stderr)
+    print("  modules [--strict] <binary>     list the module table as TSV", file=sys.stderr)
+    print("  extract [--strict] <binary> [out.js]  extract complete patchable JS", file=sys.stderr)
+    print("    modules and extract read a tweakcc full rebuild with the tweakcc reader;", file=sys.stderr)
+    print("    --strict refuses it instead", file=sys.stderr)
     print("  selftest <binary>               run byte-stability gates, then test_bun_handler.py", file=sys.stderr)
     print("  recover-tweakcc <binary> <new-output> [--reference <original>]", file=sys.stderr)
     print("  compact <binary> <reference> <new-output>  recover verified append overhead", file=sys.stderr)
+
+
+def _without_strict(args):
+    """Return `args` without --strict, and whether --strict was among them."""
+    kept = [arg for arg in args if arg != "--strict"]
+    return kept, len(kept) < len(args)
+
+
+def _read_for_cli(path, strict):
+    """Parse `path` for modules and extract: the strict reader, or the tweakcc
+    reader for a recognized tweakcc full rebuild unless `strict`."""
+    with open(path, "rb") as f:
+        image = _bun_image(f.read(), tweakcc=not strict)
+    if isinstance(image, _TweakccRebuildImage):
+        print("note: tweakcc full rebuild, read with the tweakcc reader; "
+              "recover-tweakcc writes a patchable binary from it", file=sys.stderr)
+    return image
 
 
 def main(argv):
@@ -2875,12 +2922,12 @@ def main(argv):
             print(detect_format(f.read()))
         return 0
     if cmd == "modules":
-        if len(argv) != 2:
+        args, strict = _without_strict(argv[1:])
+        if len(args) != 1:
             _usage()
             return 2
         try:
-            with open(path, "rb") as f:
-                img = BunImage(f.read())
+            img = _read_for_cli(args[0], strict)
         except (OSError, BunFormatError, NotImplementedError) as exc:
             print(f"modules failed: {exc}", file=sys.stderr)
             return 1
@@ -2892,23 +2939,23 @@ def main(argv):
                   m["sourcemap"][1], m["loader"], m["encoding"], m["module_format"],
                   m["side"], sep="\t")
         return 0
-    if cmd in ("extract", "extract-tweakcc"):
-        if len(argv) not in (2, 3):
+    if cmd == "extract":
+        args, strict = _without_strict(argv[1:])
+        if len(args) not in (1, 2):
             _usage()
             return 2
         try:
-            with open(path, "rb") as f:
-                js = (extract_js if cmd == "extract" else extract_tweakcc_js)(f.read())
+            js = _read_for_cli(args[0], strict).extract_js()
         except (OSError, BunFormatError, NotImplementedError) as exc:
-            print(f"{cmd} failed: {exc}", file=sys.stderr)
+            print(f"extract failed: {exc}", file=sys.stderr)
             return 1
-        if len(argv) >= 3:
+        if len(args) == 2:
             try:
-                _write_new_file(argv[2], js)
+                _write_new_file(args[1], js)
             except OSError as exc:
                 print(f"extract failed: {exc}", file=sys.stderr)
                 return 1
-            print(f"wrote {argv[2]} ({len(js)} bytes)")
+            print(f"wrote {args[1]} ({len(js)} bytes)")
         else:
             sys.stdout.buffer.write(js)
         return 0

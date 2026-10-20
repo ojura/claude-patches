@@ -3,7 +3,9 @@
 rebuild_fixture models main's format, not an execution of upstream. Native tests
 use the separate make_tweakcc_main_binary.cjs adapter and the pinned real source.
 """
+import contextlib
 import hashlib
+import io
 import os
 from pathlib import Path
 import random
@@ -97,6 +99,48 @@ class RecoveryTests(unittest.TestCase):
 
     def test_extraction_understands_stale_latin1_tag(self):
         self.assertIn(self.source, h.extract_tweakcc_js(self.rebuilt))
+
+    def test_strict_entry_points_name_a_rebuild(self):
+        refusal = r'^tweakcc full rebuild; run recover-tweakcc to make it patchable \(strict reader: '
+        for name, call in (('extract_js', lambda: h.extract_js(self.rebuilt)),
+                           ('repack_unchanged', lambda: h.repack_unchanged(self.rebuilt)),
+                           ('repack_with_js', lambda: h.repack_with_js(self.rebuilt, b'x'))):
+            with self.subTest(name), self.assertRaisesRegex(h.BunFormatError, refusal):
+                call()
+        with self.assertRaisesRegex(h.BunFormatError, '^file too small to be ELF64$'):
+            h.extract_js(b'not a bun executable')
+
+    def test_extract_and_modules_read_a_rebuild_unless_strict(self):
+        def run(*argv):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = h.main(list(argv))
+            return code, out.getvalue(), err.getvalue()
+        note = 'note: tweakcc full rebuild, read with the tweakcc reader'
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            binary, original = p / 'rebuilt', p / 'original'
+            binary.write_bytes(self.rebuilt)
+            original.write_bytes(self.original)
+            code, _, err = run('extract', str(binary), str(p / 'source.js'))
+            self.assertEqual(code, 0)
+            self.assertTrue(err.startswith(note), err)
+            self.assertEqual((p / 'source.js').read_bytes(), h.extract_tweakcc_js(self.rebuilt))
+            self.assertIn(self.source, (p / 'source.js').read_bytes())
+            code, out, err = run('modules', str(binary))
+            self.assertEqual(code, 0)
+            self.assertTrue(err.startswith(note), err)
+            self.assertEqual(out.splitlines()[0], '# record size 52, 3 modules, entry point 0')
+            for argv in (('extract', '--strict', str(binary), str(p / 'strict.js')),
+                         ('modules', str(binary), '--strict')):
+                with self.subTest(argv=argv[:2]):
+                    code, out, err = run(*argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn('failed: tweakcc full rebuild; run recover-tweakcc', err)
+                    self.assertNotIn(note, err)
+            self.assertFalse((p / 'strict.js').exists())
+            code, _, err = run('extract', str(original), str(p / 'original.js'))
+            self.assertEqual((code, err), (0, ''))
 
     def test_source_only_recovery_preserves_assets_policy_and_source(self):
         out = h.recover_tweakcc(self.rebuilt)
@@ -283,8 +327,9 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(r.returncode,0,r.stderr)
                 self.assertEqual(stat.S_IMODE((p/mode).stat().st_mode),0o700)
                 self.assertEqual((p/mode).read_bytes(),h.recover_tweakcc(self.rebuilt,self.original if mode=='reference' else None))
-            r=subprocess.run([sys.executable,script,'extract-tweakcc',str(original),str(p/'source.js')],capture_output=True)
+            r=subprocess.run([sys.executable,script,'extract',str(original),str(p/'source.js')],capture_output=True)
             self.assertEqual(r.returncode,0,r.stderr)
+            self.assertIn(b'note: tweakcc full rebuild',r.stderr)
             self.assertEqual((p/'source.js').read_bytes(),h.extract_tweakcc_js(self.rebuilt))
             self.assertEqual(stat.S_IMODE((p/'source.js').stat().st_mode),0o600)
             self.assertFalse(list(p.glob('.bun-handler-*')))
