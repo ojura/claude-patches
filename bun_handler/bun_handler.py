@@ -2811,6 +2811,7 @@ def _write_new_executable(path, data):
 def _usage():
     print("usage: bun_handler.py <command> <binary> [args]", file=sys.stderr)
     print("  detect <binary>                 print detected format", file=sys.stderr)
+    print("  modules <binary>                list the module table as TSV", file=sys.stderr)
     print("  extract <binary> [out.js]       extract complete patchable JS", file=sys.stderr)
     print("  extract-tweakcc <binary> [new-out.js]  read recognized rebuild source", file=sys.stderr)
     print("  selftest <binary>               run byte-stability gates", file=sys.stderr)
@@ -2827,6 +2828,24 @@ def main(argv):
     if cmd == "detect":
         with open(path, "rb") as f:
             print(detect_format(f.read()))
+        return 0
+    if cmd == "modules":
+        if len(argv) != 2:
+            _usage()
+            return 2
+        try:
+            with open(path, "rb") as f:
+                img = BunImage(f.read())
+        except (OSError, BunFormatError, NotImplementedError) as exc:
+            print(f"modules failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"# record size {img.module_struct_size}, {len(img.modules)} modules, "
+              f"entry point {img.entry_point_id}")
+        print("index\tname\tcontents\tbytecode\tsourcemap\tloader\tencoding\tformat\tside")
+        for m in img.modules:
+            print(m["index"], m["name_str"], m["contents"][1], m["bytecode"][1],
+                  m["sourcemap"][1], m["loader"], m["encoding"], m["module_format"],
+                  m["side"], sep="\t")
         return 0
     if cmd in ("extract", "extract-tweakcc"):
         if len(argv) not in (2, 3):

@@ -12,6 +12,7 @@ Scripts in `util/` and `hooks/` import it after adding this directory to
 
 ```sh
 python3 bun_handler.py detect <binary>
+python3 bun_handler.py modules <binary>
 python3 bun_handler.py extract <binary> [out.js]
 python3 bun_handler.py selftest <binary>
 python3 bun_handler.py extract-tweakcc <binary> [out.js]
@@ -20,6 +21,14 @@ python3 bun_handler.py compact <binary> <reference> <new-output>
 ```
 
 An output path must not exist yet; the handler never overwrites a file.
+
+`modules` prints the parsed module table as tab-separated columns: index, name,
+the byte lengths of contents, bytecode and source map, then loader, encoding,
+module format and side. Use it instead of parsing the table by hand. Bun has used
+36-byte and 52-byte module records, and the parser picks the size and
+bounds-checks every field. A hand parser that assumes the wrong size reads
+misaligned fields as offsets and lengths, and copying those ranges for every
+record can need many times the binary's size in memory.
 
 ## Library
 
@@ -113,7 +122,7 @@ attempts.
 ## Tests
 
 ```sh
-# 343 synthetic tests; none runs a native binary.
+# 345 synthetic tests; none runs a native binary.
 python3 -m unittest discover -s bun_handler -v
 
 # 130 synthetic checks plus the gates on a real binary. The gates run patched

@@ -357,6 +357,38 @@ class InteropTests(unittest.TestCase):
                 self.assertEqual(h.main(['compact', current, reference, reference]), 1)
             with open(reference, 'rb') as stream: self.assertEqual(stream.read(), self.original)
 
+    def test_modules_cli_lists_36_and_52_byte_tables(self):
+        # Expected lengths come from fixture()'s inputs, not from the parser.
+        expected = [
+            [0, '/$bunfs/root/cli', len('console.log("original");'), len(b'opaque-bytecode' * 13), 0, 1, 1, 1, 0],
+            [1, '/$bunfs/root/other.js', len('export let n=1;'), len(b'other-cache' * 17), 0, 1, 1, 1, 0],
+            [2, '/$bunfs/root/asset.bin', len(b'\x00\x01\xff'), 0, 0, 5, 0, 0, 0],
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for ms in (36, 52):
+                with self.subTest(ms=ms):
+                    path = os.path.join(directory, f'graph{ms}')
+                    with open(path, 'wb') as stream: stream.write(fixture(ms))
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(h.main(['modules', path]), 0)
+                    lines = output.getvalue().splitlines()
+                    self.assertEqual(lines[0], f'# record size {ms}, 3 modules, entry point 0')
+                    self.assertEqual(lines[1], 'index\tname\tcontents\tbytecode\tsourcemap\tloader\tencoding\tformat\tside')
+                    self.assertEqual([line.split('\t') for line in lines[2:]],
+                                     [[str(v) for v in row] for row in expected])
+
+    def test_modules_cli_refuses_non_bun_input_and_extra_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'not-bun')
+            with open(path, 'wb') as stream: stream.write(b'not a bun executable')
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                self.assertEqual(h.main(['modules', path]), 1)
+                self.assertEqual(h.main(['modules', path, 'extra']), 2)
+            self.assertEqual(output.getvalue(), '')
+            self.assertIn('modules failed', errors.getvalue())
+
     def test_compaction_digest_checks_both_inputs(self):
         digest = hashlib.sha256(self.appended).hexdigest()
         reference_digest = hashlib.sha256(self.original).hexdigest()
