@@ -1,0 +1,405 @@
+"""
+Tests for pfg.bundle: the helper process and its pipes, positions, needles, linking through imports and
+exports, module-scope bindings, and modules read from synthetic Bun binaries.
+"""
+import os
+import re
+import sys
+import threading
+
+import pytest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)  # for `pfg`
+sys.path.insert(0, os.path.join(REPO, "bun_handler"))
+from pfg import bundle as pb  # noqa: E402
+import test_bun_handler as tb  # noqa: E402  (its synthetic ELF builders)
+
+
+def build(*texts, needles=()):
+    """A bundle of modules /m0.js, /m1.js, ... with the given texts."""
+    return pb.Bundle.from_sources([(index, f"/m{index}.js", text) for index, text in enumerate(texts)], needles)
+
+
+# Positions
+
+
+def test_offsets_convert_between_utf16_and_code_points_around_astral_characters():
+    module = pb.Module(0, "/a.js", "a\U0001f600b\U0001f600")
+    assert module.length == 6 and module.codepoints == 4
+    assert [module.to_utf16(i) for i in range(5)] == [0, 1, 3, 4, 6]
+    assert [module.to_codepoints(o) for o in (0, 1, 3, 4, 6)] == [0, 1, 2, 3, 4]
+    with pytest.raises(pb.BackendError, match="surrogate pair"):
+        module.to_codepoints(2)
+
+
+def test_a_position_must_be_an_integer_inside_the_module():
+    # The review's probe: to_utf16(True) returned 2 for a one-emoji module.
+    module = pb.Module(0, "/a.js", "\U0001f600")
+    for bad in (True, False, 1.0, -1, 2, None):
+        with pytest.raises(pb.BackendError):
+            module.to_utf16(bad)
+    for bad in (True, -1, 3, "1"):
+        with pytest.raises(pb.BackendError):
+            module.check(bad)
+
+
+def test_an_anchor_error_counts_candidates_given_as_a_generator():
+    error = pb.AnchorError("a", ((0, s, "CallExpression") for s in (4, 9)))
+    assert error.count == 2 and "module 0 at 4" in str(error)
+    assert pb.AnchorError("b", (c for c in [])).count == 0
+
+
+# Needles
+
+
+def test_needles_from_a_generator_are_registered_and_sent():
+    # The review's probe: the generator was consumed by the registry and the index got none.
+    with build('const x="flag";', needles=(n for n in [pb.Needle("flag", "string", "flag")])) as bundle:
+        assert list(bundle.needles) == ["flag"]
+        assert len(bundle.hits("flag")) == 1
+
+
+def test_needles_with_one_key_twice_or_an_unknown_type_are_refused():
+    with pytest.raises(ValueError, match="two needles"):
+        build('const a="a",b="b";', needles=[pb.Needle("same", "string", "a"), pb.Needle("same", "string", "b")])
+    with pytest.raises(ValueError, match="types"):
+        build("", needles=[pb.Needle("k", "regex", "a")])
+
+
+def test_needles_hit_syntax_only():
+    with build('var x=k("flag",{list:[]});// k("flag")\nvar s=\'"flag"\';o.list;',
+               needles=[pb.Needle("s", "string", "flag"), pb.Needle("p", "property", "list"),
+                        pb.Needle("m", "member", "list")]) as bundle:
+        assert [hit["s"] for _, hit in bundle.hits("s")] == [8]
+        assert len(bundle.hits("p")) == 1 and len(bundle.hits("m")) == 1
+        with pytest.raises(pb.BackendError):
+            bundle.hits("absent")
+
+
+# Linking
+
+
+def test_named_renamed_and_reexported_names_reach_the_declaring_module():
+    with build('var inner=["x"];export{inner as z}',
+               'import{z as local}from"/m0.js";export{local as again}',
+               'export{z as viaFrom}from"/m0.js"',
+               'export*from"/m2.js"') as bundle:
+        assert bundle.export(0, "z") == ("binding", 0, "inner")
+        assert bundle.export(1, "again") == ("binding", 0, "inner")
+        assert bundle.export(2, "viaFrom") == ("binding", 0, "inner")
+        assert bundle.export(3, "viaFrom") == ("binding", 0, "inner")
+        assert bundle.imports(1)["local"][:2] == (0, "z")
+
+
+def test_two_export_names_of_one_binding_through_two_paths_are_not_ambiguous():
+    # The review's probe: Node resolves `result` to 1; the linker had compared export-list positions.
+    with build('const x=1;export{x as one,x as two};',
+               'export{one as result}from"/m0.js";',
+               'export{two as result}from"/m0.js";',
+               'export*from"/m1.js";export*from"/m2.js";') as bundle:
+        assert bundle.export(3, "result") == ("binding", 0, "x")
+
+
+def test_export_star_with_two_different_bindings_is_ambiguous_and_an_explicit_export_wins():
+    with build('export var v=1;', 'export var v=2;', 'export*from"/m0.js";export*from"/m1.js";',
+               'export*from"/m0.js";export*from"/m1.js";export var v=3;') as bundle:
+        with pytest.raises(pb.Unresolved, match="ambiguous"):
+            bundle.export(2, "v")
+        assert bundle.export(3, "v") == ("binding", 3, "v")
+
+
+def test_export_star_never_supplies_default():
+    with build('export default 1;', 'export*from"/m0.js";') as bundle:
+        with pytest.raises(pb.NotExported):
+            bundle.export(1, "default")
+
+
+def test_default_exports_of_every_form():
+    # The review's probe: anonymous default declarations raised NotExported.
+    with build('export default function(){return 1}', 'export default class{}', 'const x=1;export default x;',
+               'export default function f(){}', 'var y=1;export{y as default}') as bundle:
+        kind, module, start, end = bundle.export(0, "default")
+        assert (kind, module, start) == ("declaration", 0, 0) and end == len('export default function(){return 1}')
+        assert bundle.export(1, "default")[0] == "declaration"
+        assert bundle.export(2, "default")[0] == "expression"
+        assert bundle.export(3, "default") == ("binding", 3, "f")
+        assert bundle.export(4, "default") == ("binding", 4, "y")
+
+
+def test_namespaces_and_destructured_exports():
+    with build('export var {a,b:[c]}={a:1,b:[2]};', 'export*as ns from"/m0.js";',
+               'import*as all from"/m0.js";export{all}') as bundle:
+        assert bundle.export(0, "a") == ("binding", 0, "a")
+        assert bundle.export(0, "c") == ("binding", 0, "c")
+        with pytest.raises(pb.NotExported):
+            bundle.export(0, "b")
+        assert bundle.export(1, "ns") == ("namespace", 0)
+        assert bundle.export(2, "all") == ("namespace", 0)
+
+
+def test_cycles_missing_names_and_outside_modules_are_refused():
+    with build('import{q}from"/m1.js";export{q as p}', 'import{p}from"/m0.js";export{p as q}',
+               'import{x}from"node:fs";export{x}', 'export*from"node:path"', 'var k=1;') as bundle:
+        with pytest.raises(pb.Unresolved, match="cycle"):
+            bundle.export(0, "p")
+        with pytest.raises(pb.Unresolved, match="outside the bundle"):
+            bundle.export(2, "x")
+        with pytest.raises(pb.Unresolved, match="outside the bundle"):
+            bundle.export(3, "anything")
+        with pytest.raises(pb.NotExported):
+            bundle.export(4, "k")
+
+
+# Bindings
+
+
+def test_the_module_scope_binding_of_a_name():
+    text = 'import{y}from"/m1.js";if(1){var hoisted=1}function f(){var local=2;let y=3;return y}'
+    with build(text, "export var y=1;") as bundle:
+        hoisted = bundle.scope_binding(0, "hoisted")
+        assert hoisted["kind"] == "var" and hoisted["declarations"][0]["module"] is True
+        assert bundle.scope_binding(0, "local") == {"free": "local"}
+        imported = bundle.scope_binding(0, "y")
+        assert imported["kind"] == "import" and imported["declarations"][0]["import"] == {"spec": "/m1.js", "imported": "y"}
+        occurrences = bundle.occurrences(0, imported["id"])
+        assert len(occurrences) == 1  # the function's own y is another binding
+
+
+def test_an_exported_declaration_keeps_its_occurrences_whatever_the_query_order():
+    # The review's probe: scope_binding cached TypeScript's local symbol under the id of the export symbol,
+    # and the occurrences asked for afterwards were empty, hiding the writes.
+    for text, name in (("export let x=1;x=2;", "x"), ("export default function f(){return 1};f=()=>2;f();", "f")):
+        start = re.search(rf"\b{name}\b", text).start()
+        with build(text, "var q=1;") as bundle:
+            first = bundle.binding_at(0, start, start + 1)
+            scoped = bundle.scope_binding(0, name)
+            assert scoped["id"] == first["id"]
+            occurrences = bundle.occurrences(0, first["id"])
+            assert any("write" in o["roles"] for o in occurrences)
+            bundle.scope_binding(1, "q")  # the next query on module 0 parses it again
+            assert bundle.occurrences(0, scoped["id"]) == occurrences
+        with build(text, "var q=1;") as bundle:
+            scoped = bundle.scope_binding(0, name)
+            assert bundle.occurrences(0, scoped["id"]) == occurrences
+            assert bundle.binding_at(0, start, start + 1)["id"] == scoped["id"]
+
+
+def test_occurrence_queries_resolve_names_through_scopes():
+    text = 'var y="outer";function f(){let y="inner";return y}var out=y'
+    with build(text) as bundle:
+        outer = bundle.scope_binding(0, "y")
+        assert [o["s"] for o in bundle.occurrences(0, outer["id"])] == [4, len(text) - 1]
+        assert bundle.binding_at(0, len(text) - 1, len(text))["id"] == outer["id"]
+
+
+# The helper process
+
+
+def _streams(bundle):
+    process = bundle._helper._process
+    return [process.stdin, process.stdout, bundle._helper._stderr]
+
+
+def test_close_releases_both_pipes_and_the_stderr_file():
+    # The review's probe: stdout and stderr stayed open after close().
+    for kill in (False, True):
+        bundle = build("const x=1;")
+        streams = _streams(bundle)
+        bundle._helper.close(kill=kill)
+        assert [stream.closed for stream in streams] == [True, True, True]
+        assert bundle._helper._process.returncode is not None
+        bundle._helper.close()  # a second close does nothing
+
+
+def test_the_helper_adds_no_thread_and_a_failure_quotes_its_stderr():
+    # A thread blocked reading the helper's stderr held that stream's lock across os.fork, and the forked
+    # child hung when it closed the stream.
+    threads = threading.active_count()
+    with build("const x=1;") as bundle:
+        assert threading.active_count() == threads
+        os.write(bundle._helper._stderr.fileno(), b"first\nTypeError: something broke\n")
+        assert str(bundle._helper._failure("the helper failed")).endswith("stderr ends:\nfirst\nTypeError: something broke")
+
+
+def test_close_cleans_up_when_its_wait_is_interrupted(monkeypatch):
+    # The review's probe: a KeyboardInterrupt in the wait left the helper running and its streams open,
+    # and a later close returned without cleaning up.
+    bundle = build("const x=1;")
+    process = bundle._helper._process
+    real_wait = process.wait
+    calls = []
+
+    def interrupted(timeout=None):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return real_wait(timeout)
+
+    monkeypatch.setattr(process, "wait", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        bundle.close()
+    assert process.returncode is not None
+    assert all(stream.closed for stream in _streams(bundle))
+
+
+def test_close_after_the_helper_already_exited():
+    bundle = build("const x=1;")
+    bundle._helper._process.kill()
+    bundle._helper._process.wait()
+    bundle.close()
+    assert all(stream.closed for stream in _streams(bundle))
+
+
+def test_a_failed_request_ends_the_helper_when_the_bundle_exits_with_an_error():
+    with pytest.raises(pb.BackendError):
+        with build("const x=1;") as bundle:
+            process = bundle._helper._process
+            bundle.facts(0, [{"q": "nonsense"}])
+    assert process.returncode is not None
+
+
+def test_a_helper_of_another_revision_is_refused(monkeypatch):
+    monkeypatch.setattr(pb, "REVISION", pb.REVISION + 1)
+    with pytest.raises(pb.BackendError, match="restart"):
+        build("const x=1;")
+
+
+def test_a_helper_that_cannot_start_is_a_backend_error(monkeypatch):
+    # The review's probe: a Popen failure escaped as FileNotFoundError, and the stderr file stayed open.
+    files = []
+    real = pb.tempfile.TemporaryFile
+
+    def recorded(*args, **kwargs):
+        files.append(real(*args, **kwargs))
+        return files[-1]
+
+    def fail(*args, **kwargs):
+        raise FileNotFoundError(2, "synthetic missing interpreter")
+
+    monkeypatch.setattr(pb.tempfile, "TemporaryFile", recorded)
+    monkeypatch.setattr(pb.subprocess, "Popen", fail)
+    with pytest.raises(pb.BackendError, match="could not start"):
+        pb._Helper()
+    assert files and files[0].closed
+
+
+def test_a_helper_that_closes_its_output_and_keeps_running_is_ended(monkeypatch, tmp_path):
+    # The review's probe: _read waited forever for a helper that closed stdout but did not exit.
+    fake = tmp_path / "closed-stdout.mjs"
+    # stderr is a file here, which node writes synchronously, so the line is there before stdout closes.
+    fake.write_text("import fs from 'node:fs';\nprocess.stderr.write('STDOUT_CLOSED\\n');\nfs.closeSync(1);\n"
+                    "setInterval(()=>{},1000);\n")
+    monkeypatch.setattr(pb, "HELPER", str(fake))
+    helpers, outcome = [], {}
+
+    class Recorded(pb._Helper):
+        def _read(self):
+            helpers.append(self)
+            return super()._read()
+
+    def construct():
+        try:
+            Recorded()
+        except BaseException as exc:  # noqa: BLE001 - the outcome is examined below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=construct, daemon=True)
+    thread.start()
+    thread.join(20)
+    try:
+        assert not thread.is_alive(), "the client still waits for a helper that closed its output"
+        assert isinstance(outcome.get("error"), pb.BackendError)
+        assert "closed its output" in str(outcome["error"]) and "STDOUT_CLOSED" in str(outcome["error"])
+        assert helpers[0]._process.returncode is not None
+    finally:
+        for helper in helpers:
+            if helper._process.poll() is None:
+                os.killpg(helper._process.pid, 9)
+
+
+def test_a_reply_that_is_not_json_ends_the_helper_and_later_requests_fail_at_once():
+    bundle = build("const x=1;")
+    try:
+        bundle._helper._process.stdin.write(b'{"op":"module","index":1,"name":"/b.js","text":"x"}\n')
+        # Make the helper's next output line something other than a reply by reading it out of order.
+        with pytest.raises(pb.BackendError):
+            bundle._helper._write({"id": 99, "op": "nonsense"})
+            bundle._helper._next = 0
+            bundle._helper.request("nonsense")
+        assert bundle._helper._process.returncode is not None
+        with pytest.raises(pb.BackendError, match="was closed"):
+            bundle.scope_binding(0, "x")
+    finally:
+        bundle.close()
+
+
+def test_a_forked_child_lets_go_of_the_helper_without_closing_descriptors_it_reuses():
+    # The review's probe: the fork handler closed descriptor numbers that the stream objects still owned,
+    # so closing a stale stream later closed whatever the child had opened under the same number.
+    bundle = build("const x=1;")
+    try:
+        null = os.stat(os.devnull)
+        read_end, write_end = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                process = bundle._helper._process
+                fds = [stream.fileno() for stream in (process.stdin, process.stdout)]
+                # Each inherited pipe descriptor now refers to /dev/null, and like the pipe is not inherited
+                # by a program the child execs.
+                same = all((os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (null.st_dev, null.st_ino) for fd in fds)
+                same = same and not any(os.get_inheritable(fd) for fd in fds)
+                # The child closes its streams, opens files until one reuses the stdin number, then closes
+                # the stale stream again: the new file must stay open.
+                bundle.close()
+                opened = []
+                while fds[0] not in opened and len(opened) < 64:
+                    opened.append(os.open(os.devnull, os.O_RDONLY))
+                process.stdin.close()
+                os.fstat(fds[0])
+                code = 0 if same and fds[0] in opened else 2
+            finally:
+                os.write(write_end, bytes([code]))
+                os._exit(0)
+        os.close(write_end)
+        _, status = os.waitpid(pid, 0)
+        result = os.read(read_end, 1)
+        os.close(read_end)
+        assert os.waitstatus_to_exitcode(status) == 0 and result == b"\x00"
+        # The child's close neither killed nor waited for the parent's helper, which still answers.
+        assert bundle.scope_binding(0, "x")["kind"] == "const"
+    finally:
+        bundle.close()
+
+
+# Binaries
+
+
+def _esm(name, text, encoding=0):
+    codec = {0: "utf-8", 1: "latin-1", 2: "utf-16-le"}[encoding]
+    return tb._module(name, text.encode(codec), module_format=1, encoding=encoding)
+
+
+def test_modules_of_a_binary_in_every_encoding_bun_stores(tmp_path):
+    binary = tb.build_bun_elf([
+        _esm("/$bunfs/root/claude", 'import{a}from"/$bunfs/root/chunk-a.js";import{b}from"/$bunfs/root/chunk-b.js";'
+                                    'var flag=k("tengu_x",{list:[...a,...b]});'),
+        _esm("/$bunfs/root/chunk-a.js", 'var a=["h\xe9 ☃ \U0001f600"];export{a};', encoding=2),
+        _esm("/$bunfs/root/chunk-b.js", 'var b=["caf\xe9"];export{b};', encoding=1),
+    ])
+    path = tmp_path / "claude"
+    path.write_bytes(binary)
+    with open(path, "rb") as file:
+        file.read(10)  # from_binary reads from the start whatever the position
+        with pb.Bundle.from_binary(file, [pb.Needle("flag", "string", "tengu_x")]) as bundle:
+            assert [bundle.modules[i].name for i in sorted(bundle.modules)] == [
+                "/$bunfs/root/claude", "/$bunfs/root/chunk-a.js", "/$bunfs/root/chunk-b.js"]
+            assert len(bundle.hits("flag")) == 1
+            imports = bundle.imports(0)
+            assert bundle.export(imports["a"][0], "a") == ("binding", 1, "a")
+            assert bundle.export(imports["b"][0], "b") == ("binding", 2, "b")
+            text = 'var a=["h\xe9 ☃ \U0001f600"];export{a};'
+            assert bundle.modules[1].length == len(text) + 1
+            assert bundle.text(1, 0, bundle.modules[1].length) == text

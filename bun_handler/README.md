@@ -54,6 +54,14 @@ modules whose text changed. With `expected_sha256`, it refuses a binary that
 changed since extraction. `split_extracted_js()`, `changed_js_modules()` and
 `repack_module_sources()` work on individual modules.
 
+`BunImage(data).source_modules()` lists the JavaScript module records, and
+`read_source(record)` gives a module's source as strict UTF-8. `pfg/bundle.py`
+reads Claude Code's modules this way to build the catalog of cc-env-overrides. A
+change to how this handler decodes module sources (the three storage encodings,
+single-module builds, module identity) changes what pfg extracts, so it must
+raise the number in `pfg/REVISION`; catalogs built before the change are then
+rebuilt.
+
 ## Accepted executables
 
 - Linux x86-64 ELF64 whose `.bun` section is writable and is the last mapped
