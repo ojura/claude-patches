@@ -14,7 +14,7 @@ halves of a surrogate pair is refused.
 
 Failures:
   BackendError  the helper or its protocol failed: node missing, a crash, a malformed or mismatched
-                reply, or a request the helper refused as malformed. Nothing can be extracted then.
+                reply, or a request the helper refused as malformed. Extraction then fails.
   AnchorError   a structural predicate matched other than exactly one entity.
   Unresolved    a supported question whose answer the source does not establish, with the module, the
                 position and the reason.
@@ -24,7 +24,7 @@ reads the same file when it starts and reports its number; a difference means pf
 process, which the client refuses. The number changes with every change that alters what pfg extracts:
 in this module, in pfg/js/facts.mjs and what it imports, in the vendored TypeScript, and in bun_handler's
 decoding of module sources (UTF-8, Latin-1 and UTF-16 storage, single-module builds, module identity).
-Nothing detects a change that forgot to raise it.
+Maintainers must raise this revision; a code change alone does not invalidate a cached catalog.
 """
 import bisect
 import collections
@@ -57,7 +57,7 @@ class BackendError(Exception):
 
 class AnchorError(Exception):
     """A predicate matched other than exactly one entity. candidates lists (module, offset, kind) of
-    each match found; it is empty when there was none, which has no location."""
+    each match. A predicate that matched zero entities has an empty list and cannot name a location."""
 
     def __init__(self, label, candidates):
         self.label, self.candidates = label, list(candidates)
@@ -87,6 +87,21 @@ NEEDLE_TYPES = ("string", "template-head", "property", "member")
 
 def _is_index(value):
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def builtin_write_affects(target, dependency):
+    """Whether replacing target can replace a dependency the model uses. A write at an ancestor replaces
+    its descendants too; * names an unknown member. A computed member of the global object could name
+    any built-in."""
+    if target.startswith("globalThis.*"):
+        return True
+    written, needed = target.split("."), dependency.split(".")
+    for left, right in zip(written, needed):
+        if left == "*":
+            return True
+        if left != right:
+            return False
+    return len(written) <= len(needed)
 
 
 class Module:
@@ -153,7 +168,7 @@ class _Helper:
         # npm, use the node that PATH selects.
         node = os.environ.get("npm_node_execpath") or shutil.which("node")
         if node is None:
-            raise BackendError("pfg's JavaScript helper needs node, and there is no node on PATH")
+            raise BackendError("pfg's JavaScript helper needs node, which was not found on PATH")
         self._owned = True
         self._closed = False
         self._next = 0
@@ -189,8 +204,7 @@ class _Helper:
             data = os.pread(fd, _STDERR_TAIL, max(0, size - _STDERR_TAIL))
         except (OSError, ValueError):
             return ""
-        lines = data.decode("utf-8", "replace").splitlines()
-        return "\n".join(lines[1:] if size > _STDERR_TAIL else lines)
+        return data.decode("utf-8", "replace").rstrip("\n")
 
     def _failure(self, text):
         tail = self._stderr_tail()
@@ -206,7 +220,7 @@ class _Helper:
     def _read(self):
         line = self._process.stdout.readline()
         if not line:
-            # The helper closed its output, whether or not it has exited; it can answer nothing more.
+            # Closing stdout prevents every later reply, even if the process keeps running.
             status = self._process.poll()
             raise self._fatal("the helper closed its output before it answered"
                               + (f" and exited with status {status}" if status is not None else ""))
@@ -265,7 +279,7 @@ class _Helper:
         """End the helper and release its pipes and its stderr file. The owner closes the helper's input
         and waits up to 5 s for it to exit, then kills its process group; kill=True kills at once. A forked
         child only closes its own copies, which for the pipes _disown pointed at /dev/null. Closing twice
-        does nothing."""
+        is idempotent."""
         if self._closed:
             return
         self._closed = True
@@ -320,6 +334,9 @@ class Bundle:
             names.add(name)
         self.modules = modules
         self.by_name = {module.name: module for module in modules.values()}
+        self._imports_cache = {}
+        self._exports_cache = {}
+        self._importers_by_target = None
         needles = [Needle(*needle) for needle in needles]
         self.needles = {}
         for needle in needles:
@@ -386,13 +403,13 @@ class Bundle:
         try:
             return self.modules[index]
         except KeyError:
-            raise BackendError(f"there is no module {index}") from None
+            raise BackendError(f"module {index} is absent from this bundle") from None
 
     def hits(self, key):
         """The index pass's hits of a needle: (module index, hit) pairs, hit being the helper's record of
         the node (handle h, kind k, start s, end e, chain)."""
         if key not in self.needles:
-            raise BackendError(f"no needle {key!r} was given to the index pass")
+            raise BackendError(f"needle {key!r} was not registered for the index pass")
         return [(index, hit) for index in sorted(self.records) for hit in self.records[index]["hits"].get(key, [])]
 
     def loads(self, index):
@@ -461,26 +478,38 @@ class Bundle:
         """{local name: (target module index or None, imported name or "*" or "default", local position)}
         for a module's static imports; a target of None is a module outside the bundle, such as a Node
         builtin."""
-        found = {}
-        for load in self.loads(index):
-            if load["k"] != "import":
-                continue
-            target = load.get("t")
-            if "default" in load:
-                found[load["default"][0]] = (target, "default", load["default"][1])
-            if "namespace" in load:
-                found[load["namespace"][0]] = (target, "*", load["namespace"][1])
-            for imported, local, position in load.get("named", []):
-                found[local] = (target, imported, position)
-        return found
+        if index not in self._imports_cache:
+            found = {}
+            for load in self.loads(index):
+                if load["k"] != "import":
+                    continue
+                target = load.get("t")
+                if "default" in load:
+                    found[load["default"][0]] = (target, "default", load["default"][1])
+                if "namespace" in load:
+                    found[load["namespace"][0]] = (target, "*", load["namespace"][1])
+                for imported, local, position in load.get("named", []):
+                    found[local] = (target, imported, position)
+            self._imports_cache[index] = found
+        return self._imports_cache[index].copy()
 
     def export(self, index, name, path=()):
+        """Resolve an exported name (see _export). Cache completed resolutions, whose answer does not
+        depend on a traversal path; recursive resolutions retain the path used to detect cycles."""
+        if path:
+            return self._export(index, name, path)
+        key = (index, name)
+        if key not in self._exports_cache:
+            self._exports_cache[key] = self._export(index, name, ())
+        return self._exports_cache[key]
+
+    def _export(self, index, name, path):
         """What a module's export name refers to:
           ("binding", module index, local name)  a binding of that module's scope, which holds exactly one
                                                  binding per name (scope_binding gives its record);
           ("namespace", module index)            a module namespace object;
           ("declaration", module index, s, e)    an `export default function(){}` or `class{}` without a
-                                                 name, whose value no binding holds;
+                                                 name; its value is not held by a local binding;
           ("expression", module index, s, e)     the expression of an `export default` that is not a
                                                  declaration, evaluated once when the module runs.
         Follows imports that are exported again, re-exports from another module and export *; an explicit
@@ -524,7 +553,7 @@ class Bundle:
             elif load["k"] == "export=" and name == "default":
                 return ("expression", index, load["s"], load["e"])
         if name == "default":
-            raise NotExported(index, 0, "the module has no default export")
+            raise NotExported(index, 0, "the module does not export default")
         found = []
         for load in self.loads(index):
             if load["k"] != "export*":
@@ -540,3 +569,168 @@ class Bundle:
         if any(result != found[0] for result in found[1:]):
             raise Unresolved(index, 0, f"export * makes {name} ambiguous")
         return found[0]
+
+    def export_names(self, index, seen=frozenset()):
+        """Every name a module exports, through export * as well (which never supplies default)."""
+        if index in seen:
+            return set()
+        names = set()
+        for load in self.loads(index):
+            kind = load["k"]
+            if kind in ("export", "reexport"):
+                names.update(exported for _, exported, _ in load["named"])
+            elif kind == "export*as":
+                names.add(load["as"])
+            elif kind == "exportdecl":
+                names.update(name for name, _ in load["names"] if name is not None)
+            elif kind in ("export-default", "export="):
+                names.add("default")
+            elif kind == "export*" and load.get("t") is not None:
+                names.update(name for name in self.export_names(load["t"], seen | {index}) if name != "default")
+        return names
+
+    # -- the built-in scan -----------------------------------------------------------------------------
+
+    def builtin_scan(self):
+        """The built-in scan of every module (facts.mjs, "The built-in scan"), as {module index: scan}.
+
+        The index pass scanned each module on its own. The facts pass scans a module again with its
+        bindings where the index pass cannot decide: a variable receives a built-in value, the module
+        declares a built-in's name, a computed key may be a Symbol.for result, or an import receives a
+        value another module exports. A value a module exports is followed into every module that imports
+        it by name, through re-exports and export *. Where a namespace of such a module is taken, by
+        `import * as`, `export * as`, import() or import.meta.require, the value goes where the scan does
+        not follow it, and that place is recorded as unfollowed in the module that takes it."""
+        scans = {index: record["premise"] for index, record in self.records.items()}
+        seeds = collections.defaultdict(dict)
+        done = {}
+        pending = sorted(index for index, scan in scans.items() if scan["references"] or scan["scoped"] or scan["unknownKeys"])
+        exported = {}
+        while pending:
+            index = pending.pop(0)
+            given = tuple(sorted(seeds[index].items()))
+            if done.get(index) == given:
+                continue
+            done[index] = given
+            scans[index] = self.facts(index, [{"q": "premise", "seeds": [{"at": at, "value": value} for at, value in given]}])[0]
+            for export in scans[index]["exports"]:
+                target = self.export(index, export["name"])
+                if exported.get(target, export["value"]) != export["value"]:
+                    raise Unresolved(index, export["s"], f"export {export['name']} holds two different built-in values")
+                exported[target] = export["value"]
+                for importer, at in self._importers(target):
+                    if seeds[importer].get(at) != export["value"]:
+                        seeds[importer][at] = export["value"]
+                        pending.append(importer)
+        for importer, entry in self._namespace_sites(exported):
+            scans[importer] = {**scans[importer], "unfollowed": sorted([*scans[importer]["unfollowed"], entry], key=lambda u: u["s"])}
+        return scans
+
+    def _importers(self, target):
+        """(module, position of the local name) of every import by name that reaches target, an export()
+        result. Build the reverse index once, instead of resolving every import again for each exported
+        built-in value."""
+        if self._importers_by_target is None:
+            reverse = collections.defaultdict(list)
+            for index in sorted(self.records):
+                for load in self.loads(index):
+                    if load["k"] != "import" or load.get("t") is None:
+                        continue
+                    named = [(imported, position) for imported, _, position in load.get("named", [])]
+                    if "default" in load:
+                        named.append(("default", load["default"][1]))
+                    for imported, position in named:
+                        try:
+                            resolved = self.export(load["t"], imported)
+                        except Unresolved:
+                            continue
+                        reverse[resolved].append((index, position))
+            self._importers_by_target = reverse
+        return iter(self._importers_by_target.get(target, ()))
+
+    def _namespace_sites(self, exported):
+        """(module, unfollowed entry) for every place a namespace is taken of a module that exports one of
+        the values in exported ({export() result: value})."""
+        if not exported:
+            return
+        holders = {}
+        for index in sorted(self.records):
+            for name in sorted(self.export_names(index)):
+                try:
+                    target = self.export(index, name)
+                except Unresolved:
+                    continue
+                if target in exported:
+                    holders.setdefault(index, []).append((name, exported[target]))
+        for index in sorted(self.records):
+            for load in self.loads(index):
+                target = load.get("t")
+                namespace = (load["k"] == "import" and "namespace" in load) or load["k"] in ("export*as", "import()", "import.meta.require")
+                if namespace and target in holders:
+                    names = ", ".join(f"{name} ({value})" for name, value in holders[target])
+                    yield index, {"s": load["s"], "e": load["e"], "h": load["h"], "value": holders[target][0][1],
+                                  "reason": f"a namespace of module {target}, which exports built-in values: {names}"}
+
+    def builtin_summary(self, scans):
+        """The bundle's built-in scan as one record, for the catalog's statement of its assumption:
+          writes          visible writes to a built-in or one of its members (module, s, target, how); the
+                          tables that depend on a written target are refused;
+          globalWrites    writes to the global object under keys that are not built-ins' names;
+          registryWrites  writes under a key proven to be a Symbol.for result, which is never a built-in's
+                          key; when the program writes Symbol, Symbol.for or the global object under a key
+                          the scan cannot read, they count as writes under an unknown key instead;
+          prototypeWrites writes into an object reached by .constructor, .__proto__ or getPrototypeOf from
+                          an object the scan cannot identify;
+          unfollowed      the places a built-in value goes that the scan does not follow;
+          dynamic         code the scan cannot see into;
+          passed          how many occurrences of each built-in value matched modelled use forms;
+          references      every place a variable received a built-in value, its binding, and whether the
+                          scan followed it or left it unclassified, with the reason;
+          unidentified    how many other uses of values the scan cannot identify it counted."""
+        lists = collections.defaultdict(list)
+        passed = collections.Counter()
+        unidentified = 0
+        for index in sorted(scans):
+            scan = scans[index]
+            for key in ("writes", "globalWrites", "registryWrites", "prototypeWrites", "unfollowed", "dynamic", "references"):
+                lists[key].extend({"module": index, **{k: v for k, v in entry.items() if k != "h"}} for entry in scan[key])
+            lists["writes"].extend({"module": index, **{k: v for k, v in entry.items() if k != "h"}} for entry in scan["unknownKeys"])
+            passed.update(scan["passed"])
+            unidentified += scan["unidentified"]
+        # A key proof uses the standard operations it lists. Invalidating one can make its write an
+        # unknown global key, which can invalidate another proof, so repeat until every remaining proof
+        # has dependencies the scan did not find written.
+        categories = ("writes", "globalWrites", "registryWrites", "prototypeWrites")
+        while True:
+            written = {entry["target"] for entry in lists["writes"]}
+            changed = False
+            next_lists = {key: [] for key in categories}
+            for category in categories:
+                for entry in lists[category]:
+                    invalid = [dependency for dependency in entry.get("keyRequires", [])
+                               if any(builtin_write_affects(target, dependency) for target in written)]
+                    if not invalid:
+                        next_lists[category].append(entry)
+                        continue
+                    changed = True
+                    fallback = entry["keyFallback"]
+                    revised = {key: value for key, value in entry.items() if key not in ("keyRequires", "keyFallback", "key")}
+                    revised.update(target=fallback, invalidatedKeyProof=invalid)
+                    if category == "prototypeWrites":
+                        destination = category
+                    elif fallback.startswith("globalThis.") and not fallback.startswith("globalThis.*"):
+                        destination = "globalWrites"
+                        revised["key"] = fallback.split(".")[1]
+                    else:
+                        destination = "writes"
+                    next_lists[destination].append(revised)
+            for category in categories:
+                lists[category] = next_lists[category]
+            if not changed:
+                break
+        ordered = {}
+        for key in (*categories, "unfollowed", "dynamic", "references"):
+            # Several proved keys at one call can become the same unknown key after invalidation.
+            unique = {json.dumps(entry, sort_keys=True): entry for entry in lists[key]}
+            ordered[key] = sorted(unique.values(), key=lambda entry: (entry["module"], entry["s"]))
+        return {**ordered, "passed": dict(sorted(passed.items())), "unidentified": unidentified}

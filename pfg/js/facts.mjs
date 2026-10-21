@@ -4,14 +4,14 @@
 // bun_handler read out of the binary, and asks it for facts. The helper parses each module on its own,
 // with the TypeScript parser vendored in ./vendor/typescript, and never runs module code.
 //
-// Protocol: UTF-8 JSON, one value per line, on stdin and stdout; stdout carries nothing else.
+// Protocol: UTF-8 JSON, one value per line, on stdin and stdout; stdout is reserved for this protocol.
 //   - The first line the helper writes is {"hello": {"protocol": 1, "helper": "pfg-facts",
 //     "revision": R, "node": ..., "typescript": ...}}, R being the number in pfg/REVISION as this
 //     process read it.
 //   - A request is {"id": n, "op": ..., ...}. Its reply is {"id": n, "ok": true, "result": ...} or
 //     {"id": n, "ok": false, "error": {"kind": "request" | "internal", "message": ...}}: "request" when
 //     the request names something absent or is malformed, "internal" for an exception in the helper.
-//   - A line without an id is a notification and gets no reply. "module" is the one notification; an
+//   - A line without an id is a notification and does not receive a reply. "module" is the one notification; an
 //     error it causes is the reply to the next request.
 //   - The helper exits when its stdin closes.
 //
@@ -36,7 +36,7 @@ const PROTOCOL = 1;
 const K = ts.SyntaxKind;
 
 // The compiler options of the retained structural matcher, with every file a module: a Bun chunk is
-// an ES module even when it holds no import or export. The parser applies the same rule through
+// an ES module even when it does not contain an import or export. The parser applies the same rule through
 // setExternalModuleIndicator; without it, a module with neither imports nor exports (2.1.304 has seven)
 // would be parsed and bound as a script.
 const OPTIONS = {
@@ -60,7 +60,7 @@ function fileName(index) {
 
 function moduleOf(index) {
   const module = modules.get(index);
-  if (module === undefined) throw new RequestError(`there is no module ${index}`);
+  if (module === undefined) throw new RequestError(`module ${index} is absent from this bundle`);
   return module;
 }
 
@@ -70,7 +70,7 @@ function parse(module) {
 
 // Release points: a full collection after a large module and after every 8 MB of parsed text, so that
 // parse trees which are already garbage do not pile up before V8 grows its heap. --expose-gc makes
-// global.gc available; it sets no limit.
+// global.gc available; it does not set a memory limit.
 let sinceCollection = 0;
 function released(length) {
   sinceCollection += length;
@@ -94,7 +94,7 @@ function nodeAt(sourceFile, handle) {
   for (const part of handle.split('.')) {
     const index = Number(part);
     const list = children(node);
-    if (!/^\d+$/.test(part) || index >= list.length) throw new RequestError(`there is no node at handle ${handle}`);
+    if (!/^\d+$/.test(part) || index >= list.length) throw new RequestError(`handle ${handle} does not identify a node`);
     node = list[index];
   }
   return node;
@@ -117,7 +117,7 @@ const start = (node, sourceFile) => node.getStart(sourceFile, false);
 
 // The fields of a node that hold its children: every field TypeScript 5.9.3's forEachChild visits
 // (forEachChildTable in the vendored typescript.js), with the ones JavaScript syntax uses first. A
-// child's field is the first that holds it; fieldOf throws for a child in none of them, so a node kind
+// child's field is the first that holds it; fieldOf throws when every known field fails to hold it, so a node kind
 // that a later TypeScript adds cannot go unnamed.
 const FIELDS = [
   'expression', 'name', 'propertyName', 'questionDotToken', 'arguments', 'elements', 'properties', 'left',
@@ -144,7 +144,7 @@ function fieldOf(parent, child) {
       if (index >= 0) return { field, index, count: value.length };
     }
   }
-  throw new Error(`a ${kindName(child)} child of a ${kindName(parent)} is in none of the known fields`);
+  throw new Error(`the known fields of ${kindName(parent)} do not include its ${kindName(child)} child`);
 }
 
 function isFunctionLike(node) {
@@ -295,10 +295,12 @@ const BINARY_ASSIGNMENTS = new Set([
 // The built-in scan
 //
 // The catalog's tables rely on the built-in operations its model uses (new Set, Set.prototype.has,
-// Array.prototype.includes and the like) keeping their standard behaviour. The scan follows every value
-// the program reaches from a built-in's name, and sorts each place a value goes into:
-//   passed        its effect is known and cannot change a built-in: a call, a construction, a member
-//                 read, a comparison, typeof, a test, a discarded value, a class's extends clause;
+// Array.prototype.includes and the like) keeping their standard behaviour. The scan starts at each
+// built-in name and follows the use forms listed below. Standard behaviour remains an assumption;
+// passed counts matched use forms, not a proof about code invoked by arguments, getters or callbacks.
+// It sorts each place a value goes into:
+//   passed        a call, construction, member read, comparison, typeof, test, discarded value or
+//                 class heritage clause that matches the model;
 //   writes        a write that replaces a built-in or one of its members (below);
 //   globalWrites  a write to the global object under a key that is not a built-in's name;
 //   references    the value is stored in a variable; the facts pass follows the variable's uses;
@@ -321,16 +323,16 @@ const BINARY_ASSIGNMENTS = new Set([
 //
 // Values: a built-in's name (BUILTINS), the global object under any of its names (globalThis.Set is
 // Set), and every static member read from a built-in value, normalized where the language fixes the
-// result: X.prototype.constructor is X, the constructor of a built-in function is Function, the
-// prototype of X.prototype is Object.prototype (Error.prototype for the native errors), the prototype
-// of a built-in function is Function.prototype. The constructor and prototype of a literal are those of
-// its kind: [].constructor is Array, the constructor of a function expression is Function, and that of
-// an async function AsyncFunction. A value whose identity the scan cannot establish, such as
-// x.constructor for an unknown x, is (object); its writes are prototypeWrites, calls of its constructor
-// are dynamic code, and its other uses are counted only.
-// A member read of a built-in the program has not written is not followed further when its result
-// cannot be a built-in object: the scan follows the result of every read, and only the members that
-// are definers, eval or the Function constructor change what a call does.
+// result for a recognized constructor or prototype. Native error and typed-array prototypes retain
+// their distinct parents. A literal's constructor is identified when its syntax fixes it: [].constructor
+// is Array, a function expression's constructor is Function, and an async function's constructor is
+// AsyncFunction. Object literals with special members and class expressions need additional checks or
+// remain unknown. An arbitrary member's type is not inferred: Math.PI.constructor must not be called
+// Function merely because Math is a built-in. A value the scan cannot identify is (object); its writes
+// are prototypeWrites, calls of its constructor are dynamic code, and its other uses are counted only.
+// Cycles of stored references and other sources of values outside the model remain unclassified.
+// Calls have special rules for definers, prototype readers, eval and function constructors. Template
+// tags receive their implicit template object and their raw substitution values as arguments.
 
 const GLOBAL_NAMES = new Set(['globalThis', 'global', 'self', 'window']);
 // The global names of ECMAScript's built-ins, except undefined, NaN and Infinity, which cannot be changed.
@@ -357,6 +359,16 @@ const STATIC_DEFINERS = new Map([
 const RECEIVER_DEFINERS = new Set(['__defineGetter__', '__defineSetter__']);
 const ARRAY_MUTATORS = new Set(['push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin']);
 const PROTOTYPE_READERS = new Set(['Object.getPrototypeOf', 'Reflect.getPrototypeOf']);
+const WELL_KNOWN_SYMBOLS = new Set(['asyncIterator', 'hasInstance', 'isConcatSpreadable', 'iterator', 'match', 'matchAll',
+  'replace', 'search', 'species', 'split', 'toPrimitive', 'toStringTag', 'unscopables', 'dispose', 'asyncDispose']);
+const HAS_PROTOTYPE = new Set([
+  'AggregateError', 'Array', 'ArrayBuffer', 'BigInt', 'BigInt64Array', 'BigUint64Array', 'Boolean', 'DataView', 'Date',
+  'Error', 'EvalError', 'FinalizationRegistry', 'Float16Array', 'Float32Array', 'Float64Array', 'Function', 'Int8Array',
+  'Int16Array', 'Int32Array', 'Iterator', 'Map', 'Number', 'Object', 'Promise', 'RangeError', 'ReferenceError', 'RegExp',
+  'Set', 'SharedArrayBuffer', 'String', 'Symbol', 'SyntaxError', 'TypeError', 'URIError', 'Uint8Array',
+  'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'WeakMap', 'WeakRef', 'WeakSet', '%TypedArray%',
+  'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction',
+]);
 const UNKNOWN = '(object)';
 
 const valueName = (value) => [value.root, ...value.path].join('.');
@@ -367,18 +379,19 @@ function memberValue(value, key) {
   if (root === 'globalThis' && path.length === 0) {
     if (BUILTINS.has(key) && !GLOBAL_NAMES.has(key)) return { root: key, path: [] };
     if (GLOBAL_NAMES.has(key)) return value;
+    if (key === '*') return { root, path: ['*'] };
     if (key === 'constructor' || key === '__proto__') return { root: UNKNOWN, path: [key] };
     return { root, path: [key], foreign: true };
   }
   if (value.foreign) return { root, path: [...path, key], foreign: true };
   if (root === UNKNOWN) return { root, path: [...path, key] };
   if (key === 'constructor') {
-    if (path.at(-1) === 'prototype') return { root, path: path.slice(0, -1) };
+    if (path.length === 1 && path[0] === 'prototype' && HAS_PROTOTYPE.has(root)) return { root, path: [] };
     if (path.length === 0 && NAMESPACES.has(root)) return { root: 'Object', path: [] };
-    if (path.length === 0 && CODE_RUNNERS.has(root) && root !== 'eval' && root !== 'Function') return { root: 'Function', path: [] };
-    // Any other built-in value the scan follows is a function, whose constructor is Function, or a
-    // prototype-less value whose .constructor the scan cannot name.
-    return path.length === 0 || path.at(-1) !== '*' ? { root: 'Function', path: [] } : { root: UNKNOWN, path: ['constructor'] };
+    if (path.length === 0) return { root: 'Function', path: [] };
+    // A member can be a primitive, a function or another object. Without its type, its constructor is
+    // unknown; Math.PI.constructor, for example, is Number, not Function.
+    return { root: UNKNOWN, path: ['constructor'] };
   }
   if (key === '__proto__') return prototypeOf(value);
   return { root, path: [...path, key] };
@@ -392,12 +405,15 @@ function prototypeOf(value) {
     if (root === 'Object') return { root: UNKNOWN, path: ['null'] };
     if (NATIVE_ERRORS.has(root)) return { root: 'Error', path: ['prototype'] };
     if (TYPED_ARRAYS.has(root)) return { root: '%TypedArray%', path: ['prototype'] };
+    if (['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(root)) return { root: 'Function', path: ['prototype'] };
+    if (!HAS_PROTOTYPE.has(root)) return { root: UNKNOWN, path: ['__proto__'] };
     return { root: 'Object', path: ['prototype'] };
   }
   if (path.length === 0 && NAMESPACES.has(root)) return { root: 'Object', path: ['prototype'] };
   if (path.length === 0 && NATIVE_ERRORS.has(root)) return { root: 'Error', path: [] };
   if (path.length === 0 && TYPED_ARRAYS.has(root)) return { root: '%TypedArray%', path: [] };
-  if (path.length === 0 || path.at(-1) !== '*') return { root: 'Function', path: ['prototype'] };
+  if (path.length === 0 && ['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(root)) return { root: 'Function', path: [] };
+  if (path.length === 0) return { root: 'Function', path: ['prototype'] };
   return { root: UNKNOWN, path: ['__proto__'] };
 }
 
@@ -406,7 +422,13 @@ function literalConstructor(node) {
   let current = node;
   while (ts.isParenthesizedExpression(current)) current = current.expression;
   if (ts.isArrayLiteralExpression(current)) return 'Array';
-  if (ts.isObjectLiteralExpression(current)) return 'Object';
+  if (ts.isObjectLiteralExpression(current)) {
+    // An object literal can declare its own constructor or prototype. Those members are handled from
+    // their initializer where possible; an unknown key or spread prevents assuming the inherited value.
+    if (current.properties.some((property) => ts.isSpreadAssignment(property) ||
+        memberKey(property.name) === undefined || ['constructor', '__proto__'].includes(memberKey(property.name)))) return undefined;
+    return 'Object';
+  }
   if (ts.isStringLiteral(current) || ts.isNoSubstitutionTemplateLiteral(current) || ts.isTemplateExpression(current)) return 'String';
   if (ts.isNumericLiteral(current)) return 'Number';
   if (ts.isBigIntLiteral(current)) return 'BigInt';
@@ -417,7 +439,7 @@ function literalConstructor(node) {
     const generator = Boolean(current.asteriskToken);
     return generator ? (isAsync ? 'AsyncGeneratorFunction' : 'GeneratorFunction') : isAsync ? 'AsyncFunction' : 'Function';
   }
-  if (ts.isClassExpression(current)) return 'Function';
+  // A class expression can have heritage, static fields or static blocks that change these members.
   return undefined;
 }
 
@@ -461,22 +483,26 @@ class BuiltinScan {
     return { s: start(node, this.sourceFile), e: node.end, h: this.handleOf(node) };
   }
 
-  // The key of a member access or of a definer's key argument: a literal key; @@name for a well-known
-  // symbol read from the built-in Symbol; @registry for a symbol from the built-in Symbol.for, which
-  // is never a built-in's key (registry); or * for any other expression.
-  keyOf(expression) {
+  // A key is literal, a registry symbol, a well-known symbol, a string drawn from a proved finite
+  // list, or unknown. requires lists the built-in operations a proof uses. The summary invalidates
+  // that proof if the scan detects a write to a dependency.
+  keyInfo(expression) {
+    if (!expression) return { keys: ['*'], requires: [] };
     const literal = literalKey(expression);
-    if (literal !== undefined) return literal;
-    if (this.registry(expression)) return '@registry';
-    // A well-known symbol only when read from the free name Symbol itself: a variable holding one may
-    // hold other keys as well.
+    if (literal !== undefined) return { keys: [literal], requires: [] };
+    if (this.registry(expression)) return { keys: ['@registry'], requires: ['Symbol.for'] };
     let current = expression;
     while (ts.isParenthesizedExpression(current)) current = current.expression;
     if (ts.isPropertyAccessExpression(current) && ts.isIdentifier(current.expression) && current.expression.text === 'Symbol' &&
-        this.isFree(current.expression) && !['for', 'keyFor'].includes(current.name.text)) {
-      return `@@${current.name.text}`;
+        this.isFree(current.expression) && WELL_KNOWN_SYMBOLS.has(current.name.text)) {
+      return { keys: [`@@${current.name.text}`], requires: [`Symbol.${current.name.text}`] };
     }
-    return '*';
+    return this.finiteKeys?.(current) ?? { keys: ['*'], requires: [] };
+  }
+
+  keyOf(expression) {
+    const { keys } = this.keyInfo(expression);
+    return keys.length === 1 ? keys[0] : '*';
   }
 
   // Whether an expression is a call of the built-in Symbol.for, or, in the facts pass, a variable that
@@ -513,6 +539,19 @@ class BuiltinScan {
       const base = this.valueOf(current.expression);
       const key = ts.isPropertyAccessExpression(current) ? current.name.text : this.keyOf(current.argumentExpression);
       if (base) return memberValue(base, key);
+      let object = current.expression;
+      while (ts.isParenthesizedExpression(object)) object = object.expression;
+      if (ts.isObjectLiteralExpression(object) && ['constructor', '__proto__'].includes(key)) {
+        for (const property of [...object.properties].reverse()) {
+          if (ts.isSpreadAssignment(property) || memberKey(property.name) === undefined) break;
+          if (memberKey(property.name) !== key) continue;
+          if (ts.isPropertyAssignment(property)) {
+            const value = this.valueOf(property.initializer);
+            if (value) return value;
+          }
+          break;
+        }
+      }
       const literal = literalConstructor(current.expression);
       if (literal && (key === 'constructor' || key === '__proto__')) {
         return key === 'constructor' ? { root: literal, path: [] } : { root: literal, path: ['prototype'] };
@@ -539,6 +578,31 @@ class BuiltinScan {
     return null;
   }
 
+  // All built-in values an expression may hold. A conditional or a variable assigned more than one
+  // built-in must not make a definer write only the first target the scan encounters.
+  possibleValues(expression) {
+    let current = expression;
+    while (ts.isParenthesizedExpression(current) || ts.isAwaitExpression(current) || ts.isNonNullExpression?.(current)) current = current.expression;
+    let values;
+    if (ts.isIdentifier(current)) {
+      values = this.resolveValues?.(current) ?? [this.resolve(current)].filter(Boolean);
+    } else if (ts.isConditionalExpression(current)) {
+      values = [...this.possibleValues(current.whenTrue), ...this.possibleValues(current.whenFalse)];
+    } else if (ts.isBinaryExpression(current)) {
+      const op = current.operatorToken.kind;
+      values = [K.BarBarToken, K.AmpersandAmpersandToken, K.QuestionQuestionToken].includes(op)
+        ? [...this.possibleValues(current.left), ...this.possibleValues(current.right)]
+        : [K.CommaToken, K.EqualsToken].includes(op) ? this.possibleValues(current.right) : [];
+    } else if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+      const key = ts.isPropertyAccessExpression(current) ? current.name.text : this.keyOf(current.argumentExpression);
+      values = this.possibleValues(current.expression).map((value) => memberValue(value, key));
+      if (!values.length) values = [this.valueOf(current)].filter(Boolean);
+    } else {
+      values = [this.valueOf(current)].filter(Boolean);
+    }
+    return [...new Map(values.map((value) => [valueName(value), value])).values()];
+  }
+
   prototypeOfArgument(argument) {
     const value = this.valueOf(argument);
     if (value) return prototypeOf(value);
@@ -547,53 +611,59 @@ class BuiltinScan {
     return { root: UNKNOWN, path: ['__proto__'] };
   }
 
-  write(node, target, how) {
+  write(node, target, how, proof = {}) {
     const name = valueName(target);
+    const entry = { ...this.where(node), target: name, how, ...proof };
     if (target.path.at(-1) === '@registry') {
-      this.result.registryWrites.push({ ...this.where(node), target: name, how });
+      this.result.registryWrites.push(entry);
     } else if (target.root === UNKNOWN) {
-      this.result.prototypeWrites.push({ ...this.where(node), target: name, how });
+      this.result.prototypeWrites.push(entry);
     } else if (target.foreign) {
-      this.result.globalWrites.push({ ...this.where(node), key: target.path[0], how });
-    } else if (target.root === 'globalThis' && target.path.length === 1 && target.path[0] === '*') {
-      this.result.unknownKeys.push({ ...this.where(node), target: name, how });
+      this.result.globalWrites.push({ ...entry, key: target.path[0] });
+    } else if (target.root === 'globalThis' && target.path.includes('*')) {
+      this.result.unknownKeys.push(entry);
     } else {
-      this.result.writes.push({ ...this.where(node), target: name, how });
+      this.result.writes.push(entry);
     }
   }
 
-  // A write of key into value at node; keys gives several keys, ['*'] when they are not known.
-  writeKeys(node, value, keys, how) {
+  // Writes each possible key. A proof records the fallback target in case a built-in operation it
+  // depends on is written elsewhere in the program.
+  writeKeys(node, value, keys, how, requires = []) {
+    const proof = requires.length ? { keyRequires: requires, keyFallback: valueName(value) + '.*' } : {};
     for (const key of keys) {
       const target = { root: value.root, path: [...value.path, key], foreign: value.foreign };
-      // Writing a key of the global object that names a built-in replaces that built-in.
       if (value.root === 'globalThis' && value.path.length === 0 && !value.foreign) {
-        if (key === '*' || key === '@registry') this.write(node, { root: 'globalThis', path: [key] }, how);
-        else if (BUILTINS.has(key)) this.write(node, { root: key, path: [] }, how);
-        else this.write(node, { root: 'globalThis', path: [key], foreign: true }, how);
+        if (key === '*' || key === '@registry') this.write(node, { root: 'globalThis', path: [key] }, how, proof);
+        else if (BUILTINS.has(key)) this.write(node, { root: key, path: [] }, how, proof);
+        else this.write(node, { root: 'globalThis', path: [key], foreign: true }, how, proof);
       } else {
-        this.write(node, target, how);
+        this.write(node, target, how, proof);
       }
     }
   }
 
-  // The keys a definer call writes: its key argument, or the static keys of an object literal of
-  // properties, or * when they are not known.
+  // The keys a definer writes, and the dependencies of their proofs. Object literal sources can have
+  // several static keys. A spread or an expression the key model does not cover gives an unknown key.
   definerKeys(kind, args) {
-    if (kind === 'prototype') return ['__proto__'];
-    if (kind === 'key') return [args[1] ? this.keyOf(args[1]) : '*'];
+    if (kind === 'prototype') return { keys: ['__proto__'], requires: [] };
+    if (kind === 'key') return this.keyInfo(args[1]);
     const keys = [];
+    const requires = [];
     for (const source of args.slice(1)) {
       let current = source;
       while (current && ts.isParenthesizedExpression(current)) current = current.expression;
-      if (!current || !ts.isObjectLiteralExpression(current)) return ['*'];
+      if (!current || !ts.isObjectLiteralExpression(current)) return { keys: ['*'], requires: [] };
       for (const property of current.properties) {
-        if (ts.isSpreadAssignment(property)) return ['*'];
-        const key = memberKey(property.name);
-        keys.push(key === undefined ? '*' : key);
+        if (ts.isSpreadAssignment(property)) return { keys: ['*'], requires: [] };
+        const literal = memberKey(property.name);
+        const info = literal !== undefined ? { keys: [literal], requires: [] }
+          : ts.isComputedPropertyName(property.name) ? this.keyInfo(property.name.expression) : { keys: ['*'], requires: [] };
+        keys.push(...info.keys);
+        requires.push(...info.requires);
       }
     }
-    return keys.length ? keys : [];
+    return { keys: [...new Set(keys)], requires: [...new Set(requires)] };
   }
 
   // The arguments of a call, construction or template tag. A tag receives its implicit template
@@ -656,7 +726,8 @@ class BuiltinScan {
     }
     if (target && RECEIVER_DEFINERS.has(last)) {
       // value is X.__defineGetter__: it defines key args[0] on X.
-      this.writeKeys(call, target, [args[0] ? this.keyOf(args[0]) : '*'], last);
+      const info = this.keyInfo(args[0]);
+      this.writeKeys(call, target, info.keys, last, info.requires);
       return;
     }
     if (target && ARRAY_MUTATORS.has(last) && valueName(target) === 'Array.prototype') {
@@ -679,24 +750,29 @@ class BuiltinScan {
   // apply, whose target is the this argument.
   define(call, name, definerArgs, receiver) {
     if (receiver) {
-      const targetValue = receiver.args[0] ? this.valueOf(receiver.args[0]) : null;
+      const targets = receiver.args[0] ? this.possibleValues(receiver.args[0]) : [];
       const list = receiver.apply ? receiver.args[1] : null;
       const keyNode = receiver.apply ? (list && ts.isArrayLiteralExpression(list) ? list.elements[0] : null) : receiver.args[1];
-      if (targetValue) this.writeKeys(call, targetValue, [keyNode ? this.keyOf(keyNode) : '*'], name);
+      const info = this.keyInfo(keyNode);
+      if (targets.length) for (const target of targets) this.writeKeys(call, target, info.keys, name, info.requires);
       else this.pass({ root: 'Object', path: ['prototype', name.split('.').at(-1)] }, 'definer');
       return;
     }
-    const targetValue = definerArgs[0] ? this.valueOf(definerArgs[0]) : null;
-    if (!targetValue) {
-      this.pass({ root: name.split('.')[0], path: [name.split('.')[1]] }, 'definer on an object that is not a built-in');
+    const targets = definerArgs[0] ? this.possibleValues(definerArgs[0]) : [];
+    if (!targets.length) {
+      this.pass({ root: name.split('.')[0], path: [name.split('.')[1]] }, 'definer on an object the scan does not identify as a built-in');
       return;
     }
-    this.writeKeys(call, targetValue, this.definerKeys(STATIC_DEFINERS.get(name), definerArgs), name);
+    const info = this.definerKeys(STATIC_DEFINERS.get(name), definerArgs);
+    for (const target of targets) this.writeKeys(call, target, info.keys, name, info.requires);
   }
 
   // Classifies the value of node, which is value, by where it goes. variable is true when node is a
   // variable that holds the value: writing it changes the variable, not the built-in.
-  follow(node, value, variable = false) {
+  follow(node, value, variable = false, route = []) {
+    // A route lists the variables through which this value has already passed. Re-entering one is
+    // recorded as an unclassified cycle instead of deriving unbounded member paths from the cycle.
+    this.route = route;
     let current = node;
     for (;;) {
       if (isWriteTarget(current)) {
@@ -713,7 +789,8 @@ class BuiltinScan {
       if ((ts.isPropertyAccessExpression(outer) || ts.isElementAccessExpression(outer)) && outer.expression === current) {
         const key = ts.isPropertyAccessExpression(outer) ? outer.name.text : this.keyOf(outer.argumentExpression);
         if (isWriteTarget(outer)) {
-          this.writeKeys(outer, value, [key], writeHow(outer));
+          const info = ts.isPropertyAccessExpression(outer) ? { keys: [key], requires: [] } : this.keyInfo(outer.argumentExpression);
+          this.writeKeys(outer, value, info.keys, writeHow(outer), info.requires);
           return;
         }
         let up = outer;
@@ -824,20 +901,19 @@ class BuiltinScan {
     }
   }
 
-  // An argument passed unchanged to a function, constructor or template tag, at position (a tag's
-  // template object is at 0). Where a known definer receives it as its target, the definer's call
-  // records the write instead of recording an escape too.
+  // An argument passed unchanged to a function, constructor or template tag. Where a known definer
+  // receives it as its target, the callee's scan records the write instead of recording an escape too.
   argument(node, value, call, position) {
     const callee = this.valueOf(ts.isTaggedTemplateExpression(call) ? call.tag : call.expression);
-    const calleeName = callee ? valueName(callee) : '';
+    const name = callee ? valueName(callee) : '';
     const callable = ts.isCallExpression(call) || ts.isTaggedTemplateExpression(call);
     const definerTarget = callable && callee && (
-      (STATIC_DEFINERS.has(calleeName) && position === 0) ||
+      (STATIC_DEFINERS.has(name) && position === 0) ||
       (callee.path.at(-1) === 'call' && STATIC_DEFINERS.has(valueName({ ...callee, path: callee.path.slice(0, -1) })) && position === 1) ||
       (callee.path.at(-1) === 'call' && RECEIVER_DEFINERS.has(callee.path.at(-2)) && position === 0) ||
       (callee.path.at(-1) === 'apply' && RECEIVER_DEFINERS.has(callee.path.at(-2)) && position === 0));
-    if (definerTarget && this.valueOf(node)) return;  // the definer's call records the write
-    if (callable && callee && PROTOTYPE_READERS.has(calleeName) && position === 0) return;  // followed from the reader
+    if (definerTarget && this.possibleValues(node).some((target) => valueName(target) === valueName(value))) return;
+    if (callable && callee && PROTOTYPE_READERS.has(name) && position === 0) return;
     return this.escape(node, value, ts.isTaggedTemplateExpression(call) ? 'passed to a template tag'
       : ts.isNewExpression(call) ? 'passed to a constructor' : 'passed to a function');
   }
@@ -879,9 +955,10 @@ class BuiltinScan {
   reference(name, value, from) {
     if (value.root === UNKNOWN) this.result.unidentified += 1;
     if (value.foreign) return;
-    this.result.references.push({ ...this.where(from), value: valueName(value), unknown: value.root === UNKNOWN || undefined,
-      name: name.text, at: start(name, this.sourceFile) });
-    this.referenceValues.push({ name, value });
+    const record = { ...this.where(from), value: valueName(value), unknown: value.root === UNKNOWN || undefined,
+      name: name.text, at: start(name, this.sourceFile) };
+    this.result.references.push(record);
+    this.referenceValues.push({ name, value, route: this.route ?? [], record });
   }
 
   // A destructuring pattern receives value: each element with a static key receives that member.
@@ -958,7 +1035,7 @@ function indexModule(module, needles, byName) {
     index: module.index, name: module.name, length: module.text.length,
     diagnostics: sourceFile.parseDiagnostics.map((d) => ({ s: d.start, length: d.length,
       message: ts.flattenDiagnosticMessageText(d.messageText, '\n') })),
-    loads: [], hits: {},
+    loads: [], hits: Object.create(null),
   };
   // The built-in scan's starting points, scanned after the walk, when the module's declarations are known:
   // occurrences of a built-in's name, and .constructor and .__proto__ reads.
@@ -1046,7 +1123,7 @@ function indexModule(module, needles, byName) {
       const isDefault = modifiers.some((modifier) => modifier.kind === K.DefaultKeyword);
       const entry = { k: isDefault ? 'export-default' : 'exportdecl', s: start(node, sourceFile), e: node.end,
         h: handle(), names };
-      // `export default function(){}` and `export default class{}` export a value no local name holds.
+      // Anonymous default functions and classes export a value without introducing a local name.
       if (isDefault && !node.name) entry.anonymous = true;
       record.loads.push(entry);
     }
@@ -1179,6 +1256,7 @@ function programFor(module) {
 //   a class static block: the vars and function declarations directly in it;
 //   a catch clause: its variable; a function or class expression: its own name.
 // Refused:
+//   every binding in a module TypeScript reports a parse diagnostic for;
 //   using and await using declarations, and declarations of any other kind;
 //   declarations JavaScript merges into one binding but TypeScript's binder keeps apart, which it
 //     reports at their names, as `var V=1;function V(){}` in a function body;
@@ -1246,7 +1324,7 @@ function patternRoot(node) {
 // `export function f`, `export default function f`) two symbols with the same declarations: the module's
 // export symbol, which every reference resolves to, and a local symbol in the module's scope table, which
 // points to it as exportSymbol. Both stand for one binding; this is the export symbol. Import aliases are
-// left as they are: following them would lead to TypeScript's unknown symbol, as no module is resolved.
+// left as they are: following them would lead to TypeScript's unknown symbol, because module resolution is disabled.
 function bindingSymbol(symbol) {
   return symbol?.exportSymbol ?? symbol;
 }
@@ -1473,7 +1551,9 @@ class Facts {
     if (this.examined.has(symbol)) return this.examined.get(symbol);
     const sourceFile = this.sourceFile;
     const declarations = declarationsIn(symbol, sourceFile);
-    const refused = [];
+    const refused = sourceFile.parseDiagnostics.map((diagnostic) => ({ s: diagnostic.start,
+      e: diagnostic.start + diagnostic.length,
+      reason: `TypeScript cannot parse this module: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}` }));
     const refuse = (node, reason) => refused.push({ s: start(node, sourceFile), e: node.end, reason });
     for (const declaration of declarations) {
       if (!isModelledDeclaration(declaration)) {
@@ -1556,7 +1636,7 @@ class Facts {
       if (ts.isIdentifier(token) && start(token, this.sourceFile) === Number(match[2])) this.idOf(this.resolve(token));
     }
     const symbol = this.symbols.get(id);
-    if (!symbol) throw new RequestError(`module ${this.module.index} has no binding ${id}`);
+    if (!symbol) throw new RequestError(`binding ${id} is absent from module ${this.module.index}`);
     return symbol;
   }
 
@@ -1628,26 +1708,35 @@ class Facts {
   // a path such as Set.prototype.
   premise(seeds) {
     const values = new Map();
-    // The first pass finds what each variable holds; the second classifies every use with all of it
-    // known, so that a definer called through a variable is seen at a target scanned before it.
-    this.premisePass(seeds, values);
-    return this.premisePass(seeds, values);
+    const unknownOrigins = new Set();
+    // The first pass finds possible built-in values and assignments the model cannot follow. The second
+    // classifies uses with that information, so an unknown other value never makes a call look like a
+    // certain definer call merely because the variable also receives Object.defineProperty.
+    this.premisePass(seeds, values, unknownOrigins);
+    return this.premisePass(seeds, values, unknownOrigins);
   }
 
-  premisePass(seeds, values) {
+  premisePass(seeds, values, unknownOrigins) {
     const sourceFile = this.sourceFile;
     const resolve = (identifier) => {
       if (isPropertyName(identifier) || isDeclarationName(identifier)) return null;
       const symbol = this.resolve(identifier);
-      // TypeScript resolves globalThis to a symbol of its own, with no declaration in the module.
+      // TypeScript resolves globalThis to a symbol of its own, without a declaration in the module.
       if (!symbol || this.idOf(symbol) === null) {
         return BUILTINS.has(identifier.text) && !insideWith(identifier) ? nameValue(identifier.text) : null;
       }
       const held = values.get(symbol);
-      return held && held.length === 1 ? held[0] : null;
+      return !unknownOrigins.has(symbol) && held && held.length === 1 ? held[0] : null;
     };
-    const scan = new BuiltinScan(sourceFile, resolve, handleOf, (identifier) => this.idOf(this.resolve(identifier)) === null);
+    const scan = new BuiltinScan(sourceFile, resolve, handleOf,
+      (identifier) => this.idOf(this.resolve(identifier)) === null && !insideWith(identifier));
     scan.registryVariable = (identifier) => this.holdsRegistrySymbol(identifier, scan);
+    scan.finiteKeys = (identifier) => this.entriesKeys(identifier, scan);
+    scan.resolveValues = (identifier) => {
+      const symbol = this.resolve(identifier);
+      if (this.idOf(symbol) === null) return [resolve(identifier)].filter(Boolean);
+      return values.get(symbol) ?? [];
+    };
     const names = [];
     const reaches = [];
     const visit = (node) => {
@@ -1668,52 +1757,146 @@ class Facts {
     const pending = [];
     for (const seed of seeds ?? []) {
       const token = ts.getTokenAtPosition(sourceFile, seed.at);
-      if (!ts.isIdentifier(token) || start(token, sourceFile) !== seed.at) throw new RequestError(`no identifier at ${seed.at}`);
+      if (!ts.isIdentifier(token) || start(token, sourceFile) !== seed.at) throw new RequestError(`position ${seed.at} does not identify an identifier`);
       const [root, ...path] = String(seed.value).split('.');
-      pending.push({ name: token, value: { root, path } });
+      const record = { ...scan.where(token), value: seed.value, name: token.text, at: seed.at, import: true };
+      pending.push({ name: token, value: { root, path }, route: [], record });
+      scan.result.references.push(record);
     }
     scanBuiltins(sourceFile, names, reaches, resolve, scan);
-    // Follow the variables that received a value, until no variable receives a new one.
+    // Follow each variable/value pair once. A transfer that re-enters a variable on its own route is
+    // unclassified: property reads in such a cycle could otherwise generate member paths indefinitely.
     let taken = 0;
     const followed = new Set();
-    const several = new Set();
     while (taken < scan.referenceValues.length || pending.length) {
-      const { name, value } = pending.length ? pending.shift() : scan.referenceValues[taken++];
+      const { name, value, route, record } = pending.length ? pending.shift() : scan.referenceValues[taken++];
+      const unclassified = (reason) => {
+        record.status = 'unclassified';
+        record.reason = reason;
+        scan.result.unfollowed.push({ ...scan.where(name), value: valueName(value), reason });
+      };
       const symbol = this.resolve(name);
-      if (!symbol || this.idOf(symbol) === null) {
-        scan.result.unfollowed.push({ ...scan.where(name), value: valueName(value), reason: 'stored in a name the module does not declare' });
+      const id = this.idOf(symbol);
+      if (!symbol || id === null) {
+        unclassified('stored in a name the module does not declare');
         continue;
       }
+      record.binding = id;
       const examined = this.examine(symbol);
       if (examined.refused.length) {
-        scan.result.unfollowed.push({ ...scan.where(name), value: valueName(value),
-          reason: `stored in a variable the binding model refuses (${examined.refused.map((r) => r.reason).join('; ')})` });
+        unclassified(`stored in a variable the binding model refuses (${examined.refused.map((r) => r.reason).join('; ')})`);
         continue;
       }
-      const key = `${this.idOf(symbol)} ${valueName(value)}`;
-      if (followed.has(key)) continue;
+      const key = `${id} ${valueName(value)}`;
+      if (followed.has(key)) {
+        if (unknownOrigins.has(symbol)) {
+          unclassified('the variable can also receive values from declarations or writes outside the built-in value model');
+        } else {
+          record.status = 'followed';
+        }
+        continue;
+      }
+      if (route.includes(id)) {
+        unclassified('a cycle of stored references derives a value from a variable already on its route');
+        continue;
+      }
+      if (this.hasUnknownOrigins(symbol, scan)) unknownOrigins.add(symbol);
+      if (unknownOrigins.has(symbol)) {
+        // Known built-in alternatives are still inspected for writes, but callers must also see that
+        // some assignments or incoming parameter values remain unclassified.
+        unclassified('the variable can also receive values from declarations or writes outside the built-in value model');
+      } else {
+        record.status = 'followed';
+      }
       followed.add(key);
       const held = values.get(symbol) ?? [];
       if (!held.some((known) => valueName(known) === valueName(value))) held.push(value);
       values.set(symbol, held);
-      if (held.length >= 2 && !several.has(symbol)) {
-        several.add(symbol);
-        scan.result.unfollowed.push({ ...scan.where(name), value: held.map(valueName).join(' or '),
-          reason: 'a variable that holds several built-in values, so a definer called with it as the target is not followed' });
-      }
       for (const declaration of declarationsIn(symbol, sourceFile)) {
         const root = ts.isBindingElement(declaration) ? patternRoot(declaration) : declaration;
         if (exportedByModifier(root) && value.root !== UNKNOWN) {
           scan.result.exports.push({ ...scan.where(declarationName(declaration)), value: valueName(value), name: declarationName(declaration).text });
         }
       }
-      for (const node of examined.nodes) if (!isDeclarationName(node)) scan.follow(node, value, true);
+      for (const node of examined.nodes) if (!isDeclarationName(node)) scan.follow(node, value, true, [...route, id]);
     }
     return inSourceOrder(scan.result);
   }
 
+  // Whether a variable has a source of values the built-in model does not identify. This does not
+  // stop inspection of its known built-in alternatives, but prevents treating it as a certain callee.
+  hasUnknownOrigins(symbol, scan) {
+    const complete = (expression) => {
+      let current = expression;
+      while (ts.isParenthesizedExpression(current) || ts.isAwaitExpression(current)) current = current.expression;
+      if (ts.isConditionalExpression(current)) return complete(current.whenTrue) && complete(current.whenFalse);
+      if (ts.isBinaryExpression(current)) {
+        const op = current.operatorToken.kind;
+        if ([K.BarBarToken, K.AmpersandAmpersandToken, K.QuestionQuestionToken].includes(op)) return complete(current.left) && complete(current.right);
+        if ([K.EqualsToken, K.CommaToken].includes(op)) return complete(current.right);
+      }
+      return Boolean(scan.valueOf(current));
+    };
+    for (const declaration of declarationsIn(symbol, this.sourceFile)) {
+      const root = ts.isBindingElement(declaration) ? patternRoot(declaration) : declaration;
+      if (isParameterDeclaration(declaration) || catchClauseOf(declaration) || ts.isFunctionDeclaration(root) || ts.isClassDeclaration(root)) return true;
+      if (root.initializer && !complete(root.initializer)) return true;
+    }
+    for (const node of this.examine(symbol).nodes) {
+      if (!rolesOf(node).includes('write')) continue;
+      let current = node;
+      while (ts.isParenthesizedExpression(current.parent)) current = current.parent;
+      const outer = current.parent;
+      if (!ts.isBinaryExpression(outer) || outer.left !== current || outer.operatorToken.kind !== K.EqualsToken || !complete(outer.right)) return true;
+    }
+    return false;
+  }
+
+  // In `for (let [key, value] of Object.entries({a: ..., b: ...}))`, key can be a or b. The
+  // pattern must have exactly two identifiers without defaults or rest elements, and the key binding
+  // may only be written by that loop head. Array iteration is used both by for-of and by destructuring
+  // each pair, so its operations are dependencies of the proof as well as Object.entries.
+  entriesKeys(identifier, scan) {
+    if (!ts.isIdentifier(identifier)) return null;
+    const symbol = this.resolve(identifier);
+    if (!symbol) return null;
+    const declarations = declarationsIn(symbol, this.sourceFile);
+    if (declarations.length !== 1) return null;
+    const element = declarations[0];
+    if (!ts.isBindingElement(element) || !ts.isArrayBindingPattern(element.parent)) return null;
+    const pattern = element.parent;
+    if (pattern.elements.length !== 2 || pattern.elements[0] !== element || pattern.elements.some((part) =>
+      !ts.isBindingElement(part) || !ts.isIdentifier(part.name) || part.initializer || part.dotDotDotToken)) return null;
+    const declaration = pattern.parent;
+    const list = declaration.parent;
+    const loop = list.parent;
+    if (!ts.isVariableDeclaration(declaration) || !ts.isVariableDeclarationList(list) || list.declarations.length !== 1 ||
+        !ts.isForOfStatement(loop) || loop.initializer !== list || loop.awaitModifier) return null;
+    const examined = this.examine(symbol);
+    if (examined.refused.length || examined.occurrences.some((occurrence) => occurrence.roles.includes('write') &&
+        occurrence.s !== start(element.name, this.sourceFile))) return null;
+    let call = loop.expression;
+    while (ts.isParenthesizedExpression(call)) call = call.expression;
+    if (!ts.isCallExpression(call) || call.questionDotToken || call.arguments.length !== 1) return null;
+    const callee = call.expression;
+    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'entries' || callee.questionDotToken ||
+        !ts.isIdentifier(callee.expression) || callee.expression.text !== 'Object' || !scan.isFree(callee.expression)) return null;
+    let object = call.arguments[0];
+    while (ts.isParenthesizedExpression(object)) object = object.expression;
+    if (!ts.isObjectLiteralExpression(object)) return null;
+    const keys = [];
+    for (const property of object.properties) {
+      if (ts.isSpreadAssignment(property)) return null;
+      const key = memberKey(property.name);
+      if (key === undefined) return null;
+      if (key === '__proto__' && ts.isPropertyAssignment(property) && !ts.isComputedPropertyName(property.name)) continue;
+      keys.push(key);
+    }
+    return { keys: [...new Set(keys)], requires: ['Object.entries', 'Array.prototype.@@iterator', '%ArrayIteratorPrototype%.next'] };
+  }
+
   // Whether an identifier is a variable the binding model accepts, with one declaration whose
-  // initializer is a call of the built-in Symbol.for, and no other write.
+  // initializer is a call of the built-in Symbol.for, and is not written afterwards.
   holdsRegistrySymbol(identifier, scan) {
     const symbol = this.resolve(identifier);
     if (!symbol) return false;
@@ -1802,7 +1985,7 @@ class Facts {
   }
 
   // The node at handle as TypeScript prints it, without comments, after renaming every binding to a
-  // name no source identifier can have, since ‹ and › cannot occur in a JavaScript identifier: the
+  // name that a source identifier cannot have, since ‹ and › cannot occur in a JavaScript identifier: the
   // parameters declared inside the node ‹p0›, ‹p1›, ... and its other declarations ‹l0›, ... in the order
   // they are declared; the bindings that roles names (binding id to role) ‹ROLE›; other bindings of the
   // module ‹m0›, ... in the order they are first used. A role is upper case, so it never spells a
@@ -2075,7 +2258,7 @@ function factsBatch(request) {
         break;
       case 'bindingAt': {
         const found = facts.find(query.s, query.e, 'Identifier');
-        if (found.length !== 1) throw new RequestError(`no single identifier at ${query.s}:${query.e} in module ${module.index}`);
+        if (found.length !== 1) throw new RequestError(`span ${query.s}:${query.e} does not identify exactly one identifier in module ${module.index}`);
         const reference = facts.reference(nodeAt(facts.sourceFile, found[0]));
         results.push(reference.b ? facts.binding(reference.b) : reference);
         break;
@@ -2088,7 +2271,7 @@ function factsBatch(request) {
         break;
       case 'text':
         if (!(Number.isInteger(query.s) && Number.isInteger(query.e) && query.s >= 0 && query.s <= query.e &&
-              query.e <= module.text.length)) throw new RequestError(`no text ${query.s}:${query.e} in module ${module.index}`);
+              query.e <= module.text.length)) throw new RequestError(`span ${query.s}:${query.e} lies outside module ${module.index}`);
         results.push(module.text.slice(query.s, query.e));
         break;
       case 'comments':

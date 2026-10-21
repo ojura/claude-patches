@@ -284,7 +284,7 @@ test('canonical text keeps bindings apart and cannot collide with a source name'
 });
 
 test('canonical text keeps destructuring defaults and renames array elements without inventing keys', async () => {
-  // The review's probes: ({x=1}=o) and ({x=2}=o) printed the same, and [x] printed as [x: ‹p0›].
+  // Assignment defaults must remain distinct, and an array element does not introduce an object key.
   const text = 'function f(x,o){({x=1}=o);return x}function g(x,o){({x=2}=o);return x}' +
     'function a([x]){return x}function b([y]){return y}function c({x=3}){return x}';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -340,7 +340,7 @@ test('a syntax record names every child field and keeps operators and declaratio
 });
 
 test('a declaration that assigns its name is a write: for-in/of heads, initialized patterns, functions', async () => {
-  // The review's probes: `var V=1;for(var V of[2]){}` reported the second declaration as a plain one.
+  // A for-in/of head assigns its variable on every iteration.
   const cases = [
     ['var V=1;for(var V of[2]){}', ['write', 'for-target']],
     ['var V=1;for(var V in {x:2}){}', ['write', 'for-target']],
@@ -365,7 +365,7 @@ test('a declaration that assigns its name is a write: for-in/of heads, initializ
   });
 });
 
-// The binding model (facts.mjs, "The binding model"): every case a review found, modelled or refused.
+// Cases covered or refused by the binding model documented in facts.mjs.
 
 async function refusedReasons(h, module, text, name, n = 0) {
   const record = await bindingOf(h, module, text, name, n);
@@ -393,7 +393,7 @@ test('declarations TypeScript keeps apart but JavaScript merges refuse both bind
       assert.ok(occurrences.refused.length > 0);
     });
   }
-  // Separate scopes are separate bindings, and nothing is refused.
+  // Declarations in separate scopes keep separate bindings.
   const nested = 'function outer(){var V=1;function nested(){function V(){}return V}return V}';
   await withHelper([[0, '/a.js', nested]], async (h) => {
     assert.equal(await refusedReasons(h, 0, nested, 'V'), '');
@@ -402,7 +402,7 @@ test('declarations TypeScript keeps apart but JavaScript merges refuse both bind
 });
 
 test('a catch variable and a var of its name in the catch block refuse both bindings', async () => {
-  // The review's probe: the var's initializer assigns the catch variable, so x.push changes V.
+  // The var initializer assigns the catch variable, so x.push changes V.
   const text = 'const V=[1];function f(){try{throw []}catch(x){var x=V;x.push(2)}}f();';
   await withHelper([[0, '/a.js', text]], async (h) => {
     assert.match(await refusedReasons(h, 0, text, 'x'), /catch block assigns this catch variable/);
@@ -412,7 +412,7 @@ test('a catch variable and a var of its name in the catch block refuse both bind
 });
 
 test('a named default export function or class is a binding under its local name', async () => {
-  // The review's probe: TypeScript names the symbol "default", and the occurrences were lost.
+  // TypeScript calls the symbol "default", but its references use the local name.
   for (const text of ['export default function f(){return 1};f=()=>2;f();', 'export default class f{};f=null;f;']) {
     await withHelper([[0, '/a.js', text]], async (h) => {
       const record = await bindingOf(h, 0, text, 'f');
@@ -453,7 +453,7 @@ test('a parameter list with expressions gets the scopes JavaScript gives it', as
 });
 
 test('a parameter and a body var of its name are refused when the parameter list has expressions', async () => {
-  // The review's probe: Node returns 1, the parameter's value, while TypeScript has one symbol for both.
+  // JavaScript returns the parameter value 1, while TypeScript gives the parameter and body var one symbol.
   const text = 'function outer(V=1,g=()=>V){var V=2;return g()}function plain(W){var W=2;return W}';
   await withHelper([[0, '/a.js', text]], async (h) => {
     assert.match(await refusedReasons(h, 0, text, 'V'), /two bindings in JavaScript/);
@@ -490,8 +490,7 @@ test('a written class declaration and a deleted name are refused', async () => {
 });
 
 test('an exported declaration is one binding whatever order the queries come in', async () => {
-  // The review's probe: after scope_binding cached TypeScript's local symbol under the id its export
-  // symbol also has, occurrences found nothing and hid the writes.
+  // Local and export symbols of one declaration must give the same occurrences in every query order.
   const cases = [['export let x=1;x=2;export{x as y};', 'x', 3], ['export default function f(){return 1};f=()=>2;f();', 'f', 3],
     ['export function g(){};g=1;', 'g', 2], ['export default class C{};C=null;C;', 'C', null]];
   for (const [text, name, count] of cases) {
@@ -520,7 +519,7 @@ test('an exported declaration is one binding whatever order the queries come in'
 });
 
 test('re-export names and export * as names are public names, not references', async () => {
-  // The review's probe: `export{Set}from` gave {free:"Set"}, and `export*as Set from` a local binding.
+  // Re-exports name another module's exports; a namespace export does not introduce a local variable.
   const text = 'export{Set}from"/x.js";export{Map as M}from"/x.js";export*as Promise from"/x.js";';
   await withHelper([[0, '/a.js', text]], async (h) => {
     for (const name of ['Set', 'Map', 'M', 'Promise']) assert.deepEqual(await bindingOf(h, 0, text, name), { role: 'name' }, name);
@@ -528,7 +527,7 @@ test('re-export names and export * as names are public names, not references', a
 });
 
 test('canonical text keeps a module public names', async () => {
-  // The review's probe: export{a} and export{b}, import{a} and import{b} printed the same.
+  // Import and export names remain distinct when local bindings are renamed.
   const sources = ['const a=1;export{a};', 'const b=1;export{b};', 'import{a}from"/x.js";a();', 'import{b}from"/x.js";b();',
     'export*as Set from"/x.js";', 'export var a=1;', 'export var b=1;'];
   await withHelper(sources.map((text, i) => [i, `/m${i}.js`, text]), async (h) => {
@@ -559,7 +558,7 @@ test('canonical text is refused where it would rename a refused binding or holds
 });
 
 test('arguments read in a nested method name, class heritage or decorator belongs to the enclosing function', async () => {
-  // The review's probe: f(V) pushes onto V through arguments[0] inside a computed method name.
+  // f(V) can change V through arguments[0] in a computed method name.
   const cases = [
     ['function f(x){const o={[arguments[0].push(2)](){}}}', true],
     ['function f(x){class C extends (arguments[0]){}}', true],
@@ -622,7 +621,7 @@ async function scans(text) {
   });
 }
 
-test('the scan passes calls, constructions, reads, comparisons and tests, and counts no write', async () => {
+test('the scan passes calls, constructions, reads, comparisons and tests, without recording a write', async () => {
   const { index, facts } = await scans('Array.isArray(x);new Set([1]);Object.keys(o);typeof window;x instanceof Map;' +
     'Array.prototype.slice.call(x);if(Symbol.iterator in o);`${String}`;o[Symbol.iterator];class C extends Map{}');
   for (const result of [index, facts]) {
@@ -631,7 +630,7 @@ test('the scan passes calls, constructions, reads, comparisons and tests, and co
   }
 });
 
-test('the scan records every visible write to a built-in, through any form the review named', async () => {
+test('the scan records writes through assignments, patterns, prototype setters and definers', async () => {
   const { index } = await scans('Set.prototype.has=g;Object["defineProperty"](Set.prototype,"has",{value:1});[Set]=[1];' +
     '({a:Set}=o);for(Set of r){}Set.prototype.__defineGetter__("has",f);' +
     'Object.prototype.__defineSetter__.call(Map.prototype,"get",f);Object.defineProperty.call(null,Array.prototype,"at",{});' +
@@ -690,29 +689,6 @@ test('a built-in value that escapes is unfollowed, and a prototype reached from 
   assert.equal(raw.unidentified, 1);
 });
 
-test('template tags receive their template object and unchanged substitution arguments', async () => {
-  // call takes the implicit template object as its this argument, leaving
-  // Set.prototype, "has" and the descriptor as Object.defineProperty's three arguments.
-  const { index, facts } = await scans('Object.defineProperty.call`${Set.prototype}${"has"}${{value:function(){this.add("b");return true}}}`;' +
-    'tag`${Set.prototype}`;Object.defineProperty.apply`${[Map.prototype,"get",{value:f}]}`;');
-  for (const result of [index, facts]) {
-    assert.deepEqual(result.writes, ['Set.prototype.has Object.defineProperty', 'Map.prototype.get Object.defineProperty']);
-    assert.ok(result.unfollowed.includes('Set.prototype: passed to a template tag'));
-    assert.ok(result.unfollowed.includes('Map.prototype: stored in an array literal'));
-    assert.equal(result.passed, 0);
-  }
-});
-
-test('a built-in called as a template tag gets its arguments: String.raw, as Claude Code builds regular expressions with it', async () => {
-  // String.raw is a built-in value the scan follows; calling it as a tag used to stop the index pass
-  // with "call.arguments is not iterable", since a tagged template has no arguments list.
-  const { index, facts } = await scans('var r=String.raw`a${1}b`,s=String.raw`c`;');
-  for (const result of [index, facts]) {
-    assert.deepEqual([result.writes, result.unfollowed, result.dynamic], [[], [], []]);
-    assert.equal(result.passed, 2);
-  }
-});
-
 test('the facts pass follows variables, also into a definer call and out through an export', async () => {
   const text = 'var p=Object.prototype;p.x=1;var dp=Object.defineProperty;dp(Set.prototype,"has",{});dp(obj,"x",{});' +
     'var a=Set;a=Map;a.y=1;var S=Set;export{S as T};export const P=Promise;';
@@ -720,8 +696,7 @@ test('the facts pass follows variables, also into a definer call and out through
   // The index pass sees Set.prototype passed to dp, which it cannot identify.
   assert.ok(index.unfollowed.includes('Set.prototype: passed to a function'));
   assert.deepEqual(facts.writes, ['Object.prototype.x =', 'Set.prototype.has Object.defineProperty', 'Set.y =', 'Map.y =']);
-  assert.deepEqual(facts.unfollowed, [
-    'Set or Map: a variable that holds several built-in values, so a definer called with it as the target is not followed']);
+  assert.deepEqual(facts.unfollowed, []);
   assert.deepEqual(facts.exports, ['T=Set', 'P=Promise']);
 });
 
@@ -748,6 +723,130 @@ test('a malformed request and a notification error come back as request errors',
     const unknown = await h.request('nonsense');
     assert.equal(unknown.error.kind, 'request');
     const handle = await h.request('facts', { module: 0, queries: [{ q: 'node', handle: '9.9' }] });
-    assert.match(handle.error.message, /no node at handle/);
+    assert.match(handle.error.message, /does not identify a node/);
+  });
+});
+
+test('a needle key is arbitrary text, including inherited Object property names', async () => {
+  await withHelper([[0, '/a.js', 'const x="flag";']], async (h) => {
+    const keys = ['constructor', '__proto__', 'toString', 'hasOwnProperty'];
+    const { modules } = await h.ok('index', { needles: keys.map((key) => ({ key, type: 'string', value: 'flag' })) });
+    for (const key of keys) {
+      assert.ok(Object.hasOwn(modules[0].hits, key), key);
+      assert.equal(modules[0].hits[key].length, 1, key);
+      assert.equal(modules[0].hits[key][0].s, 8, key);
+    }
+  });
+});
+
+test('template tags receive their template object and unchanged substitution arguments', async () => {
+  // call takes the implicit template object as its this argument, leaving
+  // Set.prototype, "has" and the descriptor as Object.defineProperty's three arguments.
+  const { index, facts } = await scans('Object.defineProperty.call`${Set.prototype}${"has"}${{value:function(){this.add("b");return true}}}`;' +
+    'tag`${Set.prototype}`;Object.defineProperty.apply`${[Map.prototype,"get",{value:f}]}`;');
+  for (const result of [index, facts]) {
+    assert.deepEqual(result.writes, ['Set.prototype.has Object.defineProperty', 'Map.prototype.get Object.defineProperty']);
+    assert.ok(result.unfollowed.includes('Set.prototype: passed to a template tag'));
+    assert.ok(result.unfollowed.includes('Map.prototype: stored in an array literal'));
+    assert.equal(result.passed, 0);
+  }
+});
+
+test('a built-in called as a template tag gets its arguments: String.raw, as Claude Code builds regular expressions with it', async () => {
+  // String.raw is a built-in value the scan follows; calling it as a tag used to stop the index pass
+  // with "call.arguments is not iterable", since a tagged template has no arguments list.
+  const { index, facts } = await scans('var r=String.raw`a${1}b`,s=String.raw`c`;');
+  for (const result of [index, facts]) {
+    assert.deepEqual([result.writes, result.unfollowed, result.dynamic], [[], [], []]);
+    assert.equal(result.passed, 2);
+  }
+});
+
+test('cycles of stored references terminate and are recorded as unclassified flows', { timeout: 10000 }, async () => {
+  const cases = [
+    'var m=Symbol.iterator;function b(t){return t=m&&t[m]||t["@@iterator"]}',
+    'var a=Object,b;b=a.prototype;a=b.prototype;a.x=1;',
+  ];
+  for (const text of cases) {
+    await withHelper([[0, '/a.js', text]], async (h) => {
+      const [scan] = await h.facts(0, [{ q: 'premise' }]);
+      assert.ok(scan.unfollowed.some((entry) => entry.reason.includes('cycle of stored references')), text);
+      assert.ok(scan.references.every((entry) => ['followed', 'unclassified'].includes(entry.status)), text);
+      assert.ok(scan.references.some((entry) => entry.status === 'unclassified'), text);
+    });
+  }
+});
+
+test('a key from Object.entries of a static object has its finite names and operation dependencies', async () => {
+  const text = 'for(let[n,r]of Object.entries({h:f,Fragment:g}))Object.defineProperty(globalThis,n,{value:r});';
+  await withHelper([[0, '/a.js', text]], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    assert.deepEqual(scan.writes, []);
+    assert.deepEqual(scan.unknownKeys, []);
+    assert.deepEqual(scan.globalWrites.map((entry) => entry.key), ['h', 'Fragment']);
+    for (const entry of scan.globalWrites) {
+      assert.deepEqual(entry.keyRequires, ['Object.entries', 'Array.prototype.@@iterator', '%ArrayIteratorPrototype%.next']);
+      assert.equal(entry.keyFallback, 'globalThis.*');
+    }
+  });
+});
+
+test('finite keys are refused when the loop binding or iterable is outside the key model', async () => {
+  const cases = [
+    'for(let[n,r]of Object.entries({h:f})){n=getKey();Object.defineProperty(globalThis,n,{value:r})}',
+    'function f(Object){for(let[n,r]of Object.entries({h:g}))globalThis[n]=r}',
+    'for(let[n,r]of Object.entries({...other,h:f}))globalThis[n]=r;',
+    'for(let[n="Set",r]of Object.entries({h:f}))globalThis[n]=r;',
+    'for(let[n,r]of Object.entries({[getKey()]:f}))globalThis[n]=r;',
+  ];
+  for (const text of cases) {
+    await withHelper([[0, '/a.js', text]], async (h) => {
+      const [scan] = await h.facts(0, [{ q: 'premise' }]);
+      assert.ok(scan.unknownKeys.length > 0, text);
+    });
+  }
+});
+
+test('constructor and prototype reads are identified only where their object type is established', async () => {
+  const { facts } = await scans('({constructor:Set}).constructor.prototype.has=f;' +
+    '({__proto__:Map}).__proto__.prototype.get=f;' +
+    'Math.PI.constructor.prototype.x=1;Object.getPrototypeOf(Math.PI).y=1;' +
+    '(class extends Map{}).__proto__.z=1;');
+  assert.ok(facts.writes.includes('Set.prototype.has ='));
+  assert.ok(facts.writes.includes('Map.prototype.get ='));
+  assert.ok(!facts.writes.some((entry) => entry.startsWith('Function.prototype.')));
+  assert.deepEqual(facts.prototypeWrites, ['(object).constructor.prototype.x =', '(object).__proto__.y =', '(object).__proto__.z =']);
+});
+
+test('a member under an unknown global key can still be a built-in member', async () => {
+  const { index, facts } = await scans('globalThis[k].has=f;');
+  assert.deepEqual(index.unknownKeys, ['globalThis.*.has =']);
+  assert.deepEqual(facts.unknownKeys, ['globalThis.*.has =']);
+  assert.deepEqual(facts.globalWrites, []);
+});
+
+test('a definer writes every built-in target of a conditional or a variable with several values', async () => {
+  const { index, facts } = await scans('Object.defineProperty(flag?Set.prototype:Map.prototype,"has",{});' +
+    'var target=Set.prototype;target=Map.prototype;Object.defineProperty(target,"get",{});');
+  assert.deepEqual(index.writes, ['Set.prototype.has Object.defineProperty', 'Map.prototype.has Object.defineProperty']);
+  assert.deepEqual(facts.writes, ['Set.prototype.has Object.defineProperty', 'Map.prototype.has Object.defineProperty',
+    'Set.prototype.get Object.defineProperty', 'Map.prototype.get Object.defineProperty']);
+  assert.deepEqual(facts.unfollowed, []);
+});
+
+test('an alias with other unmodelled values cannot hide an argument escape as a certain definer call', async () => {
+  const { facts } = await scans('var q=custom;q=Object.defineProperty;q(Set.prototype,"unrelated",{});');
+  assert.ok(facts.writes.includes('Set.prototype.unrelated Object.defineProperty'));
+  assert.ok(facts.unfollowed.includes('Set.prototype: passed to a function'));
+  assert.ok(facts.unfollowed.some((entry) => entry.includes('values from declarations or writes outside')));
+});
+
+test('a parse diagnostic refuses binding facts even for a declaration that parsed separately', async () => {
+  const text = 'var V=[1];broken(';
+  await withHelper([[0, '/a.js', text]], async (h) => {
+    const record = await bindingOf(h, 0, text, 'V');
+    assert.ok(record.refused.some((entry) => entry.reason.startsWith('TypeScript cannot parse this module:')));
+    const [occurrences] = await h.facts(0, [{ q: 'occurrences', id: record.id }]);
+    assert.ok(occurrences.refused.length > 0);
   });
 });

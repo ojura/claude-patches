@@ -34,7 +34,7 @@ def test_offsets_convert_between_utf16_and_code_points_around_astral_characters(
 
 
 def test_a_position_must_be_an_integer_inside_the_module():
-    # The review's probe: to_utf16(True) returned 2 for a one-emoji module.
+    # bool must be rejected before arithmetic can turn it into an integer offset.
     module = pb.Module(0, "/a.js", "\U0001f600")
     for bad in (True, False, 1.0, -1, 2, None):
         with pytest.raises(pb.BackendError):
@@ -54,7 +54,7 @@ def test_an_anchor_error_counts_candidates_given_as_a_generator():
 
 
 def test_needles_from_a_generator_are_registered_and_sent():
-    # The review's probe: the generator was consumed by the registry and the index got none.
+    # Both the registry and the index must receive the needles from a one-pass iterable.
     with build('const x="flag";', needles=(n for n in [pb.Needle("flag", "string", "flag")])) as bundle:
         assert list(bundle.needles) == ["flag"]
         assert len(bundle.hits("flag")) == 1
@@ -93,7 +93,7 @@ def test_named_renamed_and_reexported_names_reach_the_declaring_module():
 
 
 def test_two_export_names_of_one_binding_through_two_paths_are_not_ambiguous():
-    # The review's probe: Node resolves `result` to 1; the linker had compared export-list positions.
+    # Both names export the same binding, whose value is 1.
     with build('const x=1;export{x as one,x as two};',
                'export{one as result}from"/m0.js";',
                'export{two as result}from"/m0.js";',
@@ -116,7 +116,7 @@ def test_export_star_never_supplies_default():
 
 
 def test_default_exports_of_every_form():
-    # The review's probe: anonymous default declarations raised NotExported.
+    # Anonymous default declarations export values without introducing a local name.
     with build('export default function(){return 1}', 'export default class{}', 'const x=1;export default x;',
                'export default function f(){}', 'var y=1;export{y as default}') as bundle:
         kind, module, start, end = bundle.export(0, "default")
@@ -167,8 +167,7 @@ def test_the_module_scope_binding_of_a_name():
 
 
 def test_an_exported_declaration_keeps_its_occurrences_whatever_the_query_order():
-    # The review's probe: scope_binding cached TypeScript's local symbol under the id of the export symbol,
-    # and the occurrences asked for afterwards were empty, hiding the writes.
+    # A scope lookup and a reference lookup must select the same symbol for an exported declaration.
     for text, name in (("export let x=1;x=2;", "x"), ("export default function f(){return 1};f=()=>2;f();", "f")):
         start = re.search(rf"\b{name}\b", text).start()
         with build(text, "var q=1;") as bundle:
@@ -202,29 +201,31 @@ def _streams(bundle):
 
 
 def test_close_releases_both_pipes_and_the_stderr_file():
-    # The review's probe: stdout and stderr stayed open after close().
+    # Closing the helper releases both pipes and its stderr file.
     for kill in (False, True):
         bundle = build("const x=1;")
         streams = _streams(bundle)
         bundle._helper.close(kill=kill)
         assert [stream.closed for stream in streams] == [True, True, True]
         assert bundle._helper._process.returncode is not None
-        bundle._helper.close()  # a second close does nothing
+        bundle._helper.close()  # closing twice is idempotent
 
 
 def test_the_helper_adds_no_thread_and_a_failure_quotes_its_stderr():
-    # A thread blocked reading the helper's stderr held that stream's lock across os.fork, and the forked
-    # child hung when it closed the stream.
+    # A background stderr reader would hold its buffered stream's lock while blocked in read. That lock
+    # would remain locked in a forked child, where closing the stream could hang.
     threads = threading.active_count()
     with build("const x=1;") as bundle:
         assert threading.active_count() == threads
         os.write(bundle._helper._stderr.fileno(), b"first\nTypeError: something broke\n")
         assert str(bundle._helper._failure("the helper failed")).endswith("stderr ends:\nfirst\nTypeError: something broke")
+        os.write(bundle._helper._stderr.fileno(), b"x" * (pb._STDERR_TAIL * 2) + b"last part")
+        tail = bundle._helper._stderr_tail()
+        assert len(tail) == pb._STDERR_TAIL and tail.endswith("last part")
 
 
 def test_close_cleans_up_when_its_wait_is_interrupted(monkeypatch):
-    # The review's probe: a KeyboardInterrupt in the wait left the helper running and its streams open,
-    # and a later close returned without cleaning up.
+    # Cancellation propagates after the owned process has ended and its streams have closed.
     bundle = build("const x=1;")
     process = bundle._helper._process
     real_wait = process.wait
@@ -266,7 +267,7 @@ def test_a_helper_of_another_revision_is_refused(monkeypatch):
 
 
 def test_a_helper_that_cannot_start_is_a_backend_error(monkeypatch):
-    # The review's probe: a Popen failure escaped as FileNotFoundError, and the stderr file stayed open.
+    # Startup errors use BackendError and release the file opened for stderr.
     files = []
     real = pb.tempfile.TemporaryFile
 
@@ -285,7 +286,7 @@ def test_a_helper_that_cannot_start_is_a_backend_error(monkeypatch):
 
 
 def test_a_helper_that_closes_its_output_and_keeps_running_is_ended(monkeypatch, tmp_path):
-    # The review's probe: _read waited forever for a helper that closed stdout but did not exit.
+    # A helper that closes stdout cannot answer further requests, even if it keeps running.
     fake = tmp_path / "closed-stdout.mjs"
     # The explicit synchronous write completes before stdout closes.
     fake.write_text("import fs from 'node:fs';\nfs.writeSync(2,'STDOUT_CLOSED\\n');\nfs.closeSync(1);\n"
@@ -310,7 +311,7 @@ def test_a_helper_that_closes_its_output_and_keeps_running_is_ended(monkeypatch,
     try:
         assert not thread.is_alive(), "the client still waits for a helper that closed its output"
         assert isinstance(outcome.get("error"), pb.BackendError)
-        assert "closed its output" in str(outcome["error"]) and "STDOUT_CLOSED" in str(outcome["error"])
+        assert "closed its output" in str(outcome["error"]) and "STDOUT_CLOSED" in str(outcome["error"]), outcome
         assert helpers[0]._process.returncode is not None
     finally:
         for helper in helpers:
@@ -318,11 +319,10 @@ def test_a_helper_that_closes_its_output_and_keeps_running_is_ended(monkeypatch,
                 os.killpg(helper._process.pid, 9)
 
 
-def test_a_reply_that_is_not_json_ends_the_helper_and_later_requests_fail_at_once():
+def test_a_mismatched_reply_id_ends_the_helper_and_later_requests_fail_at_once():
     bundle = build("const x=1;")
     try:
-        bundle._helper._process.stdin.write(b'{"op":"module","index":1,"name":"/b.js","text":"x"}\n')
-        # Make the helper's next output line something other than a reply by reading it out of order.
+        # A reply to request 99 must not be accepted as the reply to request 1.
         with pytest.raises(pb.BackendError):
             bundle._helper._write({"id": 99, "op": "nonsense"})
             bundle._helper._next = 0
@@ -334,9 +334,26 @@ def test_a_reply_that_is_not_json_ends_the_helper_and_later_requests_fail_at_onc
         bundle.close()
 
 
+def test_a_non_json_output_line_is_a_protocol_failure(monkeypatch, tmp_path):
+    fake = tmp_path / "not-json.mjs"
+    fake.write_text("process.stdout.write('not a JSON value\\n');setInterval(()=>{},1000);\n")
+    monkeypatch.setattr(pb, "HELPER", str(fake))
+    helpers = []
+
+    class Recorded(pb._Helper):
+        def _read(self):
+            helpers.append(self)
+            return super()._read()
+
+    with pytest.raises(pb.BackendError, match="not JSON"):
+        Recorded()
+    assert helpers[0]._process.returncode is not None
+    assert all(stream.closed for stream in (helpers[0]._process.stdin, helpers[0]._process.stdout, helpers[0]._stderr))
+
+
 def test_a_forked_child_lets_go_of_the_helper_without_closing_descriptors_it_reuses():
-    # The review's probe: the fork handler closed descriptor numbers that the stream objects still owned,
-    # so closing a stale stream later closed whatever the child had opened under the same number.
+    # Each inherited stream must retain ownership of its descriptor number until it closes. Releasing
+    # the number first could let a stale stream close an unrelated file that reused it.
     bundle = build("const x=1;")
     try:
         null = os.stat(os.devnull)
@@ -403,6 +420,79 @@ def test_modules_of_a_binary_in_every_encoding_bun_stores(tmp_path):
             text = 'var a=["h\xe9 ☃ \U0001f600"];export{a};'
             assert bundle.modules[1].length == len(text) + 1
             assert bundle.text(1, 0, bundle.modules[1].length) == text
+
+
+# The built-in scan across modules
+
+
+def test_a_built_in_value_exported_by_a_variable_is_followed_into_its_importers():
+    with build('var S=Set;export{S as T};export const P=Promise;',
+               'import{T}from"/m0.js";T.prototype.x=1;',
+               'export{T as U}from"/m0.js";',
+               'import{U as V}from"/m2.js";import{P}from"/m0.js";V.prototype.y=2;f(P);',
+               'import*as ns from"/m0.js";ns.T.prototype.z=3;',
+               'var later=import("/m2.js");',
+               'Object.defineProperty(Map.prototype,"get",{});') as bundle:
+        scans = bundle.builtin_scan()
+        assert [w["target"] for w in scans[1]["writes"]] == ["Set.prototype.x"]
+        assert [w["target"] for w in scans[3]["writes"]] == ["Set.prototype.y"]
+        assert [u["value"] for u in scans[3]["unfollowed"]] == ["Promise"]
+        assert [w["target"] for w in scans[6]["writes"]] == ["Map.prototype.get"]
+        # A namespace of a module that exports a built-in value is where the scan stops following it.
+        assert [u["reason"] for u in scans[4]["unfollowed"]] == [
+            "a namespace of module 0, which exports built-in values: P (Promise), T (Set)"]
+        assert scans[5]["unfollowed"][0]["reason"].startswith("a namespace of module 2")
+        summary = bundle.builtin_summary(scans)
+        assert [(w["module"], w["target"]) for w in summary["writes"]] == [
+            (1, "Set.prototype.x"), (3, "Set.prototype.y"), (6, "Map.prototype.get")]
+        # S and P in module 0, and the imports T, V and P that receive their values.
+        assert len(summary["references"]) == 5
+        assert all(entry["status"] == "followed" and entry["binding"] for entry in summary["references"])
+
+
+def test_a_registry_key_loses_its_exemption_when_the_program_writes_symbol_for():
+    with build('const k=Symbol.for("x");globalThis[k]=1;', 'Symbol.for=f;') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert [w["target"] for w in summary["writes"]] == ["globalThis.*", "Symbol.for"]
+        assert summary["registryWrites"] == []
+    with build('const k=Symbol.for("x");globalThis[k]=1;') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert summary["writes"] == []
+        assert [w["target"] for w in summary["registryWrites"]] == ["globalThis.@registry"]
+
+
+def test_a_needle_key_can_name_an_inherited_object_property():
+    needles = [pb.Needle(key, "string", "flag") for key in ("constructor", "__proto__", "toString")]
+    with build('const x="flag";', needles=needles) as bundle:
+        for needle in needles:
+            assert len(bundle.hits(needle.key)) == 1
+            assert bundle.hits(needle.key)[0][1]["s"] == 8
+
+
+def test_finite_global_keys_are_invalidated_by_writes_to_their_operation_dependencies():
+    loop = 'for(let[n,r]of Object.entries({h:f,Fragment:g}))Object.defineProperty(globalThis,n,{value:r});'
+    with build(loop) as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert summary["writes"] == []
+        assert [entry["key"] for entry in summary["globalWrites"]] == ["h", "Fragment"]
+    for write in ('Object.entries=f;', 'Array.prototype[Symbol.iterator]=f;'):
+        with build(loop, write, 'const k=Symbol.for("x");globalThis[k]=1;') as bundle:
+            summary = bundle.builtin_summary(bundle.builtin_scan())
+            assert summary["globalWrites"] == []
+            assert summary["registryWrites"] == []
+            invalid = [entry for entry in summary["writes"] if entry.get("invalidatedKeyProof")]
+            assert {(entry["module"], entry["target"]) for entry in invalid if entry["module"] in (0, 2)} == {
+                (0, "globalThis.*"), (2, "globalThis.*")}
+            if write.startswith("Array"):
+                assert any(entry["module"] == 1 and entry["target"] == "Array.prototype.*" for entry in invalid)
+
+
+def test_builtin_write_dependencies_match_ancestors_and_unknown_members():
+    assert pb.builtin_write_affects("Object", "Object.entries")
+    assert pb.builtin_write_affects("Array.prototype.*", "Array.prototype.@@iterator")
+    assert pb.builtin_write_affects("globalThis.*", "Symbol.for")
+    assert not pb.builtin_write_affects("Error.stackTraceLimit", "Object.entries")
+    assert not pb.builtin_write_affects("Array.prototype.push", "Array.prototype.@@iterator")
 
 
 def test_npm_selected_node_is_used_without_reentering_a_launcher(monkeypatch):
