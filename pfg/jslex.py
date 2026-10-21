@@ -9,6 +9,20 @@ suite (util/test_jslex.py). A whole-function locator is signature-anchor + this
 brace-match; a naive { } counter picks the wrong close brace in minified code
 because braces hide in strings, template literals (${...}), regex literals, and
 comments, and a truncation can still pass `node --check`.
+
+Known failures, which util/test_jslex.py lists as expected failures:
+- _regex_ok decides whether a `/` starts a regex literal from the character before
+  it, which JavaScript's grammar does not determine. A regex after the condition of
+  an if statement or after a block's closing brace is read as division; a division
+  after postfix ++, a string, template or regex literal, or a variable named of is
+  read as a regex. Either error moves the matched close brace or raises.
+- A line comment ends only at a line feed; JavaScript also ends it at a carriage
+  return, U+2028 and U+2029.
+- _match_delim counts only the bracket pair it matches, so brackets of different
+  kinds that cross, as in [(]), give a span instead of an error.
+A template literal is skipped as one unit: its substitutions are lexed only to find
+the template's end, so the brackets inside them do not count for the pair being
+matched, and their code is not visible to callers as separate structure.
 """
 import re
 

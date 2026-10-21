@@ -8,10 +8,14 @@ lexically correct. Prove it here.
 
 """
 import os
+import shutil
+import subprocess
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # repo root, for `pfg`
-from pfg.jslex import find_function_span, enclosing_function_start  # noqa: E402
+from pfg.jslex import find_function_span, enclosing_function_start, _match_delim  # noqa: E402
 
 
 def _span(js, name):
@@ -218,3 +222,73 @@ def test_enclosing_fn_arrow_resolves_to_named_encloser():
 def test_enclosing_fn_async_named():
     js = "q;async function f(a){PIN}z"
     assert enclosing_function_start(js, js.index("PIN")) == js.index("async function f")
+
+
+# Known failures of the lexer, recorded as strict expected failures: a fix makes these tests fail,
+# so that this record is updated with the fix.
+#
+# _regex_ok decides whether a `/` starts a regex literal from the character before it, which
+# JavaScript's grammar does not determine: after `)` or `}` either reading is possible, and a value
+# can end in a character that also ends an operator or punctuation. A line comment ends only at a
+# line feed, where JavaScript also ends it at a carriage return, U+2028 and U+2029. Each case is
+# valid JavaScript (node --check accepts it), and the matcher reports a span cut short or raises.
+_KNOWN_FAILURES = [
+    ("a regex after the condition of an if statement is read as division",
+     'function f(a,s){if(a)/}/.test(s);return 1}'),
+    ("a regex containing a quote after the condition of an if statement is read as division",
+     'function f(x){if(x)/["]/.test(x);return 1}'),
+    ("a regex after the closing brace of a block statement is read as division",
+     'function f(s){{}/}/.test(s);return 1}'),
+    ("a division after postfix ++ is read as a regex",
+     'function f(b){let a=b++/2,c="/}";return a}'),
+    ("a division after a string literal is read as a regex",
+     'function f(){let a="8"/2,c="/}";return a}'),
+    ("a division after a template literal is read as a regex",
+     'function f(){let a=`8`/2,c="/}";return a}'),
+    ("a division after a regex literal is read as a regex",
+     'function f(){let a=/x//2,c="/}";return a}'),
+    ("a division by a variable named of is read as a regex",
+     'function f(of){let a=of/2,c="/}";return a}'),
+    ("a line comment ended by a carriage return runs on to the next line feed",
+     'function f(){// c\rreturn"}"}'),
+    ("a line comment ended by U+2028 runs on to the next line feed",
+     'function f(){// c return"}"}'),
+    ("a line comment ended by U+2029 runs on to the next line feed",
+     'function f(){// c return"}"}'),
+]
+_LABELS = [label for label, _ in _KNOWN_FAILURES]
+
+
+@pytest.mark.xfail(strict=True, reason="known lexing failure; see _KNOWN_FAILURES")
+@pytest.mark.parametrize("label,js", _KNOWN_FAILURES, ids=_LABELS)
+def test_known_lexing_failures(label, js):
+    assert _span(js, "f") == js
+
+
+@pytest.mark.parametrize("label,js", _KNOWN_FAILURES, ids=_LABELS)
+def test_known_failures_are_valid_javascript(label, js):
+    assert _node_check(js) == 0
+
+
+# _match_delim counts only the bracket pair it matches, so an input whose brackets of different
+# kinds cross gets a span where it should get an error. The inputs are not valid JavaScript.
+_CROSSED_BRACKETS = [("[(])", "[", "]"), ("[{x:1)]", "[", "]"), ("([)]", "(", ")")]
+
+
+@pytest.mark.xfail(strict=True, reason="known: crossed bracket kinds are not refused")
+@pytest.mark.parametrize("js,opening,closing", _CROSSED_BRACKETS)
+def test_crossed_bracket_kinds_are_refused(js, opening, closing):
+    with pytest.raises(ValueError):
+        _match_delim(js, 0, opening, closing)
+
+
+@pytest.mark.parametrize("js,opening,closing", _CROSSED_BRACKETS)
+def test_crossed_brackets_are_not_valid_javascript(js, opening, closing):
+    assert _node_check(js) != 0
+
+
+def _node_check(js):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not on PATH")
+    return subprocess.run([node, "--check", "--input-type=module"], input=js, capture_output=True, text=True).returncode
