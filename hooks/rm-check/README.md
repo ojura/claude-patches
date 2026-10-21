@@ -45,38 +45,83 @@ The first time the hook sees a version, `prepare.py`:
    the anchor on the tool's `checkPermissions` method must match exactly once
    (`pfg.discovery._one`), and the function's body, brace-matched by
    `pfg.jslex`, must test for `"dangerousRemoval"`;
-3. writes the bundle's modules to `~/.cache/rm-check/<version>/modules/` and
-   exports that function from its chunk.
+3. finds two more functions, each by a structural anchor that must match
+   exactly once, in a module that must also define the function through which
+   the permission check reads the value:
+   - the function with which Claude Code runs a session's or a subagent's work
+     in its working directory,
+     `function RUN(dir,fn){return STORE.run({cwd:...(dir)},fn)}`, where STORE
+     is an AsyncLocalStorage; the check reads `STORE.getStore()?.cwd`;
+   - the function that sets the session's original working directory,
+     `function SET(dir){...({originalCwd:dir})}`; the check reads it back
+     from the session state;
+4. writes the bundle's modules to `~/.cache/rm-check/<version>/modules-v2/` and
+   exports the three functions from their chunks.
 
 The hook imports and runs code from these files, so they are kept under your
 home directory, where other accounts cannot create or change them.
 
-After preparing a new version, `prepare.py` removes the cache directory of
-each version that is neither installed under `~/.local/share/claude/versions/`
-nor the executable of a running process, and the
-`/tmp/claude-<version>-rmcheck/` directories that earlier revisions of the hook
-wrote.
+After preparing a version, `prepare.py` removes the cache directory of each
+version that is neither installed under `~/.local/share/claude/versions/` nor
+the executable of a running process, the modules directories of earlier
+layouts (see below), and the `/tmp/claude-<version>-rmcheck/` directories that
+earlier revisions of the hook wrote. It keeps every directory that a running
+server was started with.
 
 Importing that chunk takes about 0.45 s, because it pulls in a large part of
 the bundle; one check then takes 2 to 50 ms. `rm-check-server.mjs` keeps a
 version's check loaded and answers over the Unix socket
-`$XDG_RUNTIME_DIR/rm-check/<version>.sock`, in a directory only this user can
+`$XDG_RUNTIME_DIR/rm-check/<version>-v2.sock`, in a directory only this user can
 enter. The hook asks that server; when none answers, it starts one and waits for
 it, and when no server can be started it imports the chunk itself
 (`rm-check-lib.mjs` holds the code both use). A server runs one check at a time,
-because the check reads the process's working directory, and exits after
-`RMCHECK_IDLE_SECONDS` (default 600) without a request, removing its socket. The
-hook denies when the result carries the `dangerousRemoval` safety check. A new
-version with the same structure needs no edit. If the vendor changes it,
-`prepare.py` fails naming the anchor.
+because each check sets the session's original working directory, which the
+bundle keeps in process-wide state. It exits after `RMCHECK_IDLE_SECONDS`
+(default 600) without a request, removing its socket. The hook denies when the
+result carries the `dangerousRemoval` safety check. A new version with the same
+structure needs no edit. If the vendor changes it, `prepare.py` fails naming
+the anchor.
 
-Any failure of the hook, including that one and unexpected exceptions, fails
-open: the hook shows a "⚠ The rm-check hook failed" warning with the cause in the
-session (`systemMessage`), rings the terminal bell (`terminalSequence`), posts a
-critical desktop notification with `notify-send`, and exits 0 without a
-decision. The command then goes on to Claude Code's own permission check, so a
-flagged rm gets the harness prompt as it would without the hook. The warning
-repeats on every command the hook checks until the hook is fixed.
+The check's verdict depends on two directories. The working directory is where
+it resolves relative targets and the directory that an `rm` must not remove,
+together with its parents. The session's original working directory is where
+the session started; with the `--add-dir` directories, it makes up the
+session's working directories, and the check follows a `cd` in the command only
+into those. For example, in a session that started in `/tmp` and whose working
+directory was `/tmp/cpa-deploy-7237e8a8`, Claude Code flagged
+`cd /home/juraj && rm -rf /tmp/cpa-deploy-7237e8a8` as "Dangerous rm operation
+on working directory or its ancestor": `/home/juraj` is outside `/tmp`, so the
+check did not follow the `cd`.
+
+When the bundle loads, it sets both directories to the directory the process
+started in, so in a server they would be the directory the server started in,
+and `process.chdir` changes neither. `rm-check-lib.mjs` therefore sets the
+session's original directory with the function from step 3 before each check,
+and runs the check inside the other function from step 3 with the request's
+working directory, the hook input's `cwd`. The hook takes the original
+directory from the working directory of the Claude Code process it finds among
+its parents: Claude Code sets the session's original directory from it when it
+starts, and where it moves the session to another directory (into or out of a
+worktree, on resume, for Remote Control), it mostly changes both in the same
+step. With `RMCHECK_CLAUDE_VERSION` there is no such process, and the hook
+takes `CLAUDE_PROJECT_DIR`, which Claude Code sets for hooks to the session's
+project directory, or else the request's `cwd`.
+
+A running server keeps the code it loaded. A change to `rm-check-lib.mjs` or
+`rm-check-server.mjs` reaches a version's checks once its server has exited. A
+change to the prepared files or to the manifest must raise `LAYOUT` in
+`rm-check-lib.mjs` (now 2), which names the modules directory (`modules-v2`)
+and the socket; new hooks then prepare a new directory and start a new server
+at once, and the old server exits when its idle time runs out.
+
+Any failure of the hook, including a `prepare.py` failure on a changed anchor
+and unexpected exceptions, fails open: the hook shows a "⚠ The rm-check hook
+failed" warning with the cause in the session (`systemMessage`), rings the
+terminal bell (`terminalSequence`), posts a critical desktop notification with
+`notify-send`, and exits 0 without a decision. The command then goes on to
+Claude Code's own permission check, so a flagged rm gets the harness prompt as
+it would without the hook. The warning repeats on every command the hook checks
+until the hook is fixed.
 
 The hook runs the check on commands that mention `rm` or `rmdir` and on shell
 `-c` scripts (`sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `hush`,
@@ -86,9 +131,14 @@ word that starts with `$`, or a brace expansion. Its message then says the
 script "runs rm" although the text never contains `rm`; an awk program with
 `&& \$5 !~ ...` inside `sh -c '...'` is enough.
 
-The anchors match 2.1.281 through 2.1.296. After re-anchoring for a new
-version, run `check_versions.py <new> <old>`: it runs 20 commands through the
-hook for each version and reports whether the verdicts agree.
+The permission function's anchors match 2.1.281 through 2.1.296 and 2.1.303
+through 2.1.305, the two directory functions' 2.1.303 through 2.1.305. After
+re-anchoring for a new version, run `check_versions.py <new> <old>`: it runs a
+fixed set of commands through the hook for each version, one of them removing
+the request's working directory, and reports whether the verdicts agree.
+`util/test_rm_check_hook.py` repeats that example with new directories on the
+newest installed version, and checks that the verdicts do not depend on the
+directory the hook and its server started in.
 
 ## Cost and limits
 
@@ -96,9 +146,15 @@ hook for each version and reports whether the verdicts agree.
   0.6 s when the hook starts one; other commands take about 0.03 s. A loaded
   server holds about 190 MB until it exits. On 2026-10-14 the check ran for 164
   of 6,972 Bash calls. Preparing a version takes 1 to 2 s, once.
-- Only the session's working directory is passed to the check. A directory
-  added with `--add-dir` or `/add-dir` is unknown to the hook, so removing it or
-  one of its parents still gets the harness prompt.
+- The check gets the request's working directory and the session's original
+  directory, and no additional working directories. A directory added with
+  `--add-dir` or `/add-dir` is not in the hook input, so removing it or one of
+  its parents passes the hook and still gets the harness prompt, and the check
+  in the hook does not follow a `cd` into it.
+- When Claude Code moves a session into or out of a worktree and changes only
+  one of the two, its process's working directory or the session's original
+  directory, the hook checks with the process's working directory and can judge
+  a command with a `cd` differently from Claude Code.
 - Commands the check flags wrongly are denied too, for example
   `d=x && index=$PWD/$d/index && rm -f "$index"`. The agent then rewrites the
   command instead of waiting for an answer.

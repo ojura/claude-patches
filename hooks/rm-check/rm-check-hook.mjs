@@ -19,15 +19,17 @@
 // notification, then exits 0 without a decision, so the command goes on to
 // Claude Code's own permission check and a flagged rm gets the harness prompt.
 //
-// The hook passes only the session's working directory. Directories added with
-// --add-dir or /add-dir are unknown to it, so removing one of those (or a parent
-// of one) passes here and still gets the harness prompt.
+// The check runs with the request's working directory (the hook input's cwd)
+// and the session's original working directory, set the way Claude Code sets
+// them (see rm-check-lib.mjs). Directories added with --add-dir or /add-dir are
+// not in the hook input, so removing one of those (or a parent of one) passes
+// here and still gets the harness prompt.
 import { readFileSync, readlinkSync, statSync, existsSync, mkdirSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadCheck } from "./rm-check-lib.mjs";
+import { LAYOUT, loadCheck } from "./rm-check-lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -57,8 +59,9 @@ function failOpen(msg) {
 process.on("uncaughtException", (e) => failOpen(`unexpected error: ${e?.stack ?? e}`));
 process.on("unhandledRejection", (e) => failOpen(`unexpected error: ${e?.stack ?? e}`));
 
-// The Claude Code executable and version: the nearest ancestor process whose
-// executable is .../claude/versions/<version> (native install) or is named claude.
+// The Claude Code process, executable and version: the nearest ancestor process
+// whose executable is .../claude/versions/<version> (native install) or is named
+// claude.
 // An update deletes the binary that running sessions started from, and the
 // kernel then reports their executable as "<path> (deleted)". The file stays
 // readable through /proc/<pid>/exe for as long as the process runs, so that link
@@ -72,11 +75,11 @@ function claudeExecutable() {
     const name = deleted ? link.slice(0, -" (deleted)".length) : link;
     const exe = deleted ? `/proc/${pid}/exe` : link;
     const v = /\/claude\/versions\/(\d+\.\d+\.\d+)$/.exec(name);
-    if (v) return { exe, version: v[1] };
+    if (v) return { pid, exe, version: v[1] };
     if (/\/claude$/.test(name)) {
       const out = spawnSync(exe, ["--version"], { encoding: "utf8", timeout: 20000 });
       const m = /(\d+\.\d+\.\d+)/.exec(out.stdout ?? "");
-      if (m) return { exe, version: m[1] };
+      if (m) return { pid, exe, version: m[1] };
     }
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     pid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
@@ -119,15 +122,33 @@ const found = forced
   ? { exe: join(process.env.HOME ?? "", ".local/share/claude/versions", forced), version: forced }
   : claudeExecutable();
 if (found === null) failOpen("could not find the Claude Code executable among the parent processes");
-// prepare.py computes the same directory (version_dir).
+// The prepared directory and the server's socket are named after LAYOUT (see
+// rm-check-lib.mjs); prepare.py writes into the directory named here.
 const cacheBase = process.env.XDG_CACHE_HOME || join(process.env.HOME ?? "", ".cache");
-const dir = join(cacheBase, "rm-check", found.version, "modules");
+const dir = join(cacheBase, "rm-check", found.version, `modules-v${LAYOUT}`);
 if (!existsSync(join(dir, "manifest.json"))) {
-  const prep = spawnSync("python3", ["-I", join(HERE, "prepare.py"), found.exe, found.version],
+  const prep = spawnSync("python3", ["-I", join(HERE, "prepare.py"), found.exe, found.version, dir],
     { encoding: "utf8", timeout: 300000 });
   if (prep.status !== 0) failOpen(`prepare.py failed for ${found.version}:\n${prep.stderr}`);
 }
-const request = { command, cwd: input.cwd, mode: input.permission_mode ?? "default" };
+// The session's original working directory. Claude Code sets it to its own
+// working directory when it starts, and where it moves the session to another
+// directory (into or out of a worktree, on resume, for Remote Control), it
+// mostly changes its working directory in the same step. So the hook reads the
+// working directory of the Claude Code process. With RMCHECK_CLAUDE_VERSION
+// there is no such process, and the hook takes CLAUDE_PROJECT_DIR, which Claude
+// Code sets for hooks to the session's project directory, or else the
+// request's cwd.
+function originalCwd(pid) {
+  if (pid !== undefined) {
+    try { return readlinkSync(`/proc/${pid}/cwd`).replace(/ \(deleted\)$/, ""); } catch { /* below */ }
+  }
+  return process.env.CLAUDE_PROJECT_DIR || input.cwd;
+}
+const request = {
+  command, cwd: input.cwd, originalCwd: originalCwd(found.pid),
+  mode: input.permission_mode ?? "default",
+};
 
 // The server's socket lives in a directory only this user can enter.
 const sockDir = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`, "rm-check");
@@ -137,7 +158,7 @@ if (sd.uid !== process.getuid() || (sd.mode & 0o077) !== 0)
   failOpen(`refusing to use the socket directory ${sockDir}: it belongs to uid ${sd.uid} ` +
     `with mode ${(sd.mode & 0o777).toString(8)}, and it must belong to this user ` +
     `(uid ${process.getuid()}) with mode 700`);
-const sockPath = join(sockDir, `${found.version}.sock`);
+const sockPath = join(sockDir, `${found.version}-v${LAYOUT}.sock`);
 
 let reply = await ask(sockPath, request, 5000);
 if (reply === null) {

@@ -4,11 +4,13 @@
 // Usage: rm-check-server.mjs <prepared dir> <socket path>
 //
 // The hook starts it when no server answers. A request is one JSON line
-// {command, cwd, mode}; the reply is one JSON line {message} (the check's text,
-// or null when the command is not flagged) or {error}. Requests run one at a
-// time because the check reads the process's working directory. After
-// RMCHECK_IDLE_SECONDS (default 600) without a request the server removes its
-// socket and exits, which frees the loaded bundle.
+// {command, cwd, originalCwd, mode}; the reply is one JSON line {message} (the
+// check's text, or null when the command is not flagged) or {error}. Requests
+// run one at a time, because each check sets the session's original working
+// directory, which the bundle keeps in process-wide state (see
+// rm-check-lib.mjs). After RMCHECK_IDLE_SECONDS (default 600) without a
+// request the server removes its socket and exits, which frees the loaded
+// bundle.
 import net from "node:net";
 import { unlinkSync } from "node:fs";
 import { loadCheck } from "./rm-check-lib.mjs";

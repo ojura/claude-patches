@@ -4,6 +4,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+// The format of the prepared directory, which prepare.py writes and loadCheck
+// reads. The hook puts this number in the prepared directory's name and in the
+// server's socket name, so when it changes, new hooks prepare a new directory
+// and start new servers, while a server running the previous code gets no more
+// requests and exits when its idle time runs out.
+export const LAYOUT = 2;
+
 // The result carries a dangerousRemoval safety check somewhere in its decision
 // reason (compound commands nest them under subcommandResults). Returns the
 // message of the innermost result that carries it.
@@ -25,17 +32,35 @@ export function dangerousRemovalMessage(result) {
 }
 
 // Imports the check from a prepared directory and returns a function that runs
-// it for one command in the given working directory and permission mode. It
-// returns the check's text when the command is flagged, and null otherwise.
-// The check reads the process's working directory, so calls must not overlap.
+// it for one command and permission mode, in the given working directory of a
+// session that started in originalCwd. It returns the check's text when the
+// command is flagged, and null otherwise.
+//
+// The check reads two directories:
+//   - the working directory: from the AsyncLocalStorage store that Claude Code
+//     sets with runInCwd(dir, fn) around a session's or a subagent's work, and
+//     without the store, from the session state;
+//   - the session's original working directory (originalCwd), which counts as
+//     a working directory of the session together with the --add-dir
+//     directories: from the session state, where Claude Code changes it with
+//     setOriginalCwd when it moves a session to another directory.
+// When the bundle loads, it sets both in the session state to the directory the
+// process started in, and process.chdir changes neither. So each check first
+// sets originalCwd, then runs inside runInCwd with the request's working
+// directory. originalCwd is process-wide, so calls must not overlap.
 export async function loadCheck(dir) {
   const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-  const mod = await import(join(dir, manifest.chunk));
-  const check = mod[manifest.export];
-  if (typeof check !== "function") throw new Error(`${manifest.chunk} does not export ${manifest.export}`);
+  const load = async ({ chunk, export: name }) => {
+    const fn = (await import(join(dir, chunk)))[name];
+    if (typeof fn !== "function") throw new Error(`${chunk} does not export ${name}`);
+    return fn;
+  };
+  const check = await load(manifest.check);
+  const runInCwd = await load(manifest.runInCwd);
+  const setOriginalCwd = await load(manifest.setOriginalCwd);
   const home = process.env.HOME ?? "/";
-  return async ({ command, cwd, mode }) => {
-    try { process.chdir(cwd || home); } catch { process.chdir(home); }
+  return async ({ command, cwd, originalCwd, mode }) => {
+    setOriginalCwd(originalCwd || cwd || home);
     const toolPermissionContext = {
       mode: mode ?? "default",
       additionalWorkingDirectories: new Map(),
@@ -43,10 +68,10 @@ export async function loadCheck(dir) {
       isBypassPermissionsModeAvailable: true,
       mcpPermissionModeOverrides: {},
     };
-    const result = await check({ command }, {
+    const result = await runInCwd(cwd || home, () => check({ command }, {
       getAppState: () => ({ toolPermissionContext }),
       abortController: new AbortController(),
-    });
+    }));
     return dangerousRemovalMessage(result) ?? null;
   };
 }
