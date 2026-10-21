@@ -146,7 +146,12 @@ class _Helper:
     its stream's lock across a fork, and the child would hang when it closed that stream."""
 
     def __init__(self):
-        node = shutil.which("node")
+        # Inside an npm script, use the Node executable npm runs on. This process then has the node
+        # snap's AppArmor label, and starting /snap/bin/node from it runs snap-confine, whose profile
+        # denies inheriting the unlinked stderr file (operation="file_inherit" in the kernel log); the
+        # helper's stderr becomes a read-only null file, where every write fails with EBADF. Outside
+        # npm, use the node that PATH selects.
+        node = os.environ.get("npm_node_execpath") or shutil.which("node")
         if node is None:
             raise BackendError("pfg's JavaScript helper needs node, and there is no node on PATH")
         self._owned = True

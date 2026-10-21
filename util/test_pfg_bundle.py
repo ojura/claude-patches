@@ -287,8 +287,8 @@ def test_a_helper_that_cannot_start_is_a_backend_error(monkeypatch):
 def test_a_helper_that_closes_its_output_and_keeps_running_is_ended(monkeypatch, tmp_path):
     # The review's probe: _read waited forever for a helper that closed stdout but did not exit.
     fake = tmp_path / "closed-stdout.mjs"
-    # stderr is a file here, which node writes synchronously, so the line is there before stdout closes.
-    fake.write_text("import fs from 'node:fs';\nprocess.stderr.write('STDOUT_CLOSED\\n');\nfs.closeSync(1);\n"
+    # The explicit synchronous write completes before stdout closes.
+    fake.write_text("import fs from 'node:fs';\nfs.writeSync(2,'STDOUT_CLOSED\\n');\nfs.closeSync(1);\n"
                     "setInterval(()=>{},1000);\n")
     monkeypatch.setattr(pb, "HELPER", str(fake))
     helpers, outcome = [], {}
@@ -403,3 +403,23 @@ def test_modules_of_a_binary_in_every_encoding_bun_stores(tmp_path):
             text = 'var a=["h\xe9 ☃ \U0001f600"];export{a};'
             assert bundle.modules[1].length == len(text) + 1
             assert bundle.text(1, 0, bundle.modules[1].length) == text
+
+
+def test_npm_selected_node_is_used_without_reentering_a_launcher(monkeypatch):
+    chosen = os.environ.get("npm_node_execpath")
+    if not chosen:
+        chosen = pb.subprocess.check_output([pb.shutil.which("node"), "-p", "process.execPath"], text=True).strip()
+    monkeypatch.setenv("npm_node_execpath", chosen)
+
+    def unexpected_lookup(name):
+        raise AssertionError("npm already selected the Node executable")
+
+    monkeypatch.setattr(pb.shutil, "which", unexpected_lookup)
+    with build("const x=1;") as bundle:
+        assert bundle._helper._process.args[0] == chosen
+
+
+def test_an_invalid_npm_node_selection_does_not_fall_back_to_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("npm_node_execpath", str(tmp_path / "missing-node"))
+    with pytest.raises(pb.BackendError, match="could not start"):
+        build("const x=1;")
