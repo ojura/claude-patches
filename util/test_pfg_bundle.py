@@ -428,6 +428,14 @@ def test_modules_of_a_binary_in_every_encoding_bun_stores(tmp_path):
             assert bundle.text(1, 0, bundle.modules[1].length) == text
 
 
+def test_a_binary_bun_handler_cannot_read_is_a_backend_error():
+    # bun_handler raises BunFormatError for the first (too small for ELF64) and NotImplementedError for the
+    # second (not ELF64).
+    for data in (b"do not execute this", b"\x7fELF" + b"\0" * 60):
+        with pytest.raises(pb.BackendError, match="bun_handler cannot read the binary"):
+            pb.Bundle.from_binary(data)
+
+
 # The built-in scan across modules
 
 

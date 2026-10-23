@@ -13,8 +13,9 @@ Module.to_codepoints converts one where Python text is involved. An offset that 
 halves of a surrogate pair is refused.
 
 Failures:
-  BackendError  the helper or its protocol failed: node missing, a crash, a malformed or mismatched
-                reply, or a request the helper refused as malformed. Extraction then fails.
+  BackendError  bun_handler cannot read the binary, or the helper or its protocol failed: node missing,
+                a crash, a malformed or mismatched reply, or a request the helper refused as malformed.
+                Extraction then fails.
   AnchorError   a structural predicate matched other than exactly one entity.
   Unresolved    a supported question whose answer the source does not establish, with the module, the
                 position and the reason.
@@ -53,7 +54,8 @@ _STDERR_TAIL = 8192
 
 
 class BackendError(Exception):
-    """The helper or the protocol failed; the message says how, with the end of the helper's stderr."""
+    """bun_handler cannot read the binary, or the helper or the protocol failed; the message says how, for
+    the helper with the end of its stderr."""
 
 
 class AnchorError(Exception):
@@ -440,15 +442,20 @@ class Bundle:
     def from_binary(cls, source, needles=()):
         """The bundle of a Bun executable, read with bun_handler from bytes or from an open binary file.
         The file is read from its start, through the descriptor it already has, so the bytes extracted are
-        those of the file the caller opened and identified."""
+        those of the file the caller opened and identified. Raises BackendError for a binary bun_handler
+        cannot read: one that is not a well-formed Bun image (BunFormatError), or a format it does not
+        support (NotImplementedError)."""
         if isinstance(source, (bytes, bytearray, memoryview)):
             data = bytes(source)
         else:
             source.seek(0)
             data = source.read()
-        image = bun_handler.BunImage(data)
-        sources = [(record["index"], record["name_str"], image.read_source(record).decode("utf-8"))
-                   for record in image.source_modules()]
+        try:
+            image = bun_handler.BunImage(data)
+            sources = [(record["index"], record["name_str"], image.read_source(record).decode("utf-8"))
+                       for record in image.source_modules()]
+        except (bun_handler.BunFormatError, NotImplementedError) as exc:
+            raise BackendError(f"bun_handler cannot read the binary: {exc}") from None
         del image, data
         return cls(sources, needles)
 
