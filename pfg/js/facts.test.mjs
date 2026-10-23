@@ -762,19 +762,109 @@ test('a built-in called as a template tag gets its arguments: String.raw, as Cla
   }
 });
 
-test('cycles of stored references terminate and are recorded as unclassified flows', { timeout: 10000 }, async () => {
-  const cases = [
-    'var m=Symbol.iterator;function b(t){return t=m&&t[m]||t["@@iterator"]}',
-    'var a=Object,b;b=a.prototype;a=b.prototype;a.x=1;',
-  ];
-  for (const text of cases) {
-    await withHelper([[0, '/a.js', text]], async (h) => {
-      const [scan] = await h.facts(0, [{ q: 'premise' }]);
-      assert.ok(scan.unfollowed.some((entry) => entry.reason.includes('cycle of stored references')), text);
-      assert.ok(scan.references.every((entry) => ['followed', 'unclassified'].includes(entry.status)), text);
-      assert.ok(scan.references.some((entry) => entry.status === 'unclassified'), text);
-    });
+test('the facts pass repeats until no variable gains a value, so a later value reaches earlier uses', async () => {
+  // q's value comes from p's, which the first pass has not found yet when it classifies q's uses.
+  const { facts } = await scans('var p=Set.prototype;var q=Object.getPrototypeOf(p);Object.defineProperty(q,"has",{value:f});' +
+    'var r=Object.getPrototypeOf(q);var s=Object.getPrototypeOf(Map.prototype);s.get=g;');
+  assert.deepEqual(facts.writes, ['Object.prototype.has Object.defineProperty', 'Object.prototype.get =']);
+  assert.deepEqual(facts.prototypeWrites, []);
+  assert.deepEqual(facts.unfollowed, []);
+});
+
+test('a variable holds every value assigned to it; a self-derived value stops at the bounds', { timeout: 20000 }, async () => {
+  await withHelper([[0, '/a.js', 'var t=Set;t=t.prototype;t.has=f;']], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    const writes = scan.writes.map((entry) => entry.target);
+    // Without the order of statements, t may be Set, Set.prototype and each value derived from them again.
+    assert.ok(writes.includes('Set.prototype.has') && writes.includes('Set.has'));
+    assert.ok(writes.every((target) => /^Set(\.prototype)*\.has$/.test(target)));
+    assert.ok(scan.references.filter((entry) => entry.status === 'followed').length >= 2);
+    const bound = scan.unfollowed.filter((entry) => entry.limit === 'bounds');
+    assert.ok(bound.length > 0 && bound.every((entry) => entry.reason.includes('members deep')));
+  });
+  await withHelper([[0, '/a.js', 'var a=Object,b;b=a.prototype;a=b.prototype;a.x=1;']], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    assert.ok(scan.writes.some((entry) => entry.target === 'Object.x'));
+    assert.ok(scan.references.every((entry) => ['followed', 'unclassified'].includes(entry.status)));
+    assert.ok(scan.unfollowed.some((entry) => entry.limit === 'bounds'));
+  });
+});
+
+test('a variable with an unidentified source keeps its known values and is unclassified', async () => {
+  const text = 'var t=Set;t=t.prototype;t.has=f;var u=flag?Map:other();u.prototype.get=g;' +
+    'function h(w){w=WeakMap;w.prototype.set=g}var v=[];v=Promise;v.x=1;';
+  await withHelper([[0, '/a.js', text]], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    const targets = scan.writes.map((entry) => entry.target);
+    for (const target of ['Set.prototype.has', 'Map.prototype.get', 'WeakMap.prototype.set', 'Promise.x']) assert.ok(targets.includes(target), target);
+    // t's sources are built-in values; other() is unidentified, w is a parameter, and [] is an instance.
+    const outside = new Set(scan.references.filter((entry) => entry.reason?.includes('outside the built-in value model'))
+      .map((entry) => entry.name));
+    assert.deepEqual([...outside].sort(), ['u', 'v', 'w']);
+  });
+});
+
+test('&& passes on its left operand only when that operand can be false', async () => {
+  const { facts } = await scans('var m=Symbol.iterator,t=o;t=m&&t[m]||t["@@iterator"];var x=Set&&Set.prototype;x.has=f;' +
+    'var y=Array.prototype.length&&z;');
+  assert.deepEqual(facts.references, ['m=Symbol.iterator', 'x=Set.prototype', 'y=Array.prototype.length']);
+  assert.deepEqual(facts.writes, ['Set.prototype.has =']);
+});
+
+test('instances: literals, new X() and the iterators of built-in methods name their prototypes', async () => {
+  const { index, facts } = await scans('Object.getPrototypeOf(new Set).has=f;new Map().__proto__.get=f;' +
+    '(new WeakMap).constructor.prototype.set=f;Object.defineProperty(Object.getPrototypeOf(new Set),"add",{value:f});' +
+    'Object.getPrototypeOf([].values()).next=f;[][Symbol.iterator]().__proto__.next=f;' +
+    'Object.getPrototypeOf(new Set().entries()).next=f;Object.getPrototypeOf(new Map()[Symbol.iterator]()).next=f;' +
+    'Object.getPrototypeOf(""[Symbol.iterator]()).next=f;Object.getPrototypeOf(Object.getPrototypeOf([].keys())).x=f;' +
+    '"s".constructor.prototype.trim=f;[].push(1);new Set().add=f;({}).x=1;Object.defineProperty([],"length",{value:0});');
+  const expected = ['Set.prototype.has =', 'Map.prototype.get =', 'WeakMap.prototype.set =', 'Set.prototype.add Object.defineProperty',
+    '%ArrayIteratorPrototype%.next =', '%ArrayIteratorPrototype%.next =', '%SetIteratorPrototype%.next =',
+    '%MapIteratorPrototype%.next =', '%StringIteratorPrototype%.next =', 'Iterator.prototype.x =', 'String.prototype.trim ='];
+  assert.deepEqual(index.writes, expected);
+  assert.deepEqual(facts.writes, expected);
+  assert.deepEqual(facts.prototypeWrites, []);
+});
+
+test('a write through an instance the scan does not see created stays a prototype write under the instances limit', async () => {
+  await withHelper([[0, '/a.js', 'function f(e){let r=Object.getPrototypeOf(e);Object.defineProperty(r,"toString",{get(){}})}' +
+    'var s=new Set();Object.getPrototypeOf(s).has=g;']], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    assert.deepEqual(scan.writes, []);
+    assert.deepEqual(scan.prototypeWrites.map((entry) => [entry.target, entry.limit]),
+      [['(object).__proto__.toString', 'instances'], ['(object).__proto__.has', 'instances']]);
+  });
+});
+
+test('definers called through chains, bound or handed to other functions are listed under the definer-calls limit', async () => {
+  const text = 'Reflect.apply(Object.defineProperty,null,[Set.prototype,"has",{value:f}]);' +
+    'Function.prototype.call.call(Object.defineProperty,null,Map.prototype,"get",{value:f});' +
+    'var d=Object.defineProperty.bind(Object);d(globalThis,Symbol.for("k"),{value:1});' +
+    '[[WeakMap.prototype,"set",{value:f}]].forEach(Function.prototype.apply.bind(Reflect.defineProperty,null));';
+  await withHelper([[0, '/a.js', text]], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    assert.deepEqual(scan.writes, []);
+    assert.deepEqual(scan.unfollowed.filter((entry) => entry.limit === 'definer-calls').map((entry) => entry.value),
+      ['Object.defineProperty', 'Object.defineProperty', 'Object.defineProperty', 'Reflect.defineProperty']);
+  });
+});
+
+test('with: a built-in name inside it is followed as the built-in and noted, and an object of one is listed', async () => {
+  for (const text of ['with(o){Set.prototype.has=f}', 'with(o){Set.prototype.has=f}var z=Map;']) {
+    const { index, facts } = await scans(text);
+    for (const result of [index, facts]) {
+      assert.deepEqual(result.writes, ['Set.prototype.has ='], text);
+      assert.ok(result.unfollowed.some((entry) => entry.includes('with statement')), text);
+    }
   }
+  const { index, facts } = await scans('with(o){globalThis[Symbol.for("x")]=1}var z=Map;');
+  assert.equal(index.registryWrites.length + index.unknownKeys.length, 1);
+  assert.equal(facts.registryWrites.length + facts.unknownKeys.length, 1);
+  await withHelper([[0, '/a.js', 'with(Set.prototype){has=f}']], async (h) => {
+    const { modules } = await h.ok('index', { needles: [] });
+    assert.deepEqual(modules[0].premise.writes, []);
+    assert.deepEqual(modules[0].premise.unfollowed.map((entry) => [entry.value, entry.limit]), [['Set.prototype', 'with']]);
+  });
 });
 
 test('a key from Object.entries of a static object has its finite names and operation dependencies', async () => {

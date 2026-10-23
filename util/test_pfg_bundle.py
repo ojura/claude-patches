@@ -487,6 +487,116 @@ def test_finite_global_keys_are_invalidated_by_writes_to_their_operation_depende
                 assert any(entry["module"] == 1 and entry["target"] == "Array.prototype.*" for entry in invalid)
 
 
+def test_a_value_found_in_a_later_pass_reaches_uses_classified_before_it_across_modules():
+    with build('export var p=Set.prototype;',
+               'import{p}from"/m0.js";var q=Object.getPrototypeOf(p);Object.defineProperty(q,"has",{value:f});') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert [(w["module"], w["target"]) for w in summary["writes"]] == [(1, "Object.prototype.has")]
+        assert summary["prototypeWrites"] == []
+        assert {(r["module"], r["name"], r["value"], r["status"]) for r in summary["references"]} == {
+            (0, "p", "Set.prototype", "followed"), (1, "p", "Set.prototype", "followed"), (1, "q", "Object.prototype", "followed")}
+
+
+def test_an_export_seeds_its_importers_with_every_value_and_with_its_other_sources():
+    with build('export var t=Set;t=Map;export var u=flag?WeakMap:other();',
+               'import{t,u}from"/m0.js";t.prototype.x=1;u.prototype.y=2;',
+               'export{t as v}from"/m0.js";',
+               'import{v}from"/m2.js";v.z=3;') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert {(w["module"], w["target"]) for w in summary["writes"]} == {
+            (1, "Set.prototype.x"), (1, "Map.prototype.x"), (1, "WeakMap.prototype.y"), (3, "Set.z"), (3, "Map.z")}
+        statuses = {(r["module"], r["name"], r["status"]) for r in summary["references"]}
+        # u may also hold what other() returns, in the exporting module and in the importing one.
+        assert {(0, "u", "unclassified"), (1, "u", "unclassified"), (1, "t", "followed"), (3, "v", "followed")} <= statuses
+
+
+def test_a_module_with_parse_diagnostics_gives_no_hits_links_or_facts():
+    broken = 'export const x="flag";Set.prototype.has=f;var p=Set.prototype;p.add=g;const ='
+    with build(broken, 'import{x}from"/m0.js";x;', 'export{x}from"/m0.js";', 'const y="flag";',
+               needles=[pb.Needle("flag", "string", "flag")]) as bundle:
+        assert bundle.diagnostics(0) and not bundle.diagnostics(1)
+        assert [index for index, _ in bundle.hits("flag")] == [3]
+        for call in (lambda: bundle.export(0, "x"), lambda: bundle.export(2, "x"), lambda: bundle.loads(0),
+                     lambda: bundle.imports(0), lambda: bundle.scope_binding(0, "x"), lambda: bundle.export_names(0)):
+            with pytest.raises(pb.Unresolved, match="TypeScript cannot parse this module"):
+                call()
+        target, imported, _ = bundle.imports(1)["x"]
+        with pytest.raises(pb.Unresolved) as refusal:
+            bundle.export(target, imported)
+        assert refusal.value.module == 0
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        # The index pass's write in the broken module stays; it gets no facts pass, so p is not followed.
+        assert [(w["module"], w["target"]) for w in summary["writes"]] == [(0, "Set.prototype.has")]
+        assert [(u["module"], u["count"]) for u in summary["unparsed"]] == [(0, 1)]
+        assert all(r["module"] != 0 or "status" not in r for r in summary["references"])
+
+
+# The keys a proof depends on, from its own write records, and programs that write each one in three
+# ways: an assignment, a definer, and an assignment through a variable that holds the object.
+PROOFS = ('for(let[n,r]of Object.entries({h:f}))globalThis[n]=r;const k=Symbol.for("x");globalThis[k]=1;'
+          'globalThis[Symbol.iterator]=1;')
+INTRINSIC_OBJECTS = {
+    "%ArrayIteratorPrototype%": ["Object.getPrototypeOf([].values())", "[][Symbol.iterator]().__proto__",
+                                 "Object.getPrototypeOf(Array.prototype.entries.call(a))"],
+    "%SetIteratorPrototype%": ["Object.getPrototypeOf(new Set().values())"],
+    "%MapIteratorPrototype%": ["Object.getPrototypeOf(new Map()[Symbol.iterator]())"],
+    "%StringIteratorPrototype%": ['Object.getPrototypeOf(""[Symbol.iterator]())'],
+}
+
+
+def writing_programs(key):
+    """Programs whose scan should record a write to exactly the slot key names."""
+    root, *path = key.split(".")
+    member = lambda name: f"[Symbol.{name[2:]}]" if name.startswith("@@") else f".{name}"  # noqa: E731
+    literal = lambda name: f"Symbol.{name[2:]}" if name.startswith("@@") else f'"{name}"'  # noqa: E731
+    if not path:
+        return [f"{root}=f;", f"globalThis.{root}=f;", f'Object.defineProperty(globalThis,"{root}",{{value:f}});']
+    *parents, last = path
+    programs = []
+    for base in INTRINSIC_OBJECTS.get(root, [root]):
+        target = base + "".join(member(name) for name in parents)
+        programs += [f"({target}){member(last)}=f;", f"Object.defineProperty({target},{literal(last)},{{value:f}});",
+                     f"var o={target};o{member(last)}=f;"]
+    return programs
+
+
+def test_every_dependency_key_of_a_proof_is_a_write_the_scan_can_produce():
+    with build(PROOFS) as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+    keys = sorted({key for category in ("writes", "globalWrites", "registryWrites") for entry in summary[category]
+                   for key in entry.get("keyRequires", [])})
+    assert keys == ["%ArrayIteratorPrototype%.next", "Array.prototype.@@iterator", "Object.entries", "Symbol.for", "Symbol.iterator"]
+    for key in keys + ["%SetIteratorPrototype%.next", "%MapIteratorPrototype%.next", "%StringIteratorPrototype%.next", "Set"]:
+        for program in writing_programs(key):
+            with build(program) as bundle:
+                summary = bundle.builtin_summary(bundle.builtin_scan())
+            assert key in {entry["target"] for entry in summary["writes"]}, program
+    # And each such write invalidates the proofs that depend on its key.
+    for key in keys:
+        with build(PROOFS, writing_programs(key)[0]) as bundle:
+            summary = bundle.builtin_summary(bundle.builtin_scan())
+        invalidated = {k for entry in summary["writes"] if entry["module"] == 0 for k in entry.get("invalidatedKeyProof", [])}
+        assert key in invalidated, key
+
+
+def test_the_stated_limits_are_listed_in_the_summary_and_not_as_writes():
+    with build('function z(e){let r=Object.getPrototypeOf(e);Object.defineProperty(r,"toString",{get(){}})}',
+               'Reflect.apply(Object.defineProperty,null,[Set.prototype,"has",{value:f}]);'
+               'var d=Object.defineProperty.bind(Object);d(Map.prototype,"get",{value:f});',
+               'with(WeakMap.prototype){set=f}',
+               'var a=Object,b;b=a.prototype;a=b.prototype;') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert summary["writes"] == []
+        labelled = {(category, entry["module"], entry["limit"]) for category in ("prototypeWrites", "unfollowed")
+                    for entry in summary[category] if entry.get("limit")}
+        assert labelled == {("prototypeWrites", 0, "instances"), ("unfollowed", 1, "definer-calls"),
+                            ("unfollowed", 2, "with"), ("unfollowed", 3, "bounds")}
+        assert set(summary["limits"]) == set(pb.BUILTIN_SCAN_LIMITS)
+        assert summary["limits"]["instances"]["entries"] == {"prototypeWrites": 1}
+        assert summary["limits"]["definer-calls"]["entries"] == {"unfollowed": 2}
+        assert summary["limits"]["instances"]["form"] == pb.BUILTIN_SCAN_LIMITS["instances"]
+
+
 def test_builtin_write_dependencies_match_ancestors_and_unknown_members():
     assert pb.builtin_write_affects("Object", "Object.entries")
     assert pb.builtin_write_affects("Array.prototype.*", "Array.prototype.@@iterator")

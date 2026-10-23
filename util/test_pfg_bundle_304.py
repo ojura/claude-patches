@@ -35,6 +35,11 @@ def native():
             yield bundle
 
 
+@pytest.fixture(scope="module")
+def summary(native):
+    return native.builtin_summary(native.builtin_scan())
+
+
 def test_every_module_is_parsed_and_the_entrypoint_is_in_its_program(native):
     assert len(native.modules) == 2461
     assert all(record["diagnostics"] == [] for record in native.records.values())
@@ -82,15 +87,29 @@ def test_the_native_sources_use_the_same_codepoint_and_utf16_offsets(native):
         assert module.to_codepoints(module.length) == module.codepoints
 
 
-def test_visible_builtin_writes_and_computed_global_keys_are_classified(native):
-    summary = native.builtin_summary(native.builtin_scan())
+def test_visible_builtin_writes_and_computed_global_keys_are_classified(summary):
     assert {entry["target"] for entry in summary["writes"]} == {"Error.stackTraceLimit", "Error.prepareStackTrace"}
     assert {entry["key"] for entry in summary["globalWrites"] if entry["module"] == 442} == {"h", "Fragment"}
     assert {(entry["module"], entry["target"]) for entry in summary["registryWrites"]} == {
         (161, "globalThis.@registry"), (268, "globalThis.@registry"), (1520, "globalThis.@registry")}
     assert all(entry["status"] in ("followed", "unclassified") for entry in summary["references"])
-    assert any(entry["module"] == 433 and "cycle of stored references" in entry["reason"] for entry in summary["unfollowed"])
     assert any(entry["module"] == 2254 and entry["kind"] == "direct eval" for entry in summary["dynamic"])
+    assert summary["unparsed"] == []
+
+
+def test_the_stated_limits_name_their_2_1_304_instances(native, summary):
+    # zod's six prototype writes, through Object.getPrototypeOf of a parameter or of its _zod member.
+    assert {(entry["module"], entry["s"], entry["limit"]) for entry in summary["prototypeWrites"]} == {
+        (40, 9369, "instances"), (41, 1322, "instances"), (41, 79473, "instances"),
+        (1520, 104580, "instances"), (1520, 109498, "instances"), (1520, 594333, "instances")}
+    guard = "new WeakSet([Object.prototype,Error.prototype])"
+    for module, offset in ((41, 1087), (41, 78821), (1520, 109263), (1520, 593604)):
+        assert native.text(module, offset, offset + len(guard)) == guard
+    # signal-exit binds Object.defineProperty and defines globalThis[Symbol.for("signal-exit emitter")] with it.
+    bound = [entry for entry in summary["unfollowed"] if entry.get("limit") == "definer-calls" and entry["module"] == 86]
+    assert [(entry["s"], entry["value"]) for entry in bound] == [(17362, "Object.defineProperty")]
+    assert native.text(86, 17362, 17396) == "Object.defineProperty.bind(Object)"
+    assert summary["limits"]["with"]["entries"] == {} and summary["limits"]["bounds"]["entries"] == {}
 
 
 def test_the_native_helper_is_the_loaded_protocol_and_typescript_version(native):

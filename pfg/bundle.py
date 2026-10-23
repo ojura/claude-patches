@@ -78,6 +78,46 @@ class NotExported(Unresolved):
     """A module does not export the name asked for."""
 
 
+# The catalog rests on an assumption: the program does not change the built-in operations its tables
+# depend on in a way the built-in scan does not identify. Juraj, to pfg-advisor: "we don't have to
+# overengineer if you say it's ok". The option he answered, labelled "State the assumption", was the
+# coordinator's text. pfg-advisor judged the assumption acceptable on three conditions: a write the scan
+# identifies refuses the tables that depend on what it writes; the statement of the assumption lists, for
+# each dependency of a table, the places where values escape the scan; and the finite-key proof and the
+# Symbol.for exception rest on the same assumption. A place where a value escapes refuses nothing,
+# because closing that gap would need an alias analysis of the whole program.
+#
+# The forms of writes the scan does not identify. builtin_summary labels each entry that comes from one of
+# them with its key (the entry's limit) and states them under "limits".
+BUILTIN_SCAN_LIMITS = {
+    "instances": (
+        "A write through an object whose prototype the scan does not name: an object received as a parameter, "
+        "returned by a function, read from a member or held in a variable. The scan names the prototype of a "
+        "literal, of `new X()` with X a built-in constructor and of the iterator a built-in iterator method "
+        "returns only in the expression that creates the object; other writes into prototypes go to "
+        "prototypeWrites. On 2.1.304, zod's six prototype writes are of this form: they define members on "
+        "Object.getPrototypeOf of a parameter or of a parameter's _zod member. Four of them, the toString and "
+        "isEmpty definitions in modules 41 and 1520, skip the write when that prototype is in a WeakSet that "
+        "starts with Object.prototype and Error.prototype, created in module 41 at offsets 1087 and 78821 and "
+        "in module 1520 at 109263 and 593604; next to isEmpty, zod defines format, flatten, addIssue and "
+        "addIssues on the same prototype through a helper that receives it as a parameter, which the scan "
+        "counts as unidentified uses. The other two (module 40 at 9369, module 1520 at 104580) skip the write "
+        "when the prototype already has the member, unless zod is initializing the same object again."),
+    "definer-calls": (
+        "A definer called other than directly or through one call or apply: through a chain of call or apply, "
+        "Reflect.apply or bind, or by a higher-order built-in it is passed to. The scan lists the definer where "
+        "it goes unfollowed. On 2.1.304: signal-exit binds Object.defineProperty in module 86 at offset 17362 "
+        "(`Object.defineProperty.bind(Object)`) and defines a member of globalThis under a Symbol.for key with it."),
+    "with": (
+        "A built-in's name inside a with statement, which may name a member of the with's object instead. Both "
+        "passes follow it as the built-in and list the place. An ES module cannot contain a with statement, "
+        "and every module of 2.1.304 is an ES module."),
+    "bounds": (
+        "A variable that derives a value from its own value, as `t = t.prototype` does, or that holds many "
+        "built-in values: the scan lists and does not follow a value deeper than its bound on members "
+        "(facts.mjs, MAX_VALUE_PATH) or past its bound on values per variable (MAX_VALUES_PER_VARIABLE)."),
+}
+
 Needle = collections.namedtuple("Needle", "key type value")
 Needle.__doc__ = """A literal fact a predicate looks for, which the index pass finds in every module: a
 string literal's cooked value (type "string"), a template head's (type "template-head"), a property
@@ -405,22 +445,40 @@ class Bundle:
         except KeyError:
             raise BackendError(f"module {index} is absent from this bundle") from None
 
+    def diagnostics(self, index):
+        """The parse diagnostics TypeScript reported for a module, as [{s, length, message}]."""
+        self.module(index)
+        return self.records[index]["diagnostics"]
+
+    def check_parsed(self, index):
+        """Raise Unresolved for a module with parse diagnostics, at its first one. Such a module gives no
+        needle hits, links or facts: its tree after a syntax error is TypeScript's recovery, not the
+        program, so a hit in it could decide an exactly-one count and a link could lead into it."""
+        diagnostics = self.diagnostics(index)
+        if diagnostics:
+            more = f" (and {len(diagnostics) - 1} more)" if len(diagnostics) > 1 else ""
+            raise Unresolved(index, diagnostics[0]["s"], f"TypeScript cannot parse this module: {diagnostics[0]['message']}{more}")
+
     def hits(self, key):
         """The index pass's hits of a needle: (module index, hit) pairs, hit being the helper's record of
-        the node (handle h, kind k, start s, end e, chain)."""
+        the node (handle h, kind k, start s, end e, chain). Modules with parse diagnostics give none."""
         if key not in self.needles:
             raise BackendError(f"needle {key!r} was not registered for the index pass")
-        return [(index, hit) for index in sorted(self.records) for hit in self.records[index]["hits"].get(key, [])]
+        return [(index, hit) for index in sorted(self.records) if not self.records[index]["diagnostics"]
+                for hit in self.records[index]["hits"].get(key, [])]
 
     def loads(self, index):
-        """A module's imports, exports and other loads, in source order."""
+        """A module's imports, exports and other loads, in source order. Raises Unresolved for a module
+        with parse diagnostics."""
+        self.check_parsed(index)
         return self.records[index]["loads"]
 
     # -- facts -----------------------------------------------------------------------------------------
 
     def facts(self, index, queries):
-        """Answer queries about one module in one batch (facts.mjs, factsBatch)."""
-        self.module(index)
+        """Answer queries about one module in one batch (facts.mjs, factsBatch). Raises Unresolved for a
+        module with parse diagnostics."""
+        self.check_parsed(index)
         return self._helper.request("facts", module=index, queries=list(queries))
 
     def syntax(self, index, handle, depth=64):
@@ -515,7 +573,9 @@ class Bundle:
         Follows imports that are exported again, re-exports from another module and export *; an explicit
         export wins over export *, export * never supplies default, and two export * paths that reach
         different bindings make the name ambiguous. Raises NotExported for a name the module does not
-        export, and Unresolved for a cycle, an ambiguity or a module outside the bundle."""
+        export, and Unresolved for a cycle, an ambiguity, a module outside the bundle or a module with parse
+        diagnostics."""
+        self.check_parsed(index)
         if (index, name) in path:
             raise Unresolved(index, 0, f"export {name} leads round a cycle of modules")
         path = path + ((index, name),)
@@ -571,7 +631,8 @@ class Bundle:
         return found[0]
 
     def export_names(self, index, seen=frozenset()):
-        """Every name a module exports, through export * as well (which never supplies default)."""
+        """Every name a module exports, through export * as well (which never supplies default). Raises
+        Unresolved where a module with parse diagnostics is involved."""
         if index in seen:
             return set()
         names = set()
@@ -597,30 +658,43 @@ class Bundle:
         The index pass scanned each module on its own. The facts pass scans a module again with its
         bindings where the index pass cannot decide: a variable receives a built-in value, the module
         declares a built-in's name, a computed key may be a Symbol.for result, or an import receives a
-        value another module exports. A value a module exports is followed into every module that imports
-        it by name, through re-exports and export *. Where a namespace of such a module is taken, by
-        `import * as`, `export * as`, import() or import.meta.require, the value goes where the scan does
-        not follow it, and that place is recorded as unfollowed in the module that takes it."""
+        value another module exports. The values a module exports are followed into every module that
+        imports them by name, through re-exports and export *, until no import gains a value; an export
+        of a variable that may also hold a value the scan does not identify makes its importers' bindings
+        uncertain too. Where a namespace of such a module is taken, by `import * as`, `export * as`,
+        import() or import.meta.require, the values go where the scan does not follow them, and that place
+        is recorded as unfollowed in the module that takes it. A module with parse diagnostics keeps its
+        index-pass scan and gets no facts pass (builtin_summary lists it as unparsed)."""
         scans = {index: record["premise"] for index, record in self.records.items()}
+        # {importer: {position of the import's local name: (values, unknown)}}
         seeds = collections.defaultdict(dict)
-        done = {}
-        pending = sorted(index for index, scan in scans.items() if scan["references"] or scan["scoped"] or scan["unknownKeys"])
         exported = {}
+        done = {}
+        pending = sorted(index for index, scan in scans.items() if not self.records[index]["diagnostics"] and (
+            scan["references"] or scan["scoped"] or scan["unknownKeys"]))
         while pending:
             index = pending.pop(0)
-            given = tuple(sorted(seeds[index].items()))
+            given = tuple(sorted((at, tuple(sorted(values)), unknown) for at, (values, unknown) in seeds[index].items()))
             if done.get(index) == given:
                 continue
             done[index] = given
-            scans[index] = self.facts(index, [{"q": "premise", "seeds": [{"at": at, "value": value} for at, value in given]}])[0]
+            scans[index] = self.facts(index, [{"q": "premise", "seeds": [
+                {"at": at, "values": list(values), "unknown": unknown} for at, values, unknown in given]}])[0]
+            changed = set()
             for export in scans[index]["exports"]:
                 target = self.export(index, export["name"])
-                if exported.get(target, export["value"]) != export["value"]:
-                    raise Unresolved(index, export["s"], f"export {export['name']} holds two different built-in values")
-                exported[target] = export["value"]
+                values, unknown = exported.get(target, (frozenset(), False))
+                merged = (values | {export["value"]}, unknown or bool(export.get("unknown")))
+                if merged != (values, unknown):
+                    exported[target] = merged
+                    changed.add(target)
+            for target in sorted(changed):
+                values, unknown = exported[target]
                 for importer, at in self._importers(target):
-                    if seeds[importer].get(at) != export["value"]:
-                        seeds[importer][at] = export["value"]
+                    given_before = seeds[importer].get(at, (frozenset(), False))
+                    seed = (given_before[0] | values, given_before[1] or unknown)
+                    if seed != given_before:
+                        seeds[importer][at] = seed
                         pending.append(importer)
         for importer, entry in self._namespace_sites(exported):
             scans[importer] = {**scans[importer], "unfollowed": sorted([*scans[importer]["unfollowed"], entry], key=lambda u: u["s"])}
@@ -628,11 +702,13 @@ class Bundle:
 
     def _importers(self, target):
         """(module, position of the local name) of every import by name that reaches target, an export()
-        result. Build the reverse index once, instead of resolving every import again for each exported
-        built-in value."""
+        result. Modules with parse diagnostics have no links and import nothing. The reverse index is built
+        once, instead of resolving every import again for each exported built-in value."""
         if self._importers_by_target is None:
             reverse = collections.defaultdict(list)
             for index in sorted(self.records):
+                if self.records[index]["diagnostics"]:
+                    continue
                 for load in self.loads(index):
                     if load["k"] != "import" or load.get("t") is None:
                         continue
@@ -646,29 +722,34 @@ class Bundle:
                             continue
                         reverse[resolved].append((index, position))
             self._importers_by_target = reverse
-        return iter(self._importers_by_target.get(target, ()))
+        return list(self._importers_by_target.get(target, ()))
 
     def _namespace_sites(self, exported):
         """(module, unfollowed entry) for every place a namespace is taken of a module that exports one of
-        the values in exported ({export() result: value})."""
+        the values in exported ({export() result: (values, unknown)}). A module with parse diagnostics that
+        takes such a namespace is listed too: the values go there."""
         if not exported:
             return
         holders = {}
         for index in sorted(self.records):
-            for name in sorted(self.export_names(index)):
+            try:
+                names = sorted(self.export_names(index))
+            except Unresolved:
+                continue
+            for name in names:
                 try:
                     target = self.export(index, name)
                 except Unresolved:
                     continue
                 if target in exported:
-                    holders.setdefault(index, []).append((name, exported[target]))
+                    holders.setdefault(index, []).append((name, sorted(exported[target][0])))
         for index in sorted(self.records):
-            for load in self.loads(index):
+            for load in self.records[index]["loads"]:
                 target = load.get("t")
                 namespace = (load["k"] == "import" and "namespace" in load) or load["k"] in ("export*as", "import()", "import.meta.require")
                 if namespace and target in holders:
-                    names = ", ".join(f"{name} ({value})" for name, value in holders[target])
-                    yield index, {"s": load["s"], "e": load["e"], "h": load["h"], "value": holders[target][0][1],
+                    names = ", ".join(f"{name} ({', '.join(values)})" for name, values in holders[target])
+                    yield index, {"s": load["s"], "e": load["e"], "h": load["h"], "value": holders[target][0][1][0],
                                   "reason": f"a namespace of module {target}, which exports built-in values: {names}"}
 
     def builtin_summary(self, scans):
@@ -686,7 +767,12 @@ class Bundle:
           passed          how many occurrences of each built-in value matched modelled use forms;
           references      every place a variable received a built-in value, its binding, and whether the
                           scan followed it or left it unclassified, with the reason;
-          unidentified    how many other uses of values the scan cannot identify it counted."""
+          unidentified    how many other uses of values the scan cannot identify it counted;
+          unparsed        the modules with parse diagnostics (module, s, message, count): the scan keeps
+                          what the index pass found in them, without their bindings;
+          limits          {limit: {form, entries}} for each form in BUILTIN_SCAN_LIMITS, entries counting the
+                          summary's entries labelled with it, by category.
+        An entry that comes from a stated limit carries that limit's key as limit."""
         lists = collections.defaultdict(list)
         passed = collections.Counter()
         unidentified = 0
@@ -733,4 +819,15 @@ class Bundle:
             # Several proved keys at one call can become the same unknown key after invalidation.
             unique = {json.dumps(entry, sort_keys=True): entry for entry in lists[key]}
             ordered[key] = sorted(unique.values(), key=lambda entry: (entry["module"], entry["s"]))
-        return {**ordered, "passed": dict(sorted(passed.items())), "unidentified": unidentified}
+        unparsed = []
+        for index in sorted(self.records):
+            diagnostics = self.records[index]["diagnostics"]
+            if diagnostics:
+                unparsed.append({"module": index, "s": diagnostics[0]["s"], "message": diagnostics[0]["message"],
+                                 "count": len(diagnostics)})
+        limits = {}
+        for limit, form in BUILTIN_SCAN_LIMITS.items():
+            counts = {key: sum(1 for entry in ordered[key] if entry.get("limit") == limit) for key in ordered}
+            limits[limit] = {"form": form, "entries": {key: count for key, count in counts.items() if count}}
+        return {**ordered, "passed": dict(sorted(passed.items())), "unidentified": unidentified, "unparsed": unparsed,
+                "limits": limits}
