@@ -115,7 +115,10 @@ BUILTIN_SCAN_LIMITS = {
         "A definer called other than directly or through one call or apply: through a chain of call or apply, "
         "Reflect.apply or bind, or by a higher-order built-in it is passed to. The scan lists the definer where "
         "it goes unfollowed. On 2.1.304: signal-exit binds Object.defineProperty in module 86 at offset 17362 "
-        "(`Object.defineProperty.bind(Object)`) and defines a member of globalThis under a Symbol.for key with it."),
+        "(`Object.defineProperty.bind(Object)`) and defines a member of globalThis under a Symbol.for key with it. "
+        "A mutating method of Array.prototype is modelled directly and through one call, apply, bind or "
+        "Reflect.apply; called from anywhere else, it writes only index members and the length of its this "
+        "value, none of which is a dependency slot, so it carries no limit."),
     "with": (
         "A built-in's name inside a with statement, which may name a member of the with's object instead. Both "
         "passes follow it as the built-in and list the place. An ES module cannot contain a with statement, "
@@ -123,7 +126,9 @@ BUILTIN_SCAN_LIMITS = {
     "bounds": (
         "A variable that derives a value from its own value, as `t = t.prototype` does, or that holds many "
         "built-in values: the scan lists and does not follow a value deeper than its bound on members "
-        "(facts.mjs, MAX_VALUE_PATH) or past its bound on values per variable (MAX_VALUES_PER_VARIABLE)."),
+        "(facts.mjs, MAX_VALUE_PATH) or past its bound on values per variable (MAX_VALUES_PER_VARIABLE). A write "
+        "through such a value is not recorded, so the entry stands for possible writes to that value and its "
+        "members."),
 }
 
 Needle = collections.namedtuple("Needle", "key type value")

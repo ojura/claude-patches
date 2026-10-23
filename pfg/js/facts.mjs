@@ -338,8 +338,9 @@ const BINARY_ASSIGNMENTS = new Set([
 // their members can differ from those of their prototype. A value the scan
 // cannot identify is (object); its writes are prototypeWrites, calls of its constructor are dynamic
 // code, and its other uses are counted only. Calls have special rules for definers, prototype readers,
-// eval and function constructors. Template tags receive their implicit template object and their raw
-// substitution values as arguments.
+// eval and function constructors, and for the mutating methods of Array.prototype, which write the
+// members of their this value also through call, apply, bind and Reflect.apply. Template tags receive
+// their implicit template object and their raw substitution values as arguments.
 //
 // An expression may hold several values (BuiltinScan.abstract): a conditional, a logical operator or a
 // variable assigned more than once gives each, and a write or a definer through it reaches each. The
@@ -358,7 +359,7 @@ const BINARY_ASSIGNMENTS = new Set([
 //                  from there;
 //   with           a built-in's name inside a with statement, or a built-in value as a with's object;
 //   bounds         a value derived more than MAX_VALUE_PATH members deep, or past the
-//                  MAX_VALUES_PER_VARIABLE values a variable can hold.
+//                  MAX_VALUES_PER_VARIABLE values a variable can hold; a write through it is not recorded.
 
 const GLOBAL_NAMES = new Set(['globalThis', 'global', 'self', 'window']);
 // The global names of ECMAScript's built-ins, except undefined, NaN and Infinity, which cannot be changed.
@@ -457,13 +458,21 @@ function isTruthy(value) {
   return value.root === 'Symbol' && value.path.length === 1 && WELL_KNOWN_SYMBOLS.has(value.path[0]);
 }
 
-// The argument position at which a call of fn passes a definer its target, or -1.
+// Whether value is a mutating method of Array.prototype, such as Array.prototype.push.
+function isArrayMutator(value) {
+  return !value.instance && !value.foreign && value.root === 'Array' && value.path.length === 2 && value.path[0] === 'prototype' &&
+    ARRAY_MUTATORS.has(value.path[1]);
+}
+
+// The argument position at which a call of fn passes a definer, or a mutating method of Array.prototype
+// called or bound through call, apply or bind, its target, or -1.
 function definerTargetPosition(fn) {
   if (STATIC_DEFINERS.has(valueName(fn))) return 0;
   const last = fn.path.at(-1);
   const inner = fn.path.length ? valueName({ root: fn.root, path: fn.path.slice(0, -1) }) : '';
   if (last === 'call' && STATIC_DEFINERS.has(inner)) return 1;
   if ((last === 'call' || last === 'apply') && RECEIVER_DEFINERS.has(fn.path.at(-2))) return 0;
+  if (['call', 'apply', 'bind'].includes(last) && isArrayMutator({ root: fn.root, path: fn.path.slice(0, -1) })) return 0;
   return -1;
 }
 
@@ -639,9 +648,10 @@ class BuiltinScan {
   // be a value the scan does not identify (unknown). Every possible value counts, so that a write through
   // a variable or a conditional reaches each built-in it may hold. Literals, `new X()` of a built-in
   // constructor and the iterators of the iterator methods are instances; the && operator passes on its
-  // left operand only when that can be false. With onlyValues, the result's unknown is not computed
-  // where it cannot become a value: whether a variable has a source outside the model costs a walk over
-  // its occurrences.
+  // left operand only when that can be false, and || and ?? pass on their right operand unless the left
+  // one names an always truthy built-in directly (leftDecides). With onlyValues, the result's unknown is
+  // not computed where it cannot become a value: whether a variable has a source outside the model costs
+  // a walk over its occurrences.
   abstract(expression, onlyValues = false) {
     let current = expression;
     while (ts.isParenthesizedExpression(current) || ts.isNonNullExpression?.(current) || ts.isAwaitExpression(current)) {
@@ -660,7 +670,10 @@ class BuiltinScan {
           this.abstract(current.right, onlyValues));
       }
       if (op === K.BarBarToken || op === K.QuestionQuestionToken) {
-        return union(this.abstract(current.left, onlyValues), this.abstract(current.right, onlyValues));
+        // The right operand runs only when the left one can be falsy (||) or null or undefined (??).
+        const left = this.abstract(current.left, onlyValues);
+        if (this.leftDecides(current.left)) return left;
+        return union(left, this.abstract(current.right, onlyValues));
       }
       return UNIDENTIFIED;
     }
@@ -745,6 +758,34 @@ class BuiltinScan {
   // The built-in values an expression may hold, for a definer's target.
   possibleValues(expression) {
     return this.abstract(expression, true).values;
+  }
+
+  // The value of node when it names a built-in directly: a free built-in's name, or a chain of member
+  // reads without ?. from one; else null.
+  builtinReference(node) {
+    let current = node;
+    while (ts.isParenthesizedExpression(current)) current = current.expression;
+    if (ts.isIdentifier(current)) return this.isFree(current) ? this.freeValue(current) : null;
+    if (ts.isPropertyAccessExpression(current) && !current.questionDotToken) {
+      const base = this.builtinReference(current.expression);
+      return base ? memberValue(base, current.name.text) : null;
+    }
+    return null;
+  }
+
+  // Whether the left operand of || or ?? always gives the result, so the right one never runs: it names
+  // a built-in directly, and that built-in is always truthy (isTruthy), which also rules out null and
+  // undefined. A variable never counts, since the abstract values have no element for undefined or
+  // null: `var w;if(c)w=Set;w||Map` gives Map when c is false.
+  leftDecides(left) {
+    const value = this.builtinReference(left);
+    return value !== null && isTruthy(value);
+  }
+
+  // A mutating method of Array.prototype runs with the value of thisNode as this, and may write any of
+  // its members, as Array.prototype.push(...) writes Array.prototype's.
+  mutate(node, thisNode, how) {
+    for (const target of thisNode ? this.possibleValues(thisNode) : []) this.writeKeys(node, target, ['*'], how);
   }
 
   write(node, target, how, proof = {}) {
@@ -861,6 +902,18 @@ class BuiltinScan {
         this.define(call, inner, definerArgs, RECEIVER_DEFINERS.has(receiver) ? { receiver: true, args, apply: last === 'apply' } : null);
         return;
       }
+      if (isArrayMutator(target)) {
+        // M.call(T, ...) and M.apply(T, list) run M with T as this, as T.M(...) does, and the function
+        // M.bind(T) returns does whenever it is called.
+        this.mutate(call, args[0], `${receiver} through ${last}`);
+        return;
+      }
+    }
+    if (name === 'Reflect.apply' && args[0]) {
+      // Reflect.apply(M, T, list) runs M with T as this.
+      const mutators = this.possibleValues(args[0]).filter(isArrayMutator);
+      for (const mutator of mutators) this.mutate(call, args[1], `${mutator.path[1]} through Reflect.apply`);
+      if (mutators.length) return;
     }
     if (STATIC_DEFINERS.has(name)) {
       this.define(call, name, args, null);
@@ -964,6 +1017,8 @@ class BuiltinScan {
         if ([K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken, K.EqualsEqualsToken, K.ExclamationEqualsToken,
           K.InstanceOfKeyword, K.InKeyword].includes(op)) return this.pass(value, 'comparison');
         if (op === K.AmpersandAmpersandToken && outer.left === current && isTruthy(value)) return this.pass(value, 'test');
+        if ((op === K.BarBarToken || op === K.QuestionQuestionToken) && outer.right === current &&
+            this.leftDecides(outer.left)) return this.pass(value, 'not evaluated');
         if (op === K.BarBarToken || op === K.AmpersandAmpersandToken || op === K.QuestionQuestionToken) {
           current = outer;
           continue;
@@ -1042,7 +1097,15 @@ class BuiltinScan {
     const definer = functions.length > 0 && functions.every((fn) => definerTargetPosition(fn) === position) &&
       this.possibleValues(node).some((target) => valueName(target) === valueName(value));
     const reader = functions.length > 0 && position === 0 && functions.every((fn) => PROTOTYPE_READERS.has(valueName(fn)));
-    if ((definer || reader) && !this.abstract(calleeNode).unknown) return;
+    // Reflect.apply(M, T, list) with M only ever a mutating method of Array.prototype: the call records the
+    // write to T, so neither M nor T escapes there.
+    // The full abstract value, whose unknown counts a variable that may also hold a value the scan does
+    // not identify.
+    const applied = callable && call.arguments?.[0] ? this.abstract(call.arguments[0]) : UNIDENTIFIED;
+    const mutated = functions.length > 0 && functions.every((fn) => valueName(fn) === 'Reflect.apply') && !applied.unknown &&
+      applied.values.length > 0 && applied.values.every(isArrayMutator) && (position === 0 ||
+        (position === 1 && this.possibleValues(node).some((target) => valueName(target) === valueName(value))));
+    if ((definer || reader || mutated) && !this.abstract(calleeNode).unknown) return;
     return this.escape(node, value, ts.isTaggedTemplateExpression(call) ? 'passed to a template tag'
       : ts.isNewExpression(call) ? 'passed to a constructor' : 'passed to a function');
   }
@@ -1075,7 +1138,9 @@ class BuiltinScan {
       return;
     }
     // A definer that goes where the scan does not follow may be called from there: through call,
-    // apply, Reflect.apply or bind, or by a higher-order built-in.
+    // apply, Reflect.apply or bind, or by a higher-order built-in. A mutating method of Array.prototype
+    // called from there writes only index members and the length of its this value, none of which is a
+    // dependency slot, so it carries no limit.
     const definer = STATIC_DEFINERS.has(valueName(value)) || RECEIVER_DEFINERS.has(value.path.at(-1));
     const stated = limit ?? (definer ? 'definer-calls' : undefined);
     this.result.unfollowed.push({ ...this.where(node), value: valueName(value), reason, ...(stated ? { limit: stated } : {}) });

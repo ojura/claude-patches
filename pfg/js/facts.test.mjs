@@ -752,6 +752,49 @@ test('a needle key is arbitrary text, including inherited Object property names'
   });
 });
 
+test('a mutating method of Array.prototype writes its this value through call, apply, bind and Reflect.apply too', async () => {
+  const { index, facts, raw } = await scans('Array.prototype.push.call(Array.prototype,h);Array.prototype.splice.apply(Set.prototype,[0,1]);' +
+    'Reflect.apply(Array.prototype.push,Map.prototype,[k]);var b=Array.prototype.pop.bind(Array.prototype);f(Array.prototype.fill);');
+  for (const result of [index, facts]) {
+    assert.deepEqual(result.writes, ['Array.prototype.* push through call', 'Set.prototype.* splice through apply',
+      'Map.prototype.* push through Reflect.apply', 'Array.prototype.* pop through bind']);
+    // The receivers are recorded as written, not as passed on. A method passed on may run on any receiver
+    // later, where it writes only index members and the length, which are not dependency slots.
+    assert.deepEqual(result.unfollowed, ['Array.prototype.fill: passed to a function']);
+  }
+  assert.deepEqual(raw.unfollowed.map((u) => u.limit), [undefined]);
+});
+
+test('|| and ?? pass on the right operand only when the left one can decide otherwise', async () => {
+  const { index, facts } = await scans('var a=Set||Map;a.prototype.x=1;var b=Set??Map;b.y=1;var c=maybe||WeakMap;c.z=1;' +
+    'f(Promise||Proxy);g(maybe??Symbol);');
+  // The facts pass follows the variables: Map, after Set|| and after Set??, never runs; after maybe||,
+  // WeakMap may. The index pass does not follow variables.
+  assert.deepEqual([index.writes, facts.writes], [[], ['Set.prototype.x =', 'Set.y =', 'WeakMap.z =']]);
+  for (const result of [index, facts]) {
+    assert.ok(result.unfollowed.includes('Promise: passed to a function'));
+    assert.ok(!result.unfollowed.some((u) => u.startsWith('Proxy')));
+    assert.ok(result.unfollowed.includes('Symbol: passed to a function'));
+  }
+});
+
+test('a variable on the left of || or ?? may be undefined, so the right operand still counts', async () => {
+  // pfg-advisor's inputs: in each, Node with c false writes Map.prototype.has. The abstract values have
+  // no element for undefined or null, so only a built-in named directly decides the result.
+  for (const text of ['var w;if(c)w=Set;var v=w||Map;v.prototype.has=f;', 'var w=Set;if(c)w=void 0;var v=w||Map;v.prototype.has=f;',
+    'var w=c?Set:void 0;var v=w||Map;v.prototype.has=f;', 'var w=c?Set:null;var v=w??Map;v.prototype.has=f;',
+    'let w;if(c)w=Set;var v=w??Map;v.prototype.has=f;']) {
+    const { facts } = await scans(text);
+    assert.ok(facts.writes.includes('Map.prototype.has ='), text);
+  }
+});
+
+test('Reflect.apply with a first argument that may also be another function passes its receiver on', async () => {
+  const { facts } = await scans('var m=flag?Array.prototype.push:g;Reflect.apply(m,Array.prototype,[k]);');
+  assert.deepEqual(facts.writes, ['Array.prototype.* push through Reflect.apply']);
+  assert.ok(facts.unfollowed.includes('Array.prototype: passed to a function'));
+});
+
 test('template tags receive their template object and unchanged substitution arguments', async () => {
   // call takes the implicit template object as its this argument, leaving
   // Set.prototype, "has" and the descriptor as Object.defineProperty's three arguments.
