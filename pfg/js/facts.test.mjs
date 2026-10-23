@@ -940,3 +940,129 @@ test('a parse diagnostic refuses binding facts even for a declaration that parse
     assert.ok(occurrences.refused.length > 0);
   });
 });
+
+// The operation model (facts.mjs, "The operation model").
+
+async function usesOf(text, name, model, n = 0) {
+  return withHelper([[0, '/a.js', text]], async (h) => {
+    const { id } = await bindingOf(h, 0, text, name, n);
+    const [result] = await h.facts(0, [{ q: 'uses', id, model }]);
+    return result;
+  });
+}
+
+const reasonsOf = (result) => result.refused.map((r) => r.reason).join('; ');
+
+test('the counterexamples to a list of method names are refused at the operation that runs code', async () => {
+  // pfg-advisor's constancy counterexamples: each mutates V in Node through a use that a list of
+  // method or function names would accept.
+  const cases = [
+    ['const V=[1];V.forEach((...args)=>args[2].push(2));', 'array', /rest parameter of the callback/],
+    ['const V=[1];Array.from(V,function(x){this.pop();return x},V);', 'array', /Array\.from only with the value as its only argument/],
+    ["const V=[1];JSON.stringify(V,function(k,x){if(k==='0')this.pop();return x});", 'array', /JSON\.stringify only/],
+    ['const V=[1];const C={[Symbol.hasInstance](x){x.pop();return true}};V instanceof C;', 'array', /Symbol\.hasInstance/],
+    ['function f(x,y=arguments[0]){y.push(2)}const V=[1];f(V);', 'array', /f reads arguments/],
+    ["let V=1;eval('V=2');", 'primitive', /direct eval/],
+    ["const V=[1];eval('V.push(2)');", 'array', /direct eval/],
+    ["function stringify(){delete this.x;return 'done'}const V={x:1,toString:stringify};String(V);", 'object', /own toString/],
+    ['function encode(){delete this.x;return 1}const V={x:1,toJSON:encode};JSON.stringify(V);', 'object', /own toJSON/],
+  ];
+  for (const [text, kind, reason] of cases) {
+    const keys = kind === 'object' ? ['x', text.includes('toJSON') ? 'toJSON' : 'toString'] : [];
+    const result = await usesOf(text, 'V', { kind, keys, accessors: [] });
+    assert.match(reasonsOf(result), reason, text);
+  }
+});
+
+test('reads, read methods with safe callbacks, iteration, aliases and parameters are accepted', async () => {
+  const text = 'const V=new Set(["a"]);const W=V;function has(n){return V.has(n)||W.has(n)}' +
+    'const A=["x"];function some(e,n){return n.some((r)=>e.startsWith(r))}some("x",A);const C=[...A];for(const a of A);' +
+    'if(A.length&&typeof A==="object"&&A!==null)A.includes("x");Object.keys(A);Array.isArray(A);String(A);`${A}`;';
+  const set = await usesOf(text, 'V', { kind: 'set' });
+  assert.deepEqual(set.refused, []);
+  assert.ok(set.requires.includes('Set.prototype.has'));
+  assert.equal(set.followed.length, 2);
+  const array = await usesOf(text, 'A', { kind: 'array' });
+  assert.deepEqual(array.refused, []);
+  assert.ok(array.requires.includes('Array.prototype.some'));
+  assert.ok(array.requires.includes('Array.prototype.@@iterator'));
+  assert.equal(array.followed.length, 2);
+});
+
+test('stores, writes, other methods and unknown callees are refused with their reasons', async () => {
+  const cases = [
+    ['const V=[1];V.push(2);', /push is called with the value as this/],
+    ['const V=[1];V[0]=2;', /a member of the value is written/],
+    ['const V=[1];let W;W=V;', /stored by an assignment/],
+    ['const V=[1];const o={v:V};', /stored in an object literal/],
+    ['const V=[1];function g(){return V}', /returned/],
+    ['const V=[1];g(V);', /which the module does not declare/],
+    ['const V=[1];var W=V;W=[];', /the binding is written here/],
+    ['const V=[1];V.sort();', /sort is called/],
+    ['const V=[1];V.map(cb);', /callback is not an arrow or function expression/],
+    ['const V=[1];V.map((a,b,c)=>c);', /declares parameter 3/],
+    ['const V=[1];V.map(function(a){return arguments[2]});', /reads arguments/],
+    ['const V=[1];Object.assign(V,{a:1});', /Object\.assign, a built-in function the model does not list/],
+    ['const V=[1];f.call(V);function f(){}', /passed to a function the model cannot identify/],
+  ];
+  for (const [text, reason] of cases) {
+    assert.match(reasonsOf(await usesOf(text, 'V', { kind: 'array' })), reason, text);
+  }
+});
+
+test('an object with accessors refuses reads that would call them', async () => {
+  const model = { kind: 'object', keys: ['a', 'b'], accessors: ['b'] };
+  assert.deepEqual((await usesOf('const V={a:1,get b(){return 2}};V.a;Object.keys(V);', 'V', model)).refused, []);
+  for (const text of ['const V={a:1,get b(){return 2}};V.b;', 'const V={a:1,get b(){return 2}};V[k];',
+    'const V={a:1,get b(){return 2}};Object.values(V);', 'const V={a:1,get b(){return 2}};const{...r}=V;']) {
+    assert.match(reasonsOf(await usesOf(text, 'V', model)), /getter/, text);
+  }
+});
+
+test('exports are reported under every name, also through an exported alias', async () => {
+  const result = await usesOf('const V=[1];export{V as T,V};export default V;export const W=V;', 'V', { kind: 'array' });
+  assert.deepEqual(result.refused, []);
+  assert.deepEqual(result.exports.map((e) => e.name).sort(), ['T', 'V', 'W', 'default']);
+});
+
+test('a namespace is followed through member reads and static destructuring only', async () => {
+  const text = 'import*as ns from"/m.js";ns.V.includes(1);ns.other();const{V:a}=ns;a.at(0);';
+  await withHelper([[0, '/a.js', text]], async (h) => {
+    const { id } = await bindingOf(h, 0, text, 'ns');
+    const [ok] = await h.facts(0, [{ q: 'uses', id, mode: 'namespace', names: ['V'], model: { kind: 'array' } }]);
+    assert.match(reasonsOf(ok), /called with the namespace as this/);
+    assert.equal(ok.refused.length, 1);
+    assert.equal(ok.followed.length, 2);
+  });
+  for (const [text, reason] of [['import*as ns from"/m.js";f(ns);', /outside the forms/], ['import*as ns from"/m.js";ns[k];', /computed member/],
+    ['import*as ns from"/m.js";const{...r}=ns;', /rest element/], ['import*as ns from"/m.js";await ns;', /await calls a then/]]) {
+    await withHelper([[0, '/a.js', text]], async (h) => {
+      const { id } = await bindingOf(h, 0, text, 'ns');
+      const [result] = await h.facts(0, [{ q: 'uses', id, mode: 'namespace', names: ['V'], model: { kind: 'array' } }]);
+      assert.match(reasonsOf(result), reason, text);
+    });
+  }
+});
+
+test('the promise of import() is followed through await, then and Promise.all', async () => {
+  // The 2.1.304 forms of the dynamic importers of the module that re-exports the blocked Set, and the
+  // counterexample that hides the whole namespace in a default parameter.
+  const cases = [
+    ['let{V:a,f}=await import("/m.js");a.includes(1);', []],
+    ['let[{f:e},x]=await Promise.all([import("/m.js"),g()]);', []],
+    ['Promise.all([g(),import("/m.js")]).then(([x,{f:e}])=>e()).finally(h);', []],
+    ['import("/m.js").then(({V})=>V.push(1));', [/push is called/]],
+    ['import("/m.js").then(function({f},whole=arguments[0]){whole.V.pop()});', [/reads arguments/]],
+    ['const p=import("/m.js");', [/promise of a namespace/]],
+    ['let[...all]=await Promise.all([import("/m.js")]);', [/rest element collects the namespace/]],
+  ];
+  for (const [text, reasons] of cases) {
+    await withHelper([[0, '/a.js', text], [1, '/m.js', 'export const V=[1];export function f(){}']], async (h) => {
+      const { modules } = await h.ok('index', { needles: [] });
+      const load = modules[0].loads.find((l) => l.k === 'import()');
+      const [result] = await h.facts(0, [{ q: 'loadUse', handle: load.h, names: ['V'], model: { kind: 'array' } }]);
+      assert.equal(result.refused.length, reasons.length, `${text}: ${reasonsOf(result)}`);
+      reasons.forEach((reason, i) => assert.match(result.refused[i].reason, reason, text));
+    });
+  }
+});

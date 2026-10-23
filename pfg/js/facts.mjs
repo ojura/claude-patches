@@ -22,6 +22,8 @@
 // Requests:
 //   index {needles}               parse every module once and return a record of each (indexModule)
 //   facts {module, queries}       answer queries about one module with a checker (factsBatch)
+//   vocabulary                    {operations}: every built-in operation a use can require
+//                                 (OPERATION_VOCABULARY)
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -1612,6 +1614,200 @@ function topLevelStatement(node) {
   return current.parent ? current : undefined;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The operation model
+//
+// pfg.values evaluates a binding's initializer, then asks whether the program keeps that value.
+// Facts.uses classifies every use of the binding in one module, with the uses of the variables and
+// parameters the value reaches there; Facts.loadUse does the same from an import() or
+// import.meta.require call whose module exports the value. Each use must match a form listed here;
+// any other use is refused, with its place and the reason. A primitive cannot change, so for one
+// only writes to its binding count. For a value of kind array, set, map or object:
+//
+//   Parents that hand the value on unchanged: parentheses, either operand of ||, && and ??, a
+//   branch of ?:, the last operand of a comma, the right side of a destructuring assignment, and
+//   await (for an object, only without an own then member, which await would call).
+//   Reads, which run none of the value's code: typeof, void, !, the test of if, while, do, for and
+//   ?:, === and !==, switch and case, a discarded expression, for-in, `k in V`, and
+//   `V instanceof C` with C the free name Array, Set, Map or Object.
+//   Conversions to a primitive: String(V), a template substitution, a computed key, an element
+//   key, unary + - ~, the arithmetic and bitwise operators, == != and the relational comparisons,
+//   and `V in o`. For an object they call its own toString or valueOf with V as this, so they are
+//   refused when the object has either.
+//   Member reads: V.p, V[k] (also optionally chained) and destructuring of V. For an object, a
+//   read of an accessor calls its getter with V as this, so it is refused; so is a computed key or
+//   a rest element when the object has an accessor.
+//   Read methods: a call of a method in READ_METHODS with V as this (a member of V that is called,
+//   also through parentheses). A callback argument must be an arrow or function expression written
+//   in the call that does not read arguments, has no rest parameter at or before the position at
+//   which the method passes the container, and declares no parameter at that position. For an
+//   object, an own member named like the method refuses the call.
+//   Iteration of an array, a Set or a Map through its built-in iterator: for-of, [...V], f(...V),
+//   array destructuring, Array.from(V), new Set(V), new Map(V).
+//   Object spread {...V}: refused for an object with an accessor.
+//   Built-in functions with V as an argument, in exactly these forms: Object.keys(V),
+//   Object.values(V), Object.entries(V), Object.hasOwn(V, k), Array.isArray(V), Array.from(V),
+//   JSON.stringify(V), String(V), new Set(V) and new Map(V), with the name of the built-in free.
+//   Object.values, Object.entries and JSON.stringify read every member (refused for an object with
+//   an accessor), and JSON.stringify calls an own toJSON (refused).
+//   An alias: `const W = V` (also let or var), with no other write to W; W's uses are classified.
+//   A parameter: V as an argument of a plain call of a function the module declares (a function
+//   declaration, or a variable never written that holds a function or arrow expression), with no
+//   spread argument before V, of a function that does not read arguments and has no rest parameter
+//   at or before V's position. The parameter that receives V must be a plain identifier; its uses
+//   are classified, up to four calls deep. Beyond the last parameter, V reaches only arguments.
+//   An export: an export list entry, export default, or a declaration with export. pfg.values
+//   classifies the uses in the modules that import the value, and wherever a namespace holding it
+//   is taken.
+// Everything else is refused, among it: a write to the binding or to a member of the value; a
+// store into an object or array literal, a class field, or another variable by assignment; a
+// return, throw or yield; a call of the value, or of a member outside READ_METHODS; the value as
+// any other argument, as the this of call, apply or bind, or as a template tag's substitution; and
+// instanceof with another right operand, which calls that operand's Symbol.hasInstance.
+// Each accepted operation adds the built-in operations it relies on to requires, from
+// OPERATION_VOCABULARY; pfg.values passes them on in each Value, and its caller checks them against
+// the built-in scan.
+//
+// A namespace that holds the value under some export names is followed too. A member read with
+// one of those names is a use of the value; a read of another name is a read; destructuring with
+// static keys gives aliases of the value; `const ns2 = ns` gives another namespace variable. A
+// computed member, a rest element, a call of a member (whose this would be the namespace), await
+// (which would call an exported then), and any other use of the namespace are refused. The promise
+// of import(M) may be awaited, given to .then with an arrow or function expression whose first
+// parameter receives the namespace (a function expression must not read arguments), or be an
+// element of the array literal given to Promise.all, whose result is awaited into an array pattern
+// or given to .then the same way; the pattern element at the import's position receives the
+// namespace.
+
+const CONTAINER_CONSTRUCTORS = { array: 'Array', set: 'Set', map: 'Map', object: 'Object' };
+const PROTOTYPE_CHAINS = {
+  array: ['Array.prototype', 'Object.prototype'], set: ['Set.prototype', 'Object.prototype'],
+  map: ['Map.prototype', 'Object.prototype'], object: ['Object.prototype'],
+};
+const ITERATION_REQUIRES = {
+  array: ['Array.prototype.@@iterator', '%ArrayIteratorPrototype%.next'],
+  set: ['Set.prototype.@@iterator', '%SetIteratorPrototype%.next'],
+  map: ['Map.prototype.@@iterator', '%MapIteratorPrototype%.next'],
+};
+// The read methods of each kind of value: container is the position at which the method passes the
+// value to its callback, and species marks a method that creates its result through the value's
+// constructor (ArraySpeciesCreate).
+const READ_METHODS = {
+  array: new Map([
+    ['includes', {}], ['indexOf', {}], ['lastIndexOf', {}], ['join', {}], ['at', {}], ['keys', {}], ['values', {}],
+    ['entries', {}], ['slice', { species: true }], ['concat', { species: true }], ['some', { container: 2 }],
+    ['every', { container: 2 }], ['find', { container: 2 }], ['findIndex', { container: 2 }], ['findLast', { container: 2 }],
+    ['findLastIndex', { container: 2 }], ['forEach', { container: 2 }], ['filter', { container: 2, species: true }],
+    ['map', { container: 2, species: true }], ['flatMap', { container: 2, species: true }], ['reduce', { container: 3 }],
+    ['reduceRight', { container: 3 }],
+  ]),
+  set: new Map([['has', {}], ['keys', {}], ['values', {}], ['entries', {}], ['forEach', { container: 2 }]]),
+  map: new Map([['get', {}], ['has', {}], ['keys', {}], ['values', {}], ['entries', {}], ['forEach', { container: 2 }]]),
+  object: new Map([['hasOwnProperty', {}]]),
+};
+const READING_FUNCTIONS = new Map([
+  ['Object.keys', { argc: 1 }], ['Object.values', { argc: 1, getters: true }], ['Object.entries', { argc: 1, getters: true }],
+  ['Object.hasOwn', { argc: 2 }], ['Array.isArray', { argc: 1 }], ['Array.from', { argc: 1, iterates: true }],
+  ['JSON.stringify', { argc: 1, getters: true, hook: 'toJSON' }], ['String', { argc: 1, converts: true }],
+]);
+const COPYING_CONSTRUCTORS = new Map([['Set', ['Set', 'Set.prototype.add']], ['Map', ['Map', 'Map.prototype.set']]]);
+const INSTANCEOF_CONSTRUCTORS = new Set(['Array', 'Set', 'Map', 'Object']);
+const CONVERSION_HOOKS = ['toString', 'valueOf'];
+const VALUE_KINDS = new Set(['array', 'set', 'map', 'object', 'primitive']);
+const ARTICLES = { array: 'an array', set: 'a Set', map: 'a Map', object: 'an object' };
+// Every built-in operation a use can require; UseContext.require refuses any other name, so that the
+// test that the built-in scan can name a write to each covers all of them (request vocabulary).
+const OPERATION_VOCABULARY = (() => {
+  const prototypes = [...new Set(Object.values(PROTOTYPE_CHAINS).flat())];
+  const hooks = [...READING_FUNCTIONS.values()].filter((reading) => reading.hook).map((reading) => reading.hook);
+  return new Set([
+    ...[...INSTANCEOF_CONSTRUCTORS].map((constructor) => `${constructor}.@@hasInstance`), 'Function.prototype.@@hasInstance',
+    ...prototypes.flatMap((prototype) => ['then', '@@toPrimitive', ...CONVERSION_HOOKS, ...hooks].map((name) => `${prototype}.${name}`)),
+    'Array.prototype.join', 'Set.prototype.size', 'Map.prototype.size',
+    ...Object.entries(READ_METHODS).flatMap(([kind, methods]) => [...methods.keys()].map((key) => `${CONTAINER_CONSTRUCTORS[kind]}.prototype.${key}`)),
+    'Array.prototype.constructor', 'Array.@@species', 'Array.prototype.@@isConcatSpreadable',
+    ...Object.values(ITERATION_REQUIRES).flat(), ...[...COPYING_CONSTRUCTORS.values()].flat(), ...READING_FUNCTIONS.keys(),
+    'Promise.prototype.then', 'Promise.all', 'Promise.resolve',
+  ]);
+})();
+
+// The state of one uses or loadUse query.
+class UseContext {
+  constructor(model) {
+    if (!model || !VALUE_KINDS.has(model.kind)) {
+      throw new RequestError(`a value model needs a kind among ${[...VALUE_KINDS].join(', ')}: ${JSON.stringify(model)}`);
+    }
+    this.model = { kind: model.kind, keys: model.keys ?? [], accessors: model.accessors ?? [] };
+    this.refused = [];
+    this.requires = new Set();
+    this.exports = [];
+    this.followed = [];
+    this.queue = [];
+    this.visited = new Set();
+    this.classified = 0;
+  }
+
+  require(...names) {
+    for (const name of names) {
+      if (!OPERATION_VOCABULARY.has(name)) throw new Error(`the operation model requires ${name}, which OPERATION_VOCABULARY does not list`);
+      this.requires.add(name);
+    }
+  }
+
+  result() {
+    return { refused: this.refused, requires: [...this.requires].sort(), exports: this.exports, followed: this.followed,
+      classified: this.classified };
+  }
+}
+
+// What a refused use does, in words, from its parent.
+function storeReason(outer, current) {
+  if (ts.isReturnStatement(outer) || (ts.isArrowFunction(outer) && outer.body === current)) return 'the value is returned';
+  if (ts.isThrowStatement(outer)) return 'the value is thrown';
+  if (ts.isYieldExpression(outer)) return 'the value is yielded';
+  if (ts.isPropertyAssignment(outer) || ts.isShorthandPropertyAssignment(outer)) return 'the value is stored in an object literal';
+  if (ts.isArrayLiteralExpression(outer)) return 'the value is stored in an array literal';
+  if (ts.isPropertyDeclaration(outer)) return 'the value is stored in a class field';
+  if (ts.isParameter(outer) || ts.isBindingElement(outer)) return 'the value is a default value';
+  if (ts.isExpressionWithTypeArguments(outer)) return 'the value is the base of a class';
+  return `the value is used as the ${fieldOf(outer, current).field} of a ${kindName(outer)}`;
+}
+
+// The problem with a callback that a read method calls with the value at position at, or null.
+function callbackProblem(argument, at) {
+  let fn = argument;
+  while (fn && ts.isParenthesizedExpression(fn)) fn = fn.expression;
+  if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) {
+    return 'the callback is not an arrow or function expression written in the call';
+  }
+  const rest = fn.parameters.findIndex((parameter) => parameter.dotDotDotToken);
+  if (rest !== -1 && rest <= at) return 'a rest parameter of the callback receives the value';
+  if (fn.parameters.length > at) return `the callback declares parameter ${at + 1}, which receives the value`;
+  if (readsArguments(fn)) return 'the callback reads arguments, which hold the value';
+  return null;
+}
+
+function unparenthesized(node) {
+  let current = node;
+  while (current && ts.isParenthesizedExpression(current)) current = current.expression;
+  return current;
+}
+
+// The outermost expression that is node in parentheses.
+function outermostParentheses(node) {
+  let current = node;
+  while (current.parent && ts.isParenthesizedExpression(current.parent)) current = current.parent;
+  return current;
+}
+
+function isLiteralExpression(node) {
+  const current = unparenthesized(node);
+  return ts.isStringLiteral(current) || ts.isNoSubstitutionTemplateLiteral(current) || ts.isNumericLiteral(current) ||
+    current.kind === K.TrueKeyword || current.kind === K.FalseKeyword || current.kind === K.NullKeyword ||
+    (ts.isPrefixUnaryExpression(current) && ts.isNumericLiteral(current.operand)) ||
+    (ts.isVoidExpression(current) && ts.isNumericLiteral(current.expression));
+}
+
 class Facts {
   constructor(module) {
     this.module = module;
@@ -2114,6 +2310,533 @@ class Facts {
     return ts.isCallExpression(initializer) && !initializer.questionDotToken && scan.registry(initializer);
   }
 
+  // The uses of a binding's value in this module under the operation model. query: {id, model: {kind,
+  // keys, accessors}, mode: 'value' (default) or 'namespace' with names, the export names under which
+  // the namespace bound to id holds the value}.
+  uses(query) {
+    const ctx = new UseContext(query.model);
+    const mode = query.mode ?? 'value';
+    if (mode !== 'value' && mode !== 'namespace') throw new RequestError(`a uses mode is value or namespace, not ${mode}`);
+    this.symbolOfId(query.id);
+    ctx.queue.push({ id: query.id, mode, names: new Set(query.names ?? []), depth: 0, root: mode === 'value', declaration: null });
+    this.drainUses(ctx);
+    return ctx.result();
+  }
+
+  // The uses of the namespace that the import() or import.meta.require call at handle loads, which
+  // holds the value under names.
+  loadUse(query) {
+    const ctx = new UseContext(query.model);
+    const node = nodeAt(this.sourceFile, query.handle);
+    if (!ts.isCallExpression(node)) throw new RequestError(`handle ${query.handle} is not a call`);
+    const names = new Set(query.names ?? []);
+    if (node.expression.kind === K.ImportKeyword) this.importPromiseUse(node, names, ctx);
+    else this.namespaceUse(node, names, ctx, 0);
+    this.drainUses(ctx);
+    return ctx.result();
+  }
+
+  refuseUse(ctx, node, reason) {
+    ctx.refused.push({ s: start(node, this.sourceFile), e: node.end, reason });
+  }
+
+  // Classifies the occurrences of every binding in the queue: the root binding, aliases, parameters
+  // and namespace variables.
+  drainUses(ctx) {
+    while (ctx.queue.length) {
+      const entry = ctx.queue.shift();
+      const key = `${entry.mode} ${entry.id} ${[...entry.names].sort().join(',')}`;
+      if (ctx.visited.has(key)) continue;
+      ctx.visited.add(key);
+      const symbol = this.symbolOfId(entry.id);
+      const examined = this.examine(symbol);
+      if (examined.refused.length) {
+        for (const item of examined.refused) ctx.refused.push(item);
+        continue;
+      }
+      ctx.followed.push({ id: entry.id, mode: entry.mode, depth: entry.depth });
+      for (const declaration of declarationsIn(symbol, this.sourceFile)) {
+        const root = ts.isBindingElement(declaration) ? patternRoot(declaration) : declaration;
+        if (!exportedByModifier(root)) continue;
+        const name = declarationName(declaration);
+        if (entry.mode === 'namespace') this.refuseUse(ctx, name, 'a namespace that holds the value is exported');
+        else ctx.exports.push({ name: name.text, s: start(name, this.sourceFile) });
+      }
+      // The root binding has one declaration that assigns it, the one pfg.values evaluated; an alias
+      // or a parameter is assigned only where the value reaches it.
+      const assigning = [];
+      for (const node of examined.nodes) {
+        const roles = rolesOf(node);
+        if (isDeclarationName(node)) {
+          if (roles.includes('write')) this.refuseUse(ctx, node, 'a loop head assigns the binding on every iteration');
+          else if (roles.includes('initialized-declaration') && node.parent !== entry.declaration) assigning.push(node);
+          continue;
+        }
+        if (roles.includes('write')) {
+          this.refuseUse(ctx, node, 'the binding is written here');
+          continue;
+        }
+        ctx.classified += 1;
+        if (ctx.model.kind === 'primitive') continue;
+        if (entry.mode === 'namespace') this.namespaceUse(node, entry.names, ctx, entry.depth);
+        else this.valueUse(node, ctx, entry.depth);
+      }
+      for (const node of assigning.slice(entry.root ? 1 : 0)) {
+        this.refuseUse(ctx, node, 'another declaration also assigns the binding');
+      }
+    }
+  }
+
+  // Follows an expression whose value is the value, up through the parents that hand it on.
+  valueUse(expression, ctx, depth) {
+    const { kind } = ctx.model;
+    let current = expression;
+    for (;;) {
+      const outer = current.parent;
+      if (!outer) return;
+      if (ts.isParenthesizedExpression(outer)) {
+        current = outer;
+        continue;
+      }
+      if (ts.isBinaryExpression(outer)) {
+        const op = outer.operatorToken.kind;
+        if (op === K.BarBarToken || op === K.AmpersandAmpersandToken || op === K.QuestionQuestionToken) {
+          current = outer;
+          continue;
+        }
+        if (op === K.CommaToken) {
+          if (outer.right !== current) return;
+          current = outer;
+          continue;
+        }
+        if (op === K.EqualsEqualsEqualsToken || op === K.ExclamationEqualsEqualsToken) return;
+        if (op === K.InKeyword) {
+          if (outer.right === current) return;
+          return this.convertUse(current, ctx);
+        }
+        if (op === K.InstanceOfKeyword) {
+          const constructor = outer.left === current ? this.freeBuiltinPath(outer.right) : null;
+          if (constructor && INSTANCEOF_CONSTRUCTORS.has(constructor)) {
+            ctx.require(`${constructor}.@@hasInstance`, 'Function.prototype.@@hasInstance');
+            return;
+          }
+          return this.refuseUse(ctx, current, 'instanceof calls the Symbol.hasInstance method of its right operand with the value');
+        }
+        if (op === K.EqualsToken && outer.right === current) {
+          const target = unparenthesized(outer.left);
+          if (ts.isObjectLiteralExpression(target)) this.destructureUse(target, current, ctx);
+          else if (ts.isArrayLiteralExpression(target)) this.iterateUse(current, ctx);
+          else return this.refuseUse(ctx, current, 'the value is stored by an assignment');
+          current = outer;
+          continue;
+        }
+        if (BINARY_ASSIGNMENTS.has(op)) {
+          return this.refuseUse(ctx, current, outer.left === current ? 'the value is the target of an assignment'
+            : 'the value is an operand of a compound assignment');
+        }
+        return this.convertUse(current, ctx);
+      }
+      if (ts.isConditionalExpression(outer)) {
+        if (outer.condition === current) return;
+        current = outer;
+        continue;
+      }
+      if (ts.isAwaitExpression(outer)) {
+        if (kind === 'object' && ctx.model.keys.includes('then')) {
+          return this.refuseUse(ctx, current, 'await calls the value\'s own then method');
+        }
+        ctx.require(...PROTOTYPE_CHAINS[kind].map((prototype) => `${prototype}.then`));
+        current = outer;
+        continue;
+      }
+      if (ts.isTypeOfExpression(outer) || ts.isVoidExpression(outer)) return;
+      if (ts.isPrefixUnaryExpression(outer)) {
+        if (outer.operator === K.ExclamationToken) return;
+        if (outer.operator === K.PlusPlusToken || outer.operator === K.MinusMinusToken) {
+          return this.refuseUse(ctx, current, 'the value is the operand of ++ or --');
+        }
+        return this.convertUse(current, ctx);
+      }
+      if (ts.isPostfixUnaryExpression(outer)) return this.refuseUse(ctx, current, 'the value is the operand of ++ or --');
+      if (ts.isDeleteExpression(outer)) return this.refuseUse(ctx, current, 'the value is the operand of delete');
+      if (ts.isExpressionStatement(outer)) return;
+      if ((ts.isIfStatement(outer) || ts.isWhileStatement(outer) || ts.isDoStatement(outer)) && outer.expression === current) return;
+      if (ts.isForStatement(outer) && outer.condition === current) return;
+      if ((ts.isSwitchStatement(outer) || ts.isCaseClause(outer)) && outer.expression === current) return;
+      if (ts.isTemplateSpan(outer)) {
+        if (ts.isTaggedTemplateExpression(outer.parent.parent)) {
+          return this.refuseUse(ctx, current, 'the value is passed to a template tag');
+        }
+        return this.convertUse(current, ctx);
+      }
+      if (ts.isComputedPropertyName(outer)) return this.convertUse(current, ctx);
+      if (ts.isElementAccessExpression(outer) && outer.argumentExpression === current) return this.convertUse(current, ctx);
+      if ((ts.isPropertyAccessExpression(outer) || ts.isElementAccessExpression(outer)) && outer.expression === current) {
+        return this.memberUse(outer, ctx);
+      }
+      if (ts.isCallExpression(outer) && outer.expression === current) return this.refuseUse(ctx, current, 'the value is called');
+      if (ts.isNewExpression(outer) && outer.expression === current) return this.refuseUse(ctx, current, 'the value is constructed');
+      if (ts.isTaggedTemplateExpression(outer) && outer.tag === current) {
+        return this.refuseUse(ctx, current, 'the value is called as a template tag');
+      }
+      if ((ts.isCallExpression(outer) || ts.isNewExpression(outer)) && outer.arguments?.includes(current)) {
+        return this.argumentUse(outer, outer.arguments.indexOf(current), current, ctx, depth);
+      }
+      if (ts.isSpreadElement(outer)) {
+        const holder = outer.parent;
+        if (ts.isArrayLiteralExpression(holder) || ((ts.isCallExpression(holder) || ts.isNewExpression(holder)) &&
+            holder.arguments?.includes(outer))) return this.iterateUse(current, ctx);
+        return this.refuseUse(ctx, current, storeReason(outer, current));
+      }
+      if (ts.isSpreadAssignment(outer)) return this.copyUse(current, ctx);
+      if (ts.isForOfStatement(outer) && outer.expression === current) {
+        if (outer.awaitModifier) return this.refuseUse(ctx, current, 'for await calls the value\'s Symbol.asyncIterator');
+        return this.iterateUse(current, ctx);
+      }
+      if (ts.isForInStatement(outer) && outer.expression === current) return;
+      if (ts.isVariableDeclaration(outer) && outer.initializer === current) {
+        if (ts.isIdentifier(outer.name)) return this.aliasUse(outer.name, outer, ctx, depth);
+        if (ts.isObjectBindingPattern(outer.name)) return this.destructureUse(outer.name, current, ctx);
+        return this.iterateUse(current, ctx);
+      }
+      if (ts.isExportSpecifier(outer)) {
+        if (!outer.parent.parent.moduleSpecifier) ctx.exports.push({ name: outer.name.text, s: start(current, this.sourceFile) });
+        return;
+      }
+      if (ts.isExportAssignment(outer)) {
+        ctx.exports.push({ name: 'default', s: start(current, this.sourceFile) });
+        return;
+      }
+      return this.refuseUse(ctx, current, storeReason(outer, current));
+    }
+  }
+
+  // A conversion of the value to a primitive.
+  convertUse(node, ctx) {
+    const { kind, keys } = ctx.model;
+    if (kind === 'object') {
+      const hooks = CONVERSION_HOOKS.filter((name) => keys.includes(name));
+      if (hooks.length) {
+        return this.refuseUse(ctx, node, `converting the value to a primitive calls its own ${hooks.join(' or ')} with it as this`);
+      }
+    }
+    for (const prototype of PROTOTYPE_CHAINS[kind]) ctx.require(`${prototype}.@@toPrimitive`, `${prototype}.toString`, `${prototype}.valueOf`);
+    if (kind === 'array') ctx.require('Array.prototype.join');
+  }
+
+  // A member of the value, read or called.
+  memberUse(access, ctx) {
+    if (isWriteTarget(access)) return this.refuseUse(ctx, access, 'a member of the value is written');
+    const key = ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
+    const callee = outermostParentheses(access);
+    if (ts.isCallExpression(callee.parent) && callee.parent.expression === callee) return this.methodUse(key, callee.parent, access, ctx);
+    if (ts.isTaggedTemplateExpression(callee.parent) && callee.parent.tag === callee) {
+      return this.refuseUse(ctx, access, 'a member of the value is called as a template tag, with the value as this');
+    }
+    return this.readUse(key, access, ctx);
+  }
+
+  readUse(key, node, ctx) {
+    const { kind, accessors } = ctx.model;
+    if (kind === 'object') {
+      if (key === undefined ? accessors.length > 0 : accessors.includes(key)) {
+        return this.refuseUse(ctx, node, 'the read calls a getter of the value with the value as this');
+      }
+      return;
+    }
+    if ((kind === 'set' || kind === 'map') && key === 'size') ctx.require(`${CONTAINER_CONSTRUCTORS[kind]}.prototype.size`);
+  }
+
+  // A call of a member of the value, with the value as this.
+  methodUse(key, call, access, ctx) {
+    const { kind, keys } = ctx.model;
+    const method = key === undefined ? undefined : READ_METHODS[kind].get(key);
+    if (!method) {
+      return this.refuseUse(ctx, access, key === undefined ? 'a computed member of the value is called with the value as this'
+        : `${key} is called with the value as this, and it is not a read method of ${ARTICLES[kind]}`);
+    }
+    if (kind === 'object' && keys.includes(key)) {
+      return this.refuseUse(ctx, access, `the value has its own ${key}, which the call runs with the value as this`);
+    }
+    ctx.require(`${CONTAINER_CONSTRUCTORS[kind]}.prototype.${key}`);
+    if (method.species) ctx.require('Array.prototype.constructor', 'Array.@@species');
+    if (key === 'concat') ctx.require('Array.prototype.@@isConcatSpreadable');
+    if (method.container !== undefined) {
+      const problem = callbackProblem(call.arguments[0], method.container);
+      if (problem) this.refuseUse(ctx, call.arguments[0] ?? call, problem);
+    }
+  }
+
+  iterateUse(node, ctx) {
+    const { kind } = ctx.model;
+    if (kind === 'object') return this.refuseUse(ctx, node, 'the value is iterated, and an object literal has no iterator');
+    ctx.require(...ITERATION_REQUIRES[kind]);
+  }
+
+  // {...V}: the value's own enumerable members are read.
+  copyUse(node, ctx) {
+    if (ctx.model.kind === 'object' && ctx.model.accessors.length) {
+      return this.refuseUse(ctx, node, 'copying the members calls the value\'s getters with the value as this');
+    }
+  }
+
+  destructureUse(pattern, node, ctx) {
+    const elements = ts.isObjectBindingPattern(pattern) ? pattern.elements : pattern.properties;
+    for (const element of elements) {
+      if (ts.isSpreadAssignment(element) || element.dotDotDotToken) {
+        this.copyUse(node, ctx);
+        continue;
+      }
+      let key;
+      if (ts.isBindingElement(element)) key = element.propertyName ? memberKey(element.propertyName) : element.name.text;
+      else if (ts.isShorthandPropertyAssignment(element)) key = element.name.text;
+      else if (ts.isPropertyAssignment(element)) key = memberKey(element.name);
+      this.readUse(key, node, ctx);
+    }
+  }
+
+  // The dotted name of a free built-in an expression reads, such as Object.keys, or null.
+  freeBuiltinPath(expression) {
+    let current = unparenthesized(expression);
+    const parts = [];
+    while (ts.isPropertyAccessExpression(current) && !current.questionDotToken) {
+      parts.unshift(current.name.text);
+      current = unparenthesized(current.expression);
+    }
+    if (!ts.isIdentifier(current) || !BUILTINS.has(current.text) || GLOBAL_NAMES.has(current.text)) return null;
+    if (this.idOf(this.resolve(current)) !== null || insideWith(current)) return null;
+    return [current.text, ...parts].join('.');
+  }
+
+  // The value as the argument at position of a call or construction.
+  argumentUse(call, position, node, ctx, depth) {
+    const { kind, keys, accessors } = ctx.model;
+    const args = call.arguments;
+    if (args.slice(0, position).some(ts.isSpreadElement)) {
+      return this.refuseUse(ctx, node, 'a spread argument before the value hides the position at which it is passed');
+    }
+    const path = this.freeBuiltinPath(call.expression);
+    if (ts.isNewExpression(call)) {
+      const requires = path && COPYING_CONSTRUCTORS.get(path);
+      if (requires && position === 0 && args.length === 1 && kind !== 'object') {
+        ctx.require(...requires);
+        return this.iterateUse(node, ctx);
+      }
+      return this.refuseUse(ctx, node, 'the value is passed to a constructor the model does not list');
+    }
+    const reading = path ? READING_FUNCTIONS.get(path) : undefined;
+    if (reading) {
+      if (position !== 0 || args.length !== reading.argc) {
+        return this.refuseUse(ctx, node, `the model lists ${path} only with the value as its ${reading.argc === 2 ? 'first of two' : 'only'} argument`);
+      }
+      ctx.require(path);
+      if (kind === 'object' && reading.getters && accessors.length) {
+        return this.refuseUse(ctx, node, `${path} reads every member, which calls the value's getters with it as this`);
+      }
+      if (kind === 'object' && reading.hook && keys.includes(reading.hook)) {
+        return this.refuseUse(ctx, node, `${path} calls the value's own ${reading.hook} with it as this`);
+      }
+      if (reading.hook) ctx.require(...PROTOTYPE_CHAINS[kind].map((prototype) => `${prototype}.${reading.hook}`));
+      if (reading.iterates) return this.iterateUse(node, ctx);
+      if (reading.converts) return this.convertUse(node, ctx);
+      return;
+    }
+    if (path) return this.refuseUse(ctx, node, `the value is passed to ${path}, a built-in function the model does not list`);
+    return this.parameterUse(call, position, node, ctx, depth);
+  }
+
+  // The value passed to a function the module declares.
+  parameterUse(call, position, node, ctx, depth) {
+    if (!ts.isCallExpression(call)) return this.refuseUse(ctx, node, 'the value is passed to a template tag');
+    const callee = unparenthesized(call.expression);
+    if (!ts.isIdentifier(callee)) return this.refuseUse(ctx, node, 'the value is passed to a function the model cannot identify');
+    const symbol = this.resolve(callee);
+    if (!symbol || this.idOf(symbol) === null) return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, which the module does not declare`);
+    const examined = this.examine(symbol);
+    if (examined.refused.length) return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, a binding the binding model refuses`);
+    const declarations = declarationsIn(symbol, this.sourceFile);
+    let fn = declarations.length === 1 ? declarations[0] : undefined;
+    if (fn && ts.isVariableDeclaration(fn)) fn = unparenthesized(fn.initializer);
+    if (!fn || !(ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn) || ts.isArrowFunction(fn))) {
+      return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, which is not a function declaration or a variable holding a function`);
+    }
+    if (examined.occurrences.some((occurrence) => occurrence.roles.includes('write'))) {
+      return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, a variable that is written`);
+    }
+    if (depth >= 4) return this.refuseUse(ctx, node, 'the value is passed on more than four calls deep');
+    if (readsArguments(fn)) return this.refuseUse(ctx, node, `${callee.text} reads arguments, which hold the value`);
+    const rest = fn.parameters.findIndex((parameter) => parameter.dotDotDotToken);
+    if (rest !== -1 && rest <= position) return this.refuseUse(ctx, node, `a rest parameter of ${callee.text} receives the value`);
+    if (position >= fn.parameters.length) return;
+    const parameter = fn.parameters[position];
+    if (!ts.isIdentifier(parameter.name)) {
+      return this.refuseUse(ctx, node, `parameter ${position + 1} of ${callee.text}, which receives the value, is a pattern`);
+    }
+    ctx.queue.push({ id: this.idOf(this.resolve(parameter.name)), mode: 'value', names: new Set(), depth: depth + 1,
+      root: false, declaration: parameter });
+  }
+
+  aliasUse(name, declaration, ctx, depth) {
+    const id = this.idOf(this.resolve(name));
+    if (id === null) return this.refuseUse(ctx, name, 'the value is stored in a variable the module does not declare');
+    ctx.queue.push({ id, mode: 'value', names: new Set(), depth, root: false, declaration });
+  }
+
+  // Follows an expression whose value is a namespace holding the value under names.
+  namespaceUse(expression, names, ctx, depth) {
+    let current = expression;
+    for (;;) {
+      const outer = current.parent;
+      if (!outer) return;
+      if (ts.isParenthesizedExpression(outer)) {
+        current = outer;
+        continue;
+      }
+      if ((ts.isPropertyAccessExpression(outer) || ts.isElementAccessExpression(outer)) && outer.expression === current) {
+        const key = ts.isPropertyAccessExpression(outer) ? outer.name.text : literalKey(outer.argumentExpression);
+        if (key === undefined) return this.refuseUse(ctx, outer, 'a computed member of a namespace that holds the value');
+        if (isWriteTarget(outer)) return this.refuseUse(ctx, outer, 'a member of a namespace that holds the value is written');
+        const callee = outermostParentheses(outer);
+        if ((ts.isCallExpression(callee.parent) && callee.parent.expression === callee) ||
+            (ts.isTaggedTemplateExpression(callee.parent) && callee.parent.tag === callee)) {
+          return this.refuseUse(ctx, outer, 'a member of a namespace that holds the value is called with the namespace as this');
+        }
+        if (names.has(key)) return this.valueUse(outer, ctx, depth);
+        return;
+      }
+      if (ts.isVariableDeclaration(outer) && outer.initializer === current) {
+        if (ts.isIdentifier(outer.name)) {
+          const id = this.idOf(this.resolve(outer.name));
+          if (id === null) return this.refuseUse(ctx, outer.name, 'the namespace is stored in a variable the module does not declare');
+          ctx.queue.push({ id, mode: 'namespace', names, depth, root: false, declaration: outer });
+          return;
+        }
+        if (ts.isObjectBindingPattern(outer.name)) return this.namespacePattern(outer.name, names, ctx, depth);
+        return this.refuseUse(ctx, current, 'a namespace that holds the value is destructured as an array');
+      }
+      if (ts.isExpressionStatement(outer) || ts.isTypeOfExpression(outer) || ts.isVoidExpression(outer)) return;
+      if (ts.isPrefixUnaryExpression(outer) && outer.operator === K.ExclamationToken) return;
+      if (ts.isBinaryExpression(outer) && [K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken].includes(outer.operatorToken.kind)) return;
+      if (ts.isAwaitExpression(outer)) return this.refuseUse(ctx, current, 'await calls a then member of a namespace that holds the value');
+      return this.refuseUse(ctx, current, 'a namespace that holds the value is used outside the forms the model follows');
+    }
+  }
+
+  // An object pattern that destructures a namespace holding the value under names.
+  namespacePattern(pattern, names, ctx, depth) {
+    for (const element of pattern.elements) {
+      if (element.dotDotDotToken) return this.refuseUse(ctx, element, 'a rest element collects the members of a namespace that holds the value');
+      const key = element.propertyName ? memberKey(element.propertyName) : ts.isIdentifier(element.name) ? element.name.text : undefined;
+      if (key === undefined) return this.refuseUse(ctx, element, 'a computed key destructures a namespace that holds the value');
+      if (!names.has(key)) continue;
+      if (element.initializer && !isLiteralExpression(element.initializer)) {
+        this.refuseUse(ctx, element, 'the member that holds the value has a default that runs code');
+        continue;
+      }
+      if (!ts.isIdentifier(element.name)) {
+        this.refuseUse(ctx, element, 'the member that holds the value is destructured further');
+        continue;
+      }
+      const id = this.idOf(this.resolve(element.name));
+      if (id === null) {
+        this.refuseUse(ctx, element, 'the member that holds the value is bound to a name the module does not declare');
+        continue;
+      }
+      ctx.queue.push({ id, mode: 'value', names: new Set(), depth, root: false, declaration: element });
+    }
+  }
+
+  // A pattern that receives a namespace holding the value under names: a variable or an object pattern.
+  namespaceTarget(element, names, ctx, depth) {
+    if (element.initializer && !isLiteralExpression(element.initializer)) {
+      return this.refuseUse(ctx, element, 'the namespace has a default that runs code');
+    }
+    if (ts.isIdentifier(element.name)) {
+      const id = this.idOf(this.resolve(element.name));
+      if (id === null) return this.refuseUse(ctx, element, 'the namespace is bound to a name the module does not declare');
+      ctx.queue.push({ id, mode: 'namespace', names, depth, root: false, declaration: element });
+      return;
+    }
+    if (ts.isObjectBindingPattern(element.name)) return this.namespacePattern(element.name, names, ctx, depth);
+    return this.refuseUse(ctx, element, 'the namespace is destructured as an array');
+  }
+
+  // The promise from import(M), whose module's namespace holds the value under names.
+  importPromiseUse(call, names, ctx) {
+    const current = outermostParentheses(call);
+    const outer = current.parent;
+    if (ts.isAwaitExpression(outer)) return this.namespaceUse(outer, names, ctx, 0);
+    if (ts.isExpressionStatement(outer)) return;
+    if (ts.isPropertyAccessExpression(outer) && outer.expression === current && outer.name.text === 'then' &&
+        ts.isCallExpression(outer.parent) && outer.parent.expression === outer) {
+      return this.thenUse(outer.parent, (parameter) => this.namespaceTarget(parameter, names, ctx, 0), ctx);
+    }
+    if (ts.isArrayLiteralExpression(outer)) return this.promiseAllUse(outer, outer.elements.indexOf(current), names, ctx);
+    return this.refuseUse(ctx, current, 'the promise of a namespace that holds the value is used outside the forms the model follows');
+  }
+
+  // promise.then(callback): receive is given the callback's first parameter.
+  thenUse(call, receive, ctx) {
+    const callback = unparenthesized(call.arguments[0]);
+    if (!callback || !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
+      return this.refuseUse(ctx, call, 'then is given a callback that is not an arrow or function expression written in the call');
+    }
+    if (ts.isFunctionExpression(callback) && readsArguments(callback)) {
+      return this.refuseUse(ctx, callback, 'the callback reads arguments, which hold what the promise gives');
+    }
+    ctx.require('Promise.prototype.then');
+    const first = callback.parameters[0];
+    if (!first) return;
+    if (first.dotDotDotToken) return this.refuseUse(ctx, first, 'a rest parameter receives what the promise gives');
+    return receive(first);
+  }
+
+  // import(M) as the element at index of the array literal given to Promise.all.
+  promiseAllUse(array, index, names, ctx) {
+    if (array.elements.slice(0, index).some(ts.isSpreadElement)) {
+      return this.refuseUse(ctx, array, 'a spread element before the import hides its position');
+    }
+    const all = outermostParentheses(array).parent;
+    if (!ts.isCallExpression(all) || all.arguments[0] !== outermostParentheses(array) || this.freeBuiltinPath(all.expression) !== 'Promise.all') {
+      return this.refuseUse(ctx, array, 'an array holding the promise of a namespace that holds the value is used outside Promise.all');
+    }
+    ctx.require('Promise.all', 'Promise.resolve', 'Promise.prototype.then', ...ITERATION_REQUIRES.array);
+    const element = (pattern) => {
+      for (const [position, item] of pattern.elements.entries()) {
+        if (position > index) break;
+        if (ts.isBindingElement(item) && item.dotDotDotToken) {
+          return this.refuseUse(ctx, item, 'a rest element collects the namespace that holds the value');
+        }
+      }
+      const item = pattern.elements[index];
+      if (!item || ts.isOmittedExpression(item)) return;
+      return this.namespaceTarget(item, names, ctx, 0);
+    };
+    const current = outermostParentheses(all);
+    const outer = current.parent;
+    if (ts.isAwaitExpression(outer)) {
+      const awaited = outermostParentheses(outer);
+      const holder = awaited.parent;
+      if (ts.isExpressionStatement(holder)) return;
+      if (ts.isVariableDeclaration(holder) && holder.initializer === awaited && ts.isArrayBindingPattern(holder.name)) return element(holder.name);
+      return this.refuseUse(ctx, outer, 'the namespaces Promise.all gives are used outside the forms the model follows');
+    }
+    if (ts.isExpressionStatement(outer)) return;
+    if (ts.isPropertyAccessExpression(outer) && outer.expression === current && outer.name.text === 'then' &&
+        ts.isCallExpression(outer.parent) && outer.parent.expression === outer) {
+      return this.thenUse(outer.parent, (parameter) => {
+        if (parameter.initializer && !isLiteralExpression(parameter.initializer)) {
+          return this.refuseUse(ctx, parameter, 'the namespaces have a default that runs code');
+        }
+        if (!ts.isArrayBindingPattern(parameter.name)) {
+          return this.refuseUse(ctx, parameter, 'the array of namespaces Promise.all gives is not destructured');
+        }
+        return element(parameter.name);
+      }, ctx);
+    }
+    return this.refuseUse(ctx, current, 'the promise Promise.all gives is used outside the forms the model follows');
+  }
+
   // Every occurrence of a binding, declarations included, or {refused} for a binding the model refuses.
   occurrences(id) {
     const { occurrences, refused } = this.examine(this.symbolOfId(id));
@@ -2425,6 +3148,8 @@ let lastFacts = null;
 //   text {s, e}              a slice of the module's text
 //   comments                 the comments before the module's first token
 //   premise {seeds}          the built-in scan with the module's bindings (Facts.premise)
+//   uses {id, model, mode, names}  the uses of a value under the operation model (Facts.uses)
+//   loadUse {handle, model, names} the uses of a namespace from an import() or import.meta.require call
 function factsBatch(request) {
   const module = moduleOf(request.module);
   if (lastFacts?.module !== module) {
@@ -2458,6 +3183,12 @@ function factsBatch(request) {
         break;
       case 'premise':
         results.push(facts.premise(query.seeds ?? []));
+        break;
+      case 'uses':
+        results.push(facts.uses(query));
+        break;
+      case 'loadUse':
+        results.push(facts.loadUse(query));
         break;
       case 'bindingAt': {
         const found = facts.find(query.s, query.e, 'Identifier');
@@ -2513,6 +3244,8 @@ function answer(request) {
       return index(request);
     case 'facts':
       return factsBatch(request);
+    case 'vocabulary':
+      return { operations: [...OPERATION_VOCABULARY].sort() };
     default:
       throw new RequestError(`unknown op ${JSON.stringify(request.op)}`);
   }

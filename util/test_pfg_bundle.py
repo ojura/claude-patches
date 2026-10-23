@@ -67,6 +67,12 @@ def test_needles_with_one_key_twice_or_an_unknown_type_are_refused():
         build("", needles=[pb.Needle("k", "regex", "a")])
 
 
+def test_needle_hits_come_from_every_module_in_order():
+    with build('var a="flag";', 'var b=["flag","other","flag"];', 'var c=1;', 'f(`flag`);',
+               needles=[pb.Needle("flag", "string", "flag")]) as bundle:
+        assert [(index, hit["s"]) for index, hit in bundle.hits("flag")] == [(0, 6), (1, 7), (1, 22), (3, 2)]
+
+
 def test_needles_hit_syntax_only():
     with build('var x=k("flag",{list:[]});// k("flag")\nvar s=\'"flag"\';o.list;',
                needles=[pb.Needle("s", "string", "flag"), pb.Needle("p", "property", "list"),
@@ -560,17 +566,22 @@ def writing_programs(key):
     return programs
 
 
+def assert_writes_produced(keys):
+    """Every program of writing_programs(key), each in a module of its own, gives a write to key."""
+    programs = [(key, program) for key in keys for program in writing_programs(key)]
+    with build(*(program for _, program in programs)) as bundle:
+        scans = bundle.builtin_scan()
+    for index, (key, program) in enumerate(programs):
+        assert key in {entry["target"] for entry in scans[index]["writes"]}, program
+
+
 def test_every_dependency_key_of_a_proof_is_a_write_the_scan_can_produce():
     with build(PROOFS) as bundle:
         summary = bundle.builtin_summary(bundle.builtin_scan())
     keys = sorted({key for category in ("writes", "globalWrites", "registryWrites") for entry in summary[category]
                    for key in entry.get("keyRequires", [])})
     assert keys == ["%ArrayIteratorPrototype%.next", "Array.prototype.@@iterator", "Object.entries", "Symbol.for", "Symbol.iterator"]
-    for key in keys + ["%SetIteratorPrototype%.next", "%MapIteratorPrototype%.next", "%StringIteratorPrototype%.next", "Set"]:
-        for program in writing_programs(key):
-            with build(program) as bundle:
-                summary = bundle.builtin_summary(bundle.builtin_scan())
-            assert key in {entry["target"] for entry in summary["writes"]}, program
+    assert_writes_produced(keys + ["%SetIteratorPrototype%.next", "%MapIteratorPrototype%.next", "%StringIteratorPrototype%.next", "Set"])
     # And each such write invalidates the proofs that depend on its key.
     for key in keys:
         with build(PROOFS, writing_programs(key)[0]) as bundle:

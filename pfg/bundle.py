@@ -22,8 +22,9 @@ Failures:
 REVISION is the number in pfg/REVISION as this process read it when it imported this module. The helper
 reads the same file when it starts and reports its number; a difference means pfg changed under a running
 process, which the client refuses. The number changes with every change that alters what pfg extracts:
-in this module, in pfg/js/facts.mjs and what it imports, in the vendored TypeScript, and in bun_handler's
-decoding of module sources (UTF-8, Latin-1 and UTF-16 storage, single-module builds, module identity).
+in this module, in pfg/values.py, in pfg/js/facts.mjs and what it imports, in the vendored TypeScript,
+and in bun_handler's decoding of module sources (UTF-8, Latin-1 and UTF-16 storage, single-module builds,
+module identity).
 Maintainers must raise this revision; a code change alone does not invalidate a cached catalog.
 """
 import bisect
@@ -437,6 +438,11 @@ class Bundle:
     def typescript_version(self):
         return self._helper.typescript
 
+    def operation_vocabulary(self):
+        """Every built-in operation a use of a value can require in the helper's operation model
+        (facts.mjs, OPERATION_VOCABULARY), as dotted paths such as Set.prototype.has."""
+        return self._helper.request("vocabulary")["operations"]
+
     # -- the index -------------------------------------------------------------------------------------
 
     def module(self, index):
@@ -690,7 +696,7 @@ class Bundle:
                     changed.add(target)
             for target in sorted(changed):
                 values, unknown = exported[target]
-                for importer, at in self._importers(target):
+                for importer, at, _ in self.importers(target):
                     given_before = seeds[importer].get(at, (frozenset(), False))
                     seed = (given_before[0] | values, given_before[1] or unknown)
                     if seed != given_before:
@@ -700,10 +706,11 @@ class Bundle:
             scans[importer] = {**scans[importer], "unfollowed": sorted([*scans[importer]["unfollowed"], entry], key=lambda u: u["s"])}
         return scans
 
-    def _importers(self, target):
-        """(module, position of the local name) of every import by name that reaches target, an export()
-        result. Modules with parse diagnostics have no links and import nothing. The reverse index is built
-        once, instead of resolving every import again for each exported built-in value."""
+    def importers(self, target):
+        """(module, position, local name) of every import by name or default that reaches target, an
+        export() result: the import binding is the identifier at position. Modules with parse diagnostics
+        have no links and import nothing. The reverse index is built once, instead of resolving every
+        import again for each target."""
         if self._importers_by_target is None:
             reverse = collections.defaultdict(list)
             for index in sorted(self.records):
@@ -712,15 +719,15 @@ class Bundle:
                 for load in self.loads(index):
                     if load["k"] != "import" or load.get("t") is None:
                         continue
-                    named = [(imported, position) for imported, _, position in load.get("named", [])]
+                    named = [(imported, local, position) for imported, local, position in load.get("named", [])]
                     if "default" in load:
-                        named.append(("default", load["default"][1]))
-                    for imported, position in named:
+                        named.append(("default", load["default"][0], load["default"][1]))
+                    for imported, local, position in named:
                         try:
                             resolved = self.export(load["t"], imported)
                         except Unresolved:
                             continue
-                        reverse[resolved].append((index, position))
+                        reverse[resolved].append((index, position, local))
             self._importers_by_target = reverse
         return list(self._importers_by_target.get(target, ()))
 
