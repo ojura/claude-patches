@@ -1866,6 +1866,16 @@ class Facts {
   }
 
   // The identifiers of the module that are not property names, by spelling, found in one walk.
+  // The local symbol of each exported declaration in the module's scope table, by its export symbol.
+  exportLocals() {
+    if (this.locals) return this.locals;
+    this.locals = new Map();
+    this.sourceFile.locals?.forEach((local) => {
+      if (local.exportSymbol) this.locals.set(local.exportSymbol, local);
+    });
+    return this.locals;
+  }
+
   identifierIndex() {
     if (this.identifiers) return this.identifiers;
     const index = new Map();
@@ -1910,6 +1920,17 @@ class Facts {
     for (const declaration of declarations) {
       if (!isModelledDeclaration(declaration)) {
         refuse(declaration, `it is declared by a ${kindName(declaration)}, which the binding model does not cover`);
+      }
+    }
+    // An exported declaration also has a local symbol in the module's scope table, whose exportSymbol is
+    // the export symbol (bindingSymbol). Another declaration of the name at the module's top level goes
+    // into that local symbol only: `export var x=1;var x=2;` is one JavaScript binding, and
+    // `export function f(){}function f(){}` a module JavaScript rejects. Either way the export symbol's
+    // declarations leave it out, so the binding is refused.
+    for (const declaration of declarationsIn(this.exportLocals().get(symbol) ?? { declarations: [] }, sourceFile)) {
+      if (!declarations.includes(declaration)) {
+        refuse(declaration, 'the module declares the name again besides its exported declaration, which TypeScript keeps in ' +
+          'another symbol');
       }
     }
     const modelled = declarations.filter(isModelledDeclaration);

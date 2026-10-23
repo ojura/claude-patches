@@ -393,6 +393,19 @@ test('declarations TypeScript keeps apart but JavaScript merges refuse both bind
       assert.ok(occurrences.refused.length > 0);
     });
   }
+  // An exported declaration and another top-level declaration of its name: TypeScript gives the export
+  // symbol only the exported one and keeps the other in the local symbol, so the binding is refused.
+  for (const text of ['export function fo(e){return e.a}function fo(e){e.a=1}', 'export var x=1;var x=2;']) {
+    await withHelper([[0, '/a.js', text]], async (h) => {
+      const name = text.includes('fo') ? 'fo' : 'x';
+      assert.match(await refusedReasons(h, 0, text, name), /declares the name again besides its exported declaration/, text);
+    });
+  }
+  for (const text of ['export function fo(e){return e.a}', 'var x=1;var x=2;export{x}']) {
+    await withHelper([[0, '/a.js', text]], async (h) => {
+      assert.equal(await refusedReasons(h, 0, text, text.includes('fo') ? 'fo' : 'x'), '', text);
+    });
+  }
   // Declarations in separate scopes keep separate bindings.
   const nested = 'function outer(){var V=1;function nested(){function V(){}return V}return V}';
   await withHelper([[0, '/a.js', nested]], async (h) => {
