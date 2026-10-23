@@ -9,7 +9,7 @@ import { join } from "node:path";
 // server's socket name, so when it changes, new hooks prepare a new directory
 // and start new servers, while a server running the previous code gets no more
 // requests and exits when its idle time runs out.
-export const LAYOUT = 3;
+export const LAYOUT = 4;
 
 // The result carries a dangerousRemoval safety check somewhere in its decision
 // reason (compound commands nest them under subcommandResults). Returns the
@@ -31,7 +31,12 @@ export function dangerousRemovalMessage(result) {
   return walk(result);
 }
 
-function permissionContext(mode) {
+// The parts of a tool-use context that the Bash tool's checkPermissions reads
+// for a command: the permission settings, options.isNonInteractiveSession
+// (2.1.309), the abort signal and the tool-use id, and session's
+// writePermissionStash, which 2.1.303 to 2.1.305 call when the command edits a
+// file with sed.
+function toolUseContext(mode) {
   const toolPermissionContext = {
     mode,
     additionalWorkingDirectories: new Map(),
@@ -39,7 +44,13 @@ function permissionContext(mode) {
     isBypassPermissionsModeAvailable: true,
     mcpPermissionModeOverrides: {},
   };
-  return { getAppState: () => ({ toolPermissionContext }), abortController: new AbortController() };
+  return {
+    getAppState: () => ({ toolPermissionContext }),
+    options: { isNonInteractiveSession: false },
+    abortController: new AbortController(),
+    toolUseId: "rm-check",
+    session: { writePermissionStash: { stash() {} } },
+  };
 }
 
 // The self-test's directories. The check only compares and resolves these
@@ -95,49 +106,48 @@ async function attempt(fn) {
 // sets originalCwd, then runs inside runInCwd with the request's working
 // directory. originalCwd is process-wide, so calls must not overlap.
 //
-// prepare.py lists candidates for the three functions, found by the structure
-// the hook depends on. Here the check is the one candidate that flags
-// `rm -rf /`, and exactly one pair of directory functions must make it give
-// PROBES' verdicts. Anything else throws with what each candidate did, and the
-// hook fails open with that text.
+// prepare.py finds the Bash tool and the two directory functions with the
+// structural matcher, and lists what it found. Here the check is the one tool
+// whose checkPermissions flags `rm -rf /`, and exactly one pair of directory
+// functions must make it give PROBES' verdicts. Anything else throws with what
+// each candidate did, and the hook fails open with that text.
 export async function loadCheck(dir) {
   const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-  const chunks = new Map();
-  const candidates = async (role) => {
+  const candidates = async (role, usable) => {
     const found = [];
-    for (const { chunk, fn } of manifest[role] ?? []) {
-      if (!chunks.has(chunk)) chunks.set(chunk, (await import(join(dir, chunk)))[manifest.export] ?? {});
-      const f = chunks.get(chunk)[fn];
-      if (typeof f === "function") found.push({ name: `${fn} in ${chunk}`, f });
+    for (const { chunk, name, export: exported } of manifest[role] ?? []) {
+      const value = (await import(join(dir, chunk)))[exported];
+      if (usable(value)) found.push({ name: `${name} in ${chunk}`, value });
     }
     if (found.length === 0) {
-      throw new Error(`the ${manifest.version} bundle offers no ${role} function: none of prepare.py's ` +
-        `candidates ${JSON.stringify(manifest[role])} is a function at the module level of its chunk`);
+      throw new Error(`the ${manifest.version} bundle offers no usable ${role}: prepare.py found ` +
+        `${JSON.stringify(manifest[role])}`);
     }
     return found;
   };
-  const checks = await candidates("check");
-  const runs = await candidates("runInCwd");
-  const origins = await candidates("setOriginalCwd");
+  const isFunction = (v) => typeof v === "function";
+  const tools = await candidates("tool", (v) => isFunction(v?.checkPermissions));
+  const runs = await candidates("runInCwd", isFunction);
+  const origins = await candidates("setOriginalCwd", isFunction);
 
   const rootFlaggers = [];
   const rootReport = [];
-  for (const c of checks) {
-    const r = await attempt(() => c.f({ command: "rm -rf /" }, permissionContext("bypassPermissions")));
+  for (const t of tools) {
+    const r = await attempt(() => t.value.checkPermissions({ command: "rm -rf /" }, toolUseContext("bypassPermissions")));
     const message = r.error === undefined ? dangerousRemovalMessage(r.value) : undefined;
-    rootReport.push(`${c.name} ${r.error !== undefined ? `threw: ${r.error}` : message !== undefined ? "flagged it" : "did not flag it"}`);
-    if (message !== undefined) rootFlaggers.push(c);
+    rootReport.push(`${t.name} ${r.error !== undefined ? `threw: ${r.error}` : message !== undefined ? "flagged it" : "did not flag it"}`);
+    if (message !== undefined) rootFlaggers.push(t);
   }
   if (rootFlaggers.length !== 1) {
-    throw new Error(`the ${manifest.version} check could not be identified: of the functions the Bash tool ` +
-      `passes its shell permission context to, ${rootFlaggers.length} flag "rm -rf /" as a dangerous ` +
-      `removal, where exactly 1 should: ${rootReport.join("; ")}`);
+    throw new Error(`the ${manifest.version} check could not be identified: of the Bash tools prepare.py ` +
+      `found, ${rootFlaggers.length} flag "rm -rf /" as a dangerous removal, where exactly 1 should: ` +
+      rootReport.join("; "));
   }
-  const check = rootFlaggers[0].f;
+  const tool = rootFlaggers[0].value;
 
   const run = async (runInCwd, setOriginalCwd, { command, cwd, originalCwd, mode }) => {
     setOriginalCwd(originalCwd);
-    const result = await runInCwd(cwd, () => check({ command }, permissionContext(mode)));
+    const result = await runInCwd(cwd, () => tool.checkPermissions({ command }, toolUseContext(mode)));
     return dangerousRemovalMessage(result) ?? null;
   };
   const passing = [];
@@ -146,7 +156,7 @@ export async function loadCheck(dir) {
     for (const o of origins) {
       const wrong = [];
       for (const [i, p] of PROBES.entries()) {
-        const got = await attempt(() => run(r.f, o.f, { command: PROBE_COMMAND, cwd: p.cwd,
+        const got = await attempt(() => run(r.value, o.value, { command: PROBE_COMMAND, cwd: p.cwd,
           originalCwd: p.originalCwd, mode: "bypassPermissions" }));
         if (got.error !== undefined) wrong.push(`probe ${i + 1} threw: ${got.error}`);
         else if ((got.value !== null) !== p.flagged) {
@@ -155,7 +165,7 @@ export async function loadCheck(dir) {
         }
       }
       pairReport.push(`${r.name} with ${o.name}: ${wrong.length === 0 ? "passed" : wrong.join("; ")}`);
-      if (wrong.length === 0) passing.push([r.f, o.f]);
+      if (wrong.length === 0) passing.push([r.value, o.value]);
     }
   }
   if (passing.length !== 1) {

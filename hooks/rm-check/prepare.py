@@ -7,31 +7,37 @@ Usage: prepare.py <claude-executable> <version> <modules directory>
 The hook names the modules directory: ~/.cache/rm-check/<version>/modules-v<N>
 (under $XDG_CACHE_HOME when it is set), where N is LAYOUT in rm-check-lib.mjs.
 prepare.py extracts the bundle to claude.js next to that directory with
-bun_handler/bun_handler.py, unless that file already exists, and writes the
-bundle's modules into the directory. Each chunk that holds a candidate for one
-of three roles gets an object __ccRmCheck with its candidates:
+bun_handler/bun_handler.py, unless that file already exists, finds three things
+in it with pfg.bundle, the structural matcher, writes the bundle's modules into
+the directory, and exports what it found from the chunks that hold it:
 
-  - check: the function that decides a Bash command's permission. The Bash
-    tool's module is the one module that holds the tool's searchHint
-    "execute shell commands" (SEARCH_HINT), and the candidates are the
-    functions that module passes an input and a context's shellPermission to,
-    `F(input,ctx.shellPermission` (SHELL_PERMISSION_CALL);
-  - runInCwd: the functions that run a callback with {cwd: dir} in an
-    AsyncLocalStorage store, `function F(dir,fn){return S.run({cwd:dir},fn)}`
-    with or without a call around dir (CWD_RUN);
-  - setOriginalCwd: the functions that set the session's original working
-    directory, `function F(dir){U({originalCwd:dir})}` (ORIGINAL_CWD_SET).
+  - tool (TOOL_HINT, TOOL_NAME): the Bash tool, a module-level
+    `var T = F({name: N, ..., searchHint: "execute shell commands", ...})`
+    whose N is the string "Bash", read through an import where there is one.
+    The hook calls T.checkPermissions, the method Claude Code calls for the
+    tool's permission verdict, with every wrapper Claude Code puts around the
+    check;
+  - runInCwd (CWD): a module-level `function F(dir, fn) {return S.run({cwd:
+    dir}, fn)}`, with or without a call around dir, which runs fn with
+    {cwd: dir} in an AsyncLocalStorage store. Claude Code runs a session's and
+    a subagent's work inside it, and the check reads its working directory
+    from that store;
+  - setOriginalCwd (ORIGINAL_CWD): a module-level
+    `function F(dir) {U({originalCwd: dir})}`, which sets the session's
+    original working directory. With the --add-dir directories it makes up
+    the session's working directories, and the check follows a cd only into
+    those.
 
-These anchors name only the facts the hook's use of the check depends on. A
-role can have several candidates: on 2.1.309 the Bash tool passes its context
-to the permission function, to a crash guard and to a sandbox-override step.
-rm-check-lib.mjs picks the check among them by what each one does with
-`rm -rf /`, and verifies the three together on synthetic directories when it
-loads them, so a candidate that only looks right is refused there.
+The text in NOMINATE picks the modules to parse, and the matcher decides from
+their syntax and bindings. On 2.1.309 that parses 5 modules in about 4 s; the
+whole bundle takes 11 s. rm-check-lib.mjs then verifies by behaviour, on
+synthetic directories, that the three work together, so a match that only
+looks right is refused there.
 
-All anchors are tried on every run, and every anchor that finds nothing is
-reported by name, so a vendor refactor shows each place to re-anchor at once.
-They found their candidates on 2.1.303, 2.1.304, 2.1.305 and 2.1.309.
+Every anchor is tried, and each one that finds nothing, or more than
+MAX_CANDIDATES, is reported by name. pfg.bundle runs its helper on the node
+that npm runs under, or else the first node on PATH. The anchors found their
+matches on 2.1.303, 2.1.304, 2.1.305 and 2.1.309.
 """
 import json
 import os
@@ -41,38 +47,27 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "bun_handler"))
 
 import bun_handler  # noqa: E402
+from pfg import bundle as pb  # noqa: E402
 
-ID = r"[A-Za-z_$][\w$]*"
-SEARCH_HINT = 'searchHint:"execute shell commands"'
-# The Bash tool passes its input and its shell permission context to the
-# function that decides the permission. 2.1.305: return Lvr(n,s.shellPermission,
-# void 0,cb); 2.1.309: return bJn(n,s.shellPermission,await _Rr(n,
-# s.shellPermission,void 0,cb),"chosenVerdict"), where bJn handles a request to
-# run outside the sandbox.
-SHELL_PERMISSION_CALL = rf"(?<![\w$.])(?P<fn>{ID})\({ID},{ID}\.shellPermission[,)]"
-# Claude Code runs a session's work, and a subagent's, inside F(dir, fn), which
-# keeps {cwd: dir} in an AsyncLocalStorage store for fn and everything it calls;
-# the permission check reads its working directory from that store. 2.1.305:
-# function hg(e,o){return n.run({cwd:Un(e)},o)}; 2.1.309: function Dg(e,o){return
-# n.run({cwd:On(e)},o)}.
-CWD_RUN = (
-    rf"function (?P<fn>{ID})\(({ID}),({ID})\)\{{return {ID}\.run\("
-    rf"\{{cwd:(?:{ID}\()?\2\)?(?:,[^{{}}]*)?\}},\3\)\}}"
-)
-# The session's original working directory counts, with the --add-dir
-# directories, as the session's working directories, and the check follows a cd
-# only into those. The bundle sets it from process.cwd() when it loads; Claude
-# Code changes it with F when it moves a session to another directory, such as
-# a worktree. 2.1.305: function MP(e){vbn({originalCwd:e})}; 2.1.309: function
-# mI(e){DEn({originalCwd:e})}.
-ORIGINAL_CWD_SET = rf"function (?P<fn>{ID})\(({ID})\)\{{(?:return )?{ID}\(\{{originalCwd:\2\}}\)\}}"
-# More candidates than this for one role means an anchor matches more than the
-# functions it is meant for. rm-check-lib.mjs calls every check candidate once
-# and runs every pair of directory functions through its self-test, so the
-# number also bounds that work.
+TOOL_HINT = "execute shell commands"
+TOOL_NAME = "Bash"
+# The text that picks the modules to parse for each role.
+NOMINATE = {"tool": f'"{TOOL_HINT}"', "runInCwd": ".run({cwd:", "setOriginalCwd": "({originalCwd:"}
+NEEDLES = [pb.Needle("tool", "string", TOOL_HINT), pb.Needle("runInCwd", "property", "cwd"),
+           pb.Needle("setOriginalCwd", "property", "originalCwd")]
+ANCHORS = {
+    "tool": f"TOOL_HINT: a module-level `var T = F({{name: N, ..., searchHint: \"{TOOL_HINT}\"}})` "
+            f"with N the string \"{TOOL_NAME}\"",
+    "runInCwd": "CWD: a module-level `function F(dir, fn) {return S.run({cwd: dir}, fn)}`",
+    "setOriginalCwd": "ORIGINAL_CWD: a module-level `function F(dir) {U({originalCwd: dir})}`",
+}
+# More matches than this for one role means an anchor matches more than it is
+# meant for. rm-check-lib.mjs calls every tool once and runs every pair of
+# directory functions through its self-test, so the number also bounds that.
 MAX_CANDIDATES = 8
 EXPORT = "__ccRmCheck"
 # Every layout's modules directory: "modules" before layouts were numbered,
@@ -83,56 +78,213 @@ BUNFS = b"/$bunfs/root/"
 
 
 def module_name(name):
-    return name.decode().split("/$bunfs/root/", 1)[-1]
+    return name.split("/$bunfs/root/", 1)[-1]
+
+
+def up(handle, steps):
+    """The handle of the node steps levels above the node at handle."""
+    return ".".join(handle.split(".")[:-steps])
+
+
+def kinds(chain, n):
+    return [step["k"] for step in chain[:n]]
+
+
+def is_module_statement(handle):
+    return handle != "" and "." not in handle
+
+
+def module_function(b, index, handle, params):
+    """The syntax of the function declaration at handle when it is a statement
+    of its module, takes params parameters and has one statement; else None."""
+    if not is_module_statement(handle):
+        return None
+    fn = b.syntax(index, handle, 4)
+    if (fn["k"] != "FunctionDeclaration" or len(fn.get("parameters", [])) != params
+            or len(fn["body"].get("statements", [])) != 1):
+        return None
+    return fn
+
+
+def parameter_bindings(fn):
+    return [p["name"].get("b") for p in fn["parameters"]]
+
+
+def tool_matches(b, modules):
+    """(module index, variable, syntax of the name property's value) of each
+    `var T = F({..., searchHint: TOOL_HINT, ...})` statement in modules."""
+    found = []
+    for index, hit in b.hits("tool"):
+        chain = hit["chain"]
+        if index not in modules:
+            continue
+        if kinds(chain, 6) != ["PropertyAssignment", "ObjectLiteralExpression", "CallExpression",
+                               "VariableDeclaration", "VariableDeclarationList", "VariableStatement"]:
+            continue
+        if (chain[0].get("key") != "searchHint" or chain[2]["f"] != "arguments"
+                or not is_module_statement(up(hit["h"], 6))):
+            continue
+        variable = b.syntax(index, up(hit["h"], 4), 1)["name"]["text"]
+        names = [p for p in b.syntax(index, up(hit["h"], 2), 2)["properties"] if p.get("key") == "name"]
+        found.append((index, variable, names[0].get("initializer") if len(names) == 1 else None))
+    return found
+
+
+def run_matches(b, modules):
+    """(module index, name) of each module-level
+    `function F(dir, fn) {return S.run({cwd: dir}, fn)}` in modules; dir may
+    sit in a call."""
+    found = []
+    for index, hit in b.hits("runInCwd"):
+        chain = hit["chain"]
+        if index not in modules:
+            continue
+        if kinds(chain, 4) != ["PropertyAssignment", "ObjectLiteralExpression", "CallExpression",
+                               "ReturnStatement"]:
+            continue
+        if chain[0]["f"] != "name" or chain[2]["f"] != "arguments" or chain[2].get("i") != 0 \
+                or chain[2].get("argc") != 2:
+            continue
+        fn = module_function(b, index, up(hit["h"], 6), 2)
+        if fn is None:
+            continue
+        directory, callback = parameter_bindings(fn)
+        call = b.syntax(index, up(hit["h"], 3), 3)
+        if call["expression"]["k"] != "PropertyAccessExpression" or call["expression"]["name"]["text"] != "run":
+            continue
+        # A parameter that is a destructuring pattern has no binding id, and a
+        # free name has a null one, so each id must be present to compare.
+        second = call["arguments"][1]
+        if second["k"] != "Identifier" or not callback or second.get("b") != callback:
+            continue
+        value = b.syntax(index, up(hit["h"], 1), 3)["initializer"]
+        if value["k"] == "CallExpression" and len(value.get("arguments", [])) == 1:
+            value = value["arguments"][0]
+        if value["k"] == "Identifier" and directory and value.get("b") == directory:
+            found.append((index, fn["name"]["text"]))
+    return found
+
+
+def origin_matches(b, modules):
+    """(module index, name) of each module-level
+    `function F(dir) {U({originalCwd: dir})}` in modules."""
+    found = []
+    for index, hit in b.hits("setOriginalCwd"):
+        chain = hit["chain"]
+        if index not in modules:
+            continue
+        if kinds(chain, 4) != ["PropertyAssignment", "ObjectLiteralExpression", "CallExpression",
+                               "ExpressionStatement"]:
+            continue
+        if chain[0]["f"] != "name" or chain[1].get("n") != 1 or chain[2]["f"] != "arguments" \
+                or chain[2].get("argc") != 1:
+            continue
+        fn = module_function(b, index, up(hit["h"], 6), 1)
+        if fn is None:
+            continue
+        value = b.syntax(index, up(hit["h"], 1), 2)["initializer"]
+        directory = parameter_bindings(fn)[0]
+        if value["k"] == "Identifier" and directory and value.get("b") == directory:
+            found.append((index, fn["name"]["text"]))
+    return found
+
+
+def string_value(b, index, node):
+    """The string a module-level name's initializer holds: ("value", text), or
+    ("import", module name, exported name) when the name is imported, or None."""
+    if node is None:
+        return None
+    if node["k"] == "StringLiteral":
+        return ("value", node.get("value"))
+    if node["k"] != "Identifier" or not node.get("b"):
+        return None
+    declarations = b.binding(index, node["b"]).get("declarations", [])
+    if len(declarations) != 1 or not declarations[0].get("module"):
+        return None
+    declaration = declarations[0]
+    if declaration["kind"] == "import":
+        return ("import", declaration["import"]["spec"], declaration["import"]["imported"])
+    init = declaration.get("init")
+    if declaration["kind"] not in ("var", "let", "const") or init is None:
+        return None
+    return string_value(b, index, b.syntax(index, init["h"], 0))
+
+
+def exported_string(texts, spec, exported):
+    """("value", the string the module named spec exports as exported, when
+    that module declares it with a string), or ("refused", why)."""
+    index = next((i for i, (name, _) in texts.items() if name == spec), None)
+    if index is None:
+        return ("refused", f"there is no module {spec}")
+    with pb.Bundle.from_sources([(index, spec, texts[index][1].decode("utf-8"))]) as b:
+        try:
+            target = b.export(index, exported)
+        except pb.Unresolved as e:
+            return ("refused", f"its name is reached through an import that prepare.py follows only into "
+                               f"the module that declares it: {e}")
+        if target[0] != "binding":
+            return ("refused", f"{module_name(spec)} exports {exported} as a {target[0]}")
+        declarations = b.scope_binding(target[1], target[2]).get("declarations", [])
+        if len(declarations) != 1 or declarations[0].get("init") is None:
+            return ("refused", f"{module_name(spec)} does not initialize {exported} where it declares it")
+        value = string_value(b, target[1], b.syntax(target[1], declarations[0]["init"]["h"], 0))
+        if value and value[0] == "value":
+            return value
+        return ("refused", f"{module_name(spec)}'s {exported} is not a string")
 
 
 def discover(data):
-    """Find the candidates of the three roles in an extracted bundle.
+    """Find the tool, runInCwd and setOriginalCwd in an extracted bundle.
 
-    Returns ({"check", "runInCwd", "setOriginalCwd"} -> [{"chunk": module,
-    "fn": name}], the bundle's module records). Exits naming every anchor that
-    found no candidate, or too many."""
+    Returns ({"tool", "runInCwd", "setOriginalCwd"} -> [{"chunk": module,
+    "name": local name}], the bundle's module records). Exits naming every
+    anchor that found nothing, or too many."""
     records = bun_handler.split_extracted_js(data)
-    hint_modules = []
-    taken = []
-    roles = {"check": [], "runInCwd": [], "setOriginalCwd": []}
-    for _idx, name, contents in records:
-        src = contents.decode("utf-8", errors="surrogateescape")
-        chunk = module_name(name)
-        if EXPORT in src:
-            taken.append(chunk)
-        if SEARCH_HINT in src:
-            hint_modules.append(chunk)
-            names = sorted({m.group("fn") for m in re.finditer(SHELL_PERMISSION_CALL, src)})
-            roles["check"] += [{"chunk": chunk, "fn": fn} for fn in names]
-        roles["runInCwd"] += [{"chunk": chunk, "fn": m.group("fn")} for m in re.finditer(CWD_RUN, src)]
-        roles["setOriginalCwd"] += [{"chunk": chunk, "fn": m.group("fn")}
-                                    for m in re.finditer(ORIGINAL_CWD_SET, src)]
+    texts = {index: (name.decode(), contents) for index, name, contents in records}
     failures = []
+    taken = [module_name(name) for name, contents in texts.values() if EXPORT.encode() in contents]
     if taken:
-        failures.append(f"EXPORT: the name {EXPORT}, which prepare.py appends to chunks, already "
-                        f"occurs in {', '.join(taken)}")
-    if len(hint_modules) != 1:
-        failures.append(f"SEARCH_HINT: {len(hint_modules)} modules hold the Bash tool's "
-                        f"{SEARCH_HINT}; expected exactly 1 {hint_modules}")
-    anchors = {"check": ("SHELL_PERMISSION_CALL", "calls in the Bash tool's module that pass "
-                         "an input and a context's shellPermission"),
-               "runInCwd": ("CWD_RUN", "functions that run a callback with {cwd: dir} in "
-                            "an AsyncLocalStorage store"),
-               "setOriginalCwd": ("ORIGINAL_CWD_SET", "functions that set {originalCwd: dir}")}
-    for role, (anchor, what) in anchors.items():
-        found = roles[role]
-        if role == "check" and len(hint_modules) != 1:
-            continue
-        if not found or len(found) > MAX_CANDIDATES:
-            places = ", ".join(f"{c['fn']} in {c['chunk']}" for c in found)
-            failures.append(f"{anchor}: found {len(found)} {what}; expected 1 to {MAX_CANDIDATES}"
-                            + (f" ({places})" if places else ""))
+        failures.append(f"EXPORT: the name {EXPORT}, which prepare.py adds to chunks, already occurs "
+                        f"in {', '.join(taken)}")
+    picked = {role: sorted(i for i, (_, contents) in texts.items() if text.encode() in contents)
+              for role, text in NOMINATE.items()}
+    for role, indexes in picked.items():
+        if not indexes:
+            failures.append(f"{ANCHORS[role]}: no module holds the text {NOMINATE[role]}")
+    roles = {role: [] for role in NOMINATE}
+    if all(picked.values()):
+        sources = [(i, texts[i][0], texts[i][1].decode("utf-8")) for i in sorted(set().union(*picked.values()))]
+        try:
+            with pb.Bundle.from_sources(sources, NEEDLES) as b:
+                tools = [(index, variable, string_value(b, index, name))
+                         for index, variable, name in tool_matches(b, picked["tool"])]
+                roles["runInCwd"] = run_matches(b, picked["runInCwd"])
+                roles["setOriginalCwd"] = origin_matches(b, picked["setOriginalCwd"])
+            notes = []
+            for index, variable, name in tools:
+                if name and name[0] == "import":
+                    name = exported_string(texts, name[1], name[2])
+                if name == ("value", TOOL_NAME):
+                    roles["tool"].append((index, variable))
+                else:
+                    why = name[1] if name and name[0] == "refused" else f"name {name[1]!r}" if name else "no name"
+                    notes.append(f"{variable} in {module_name(texts[index][0])}: {why}")
+        except pb.BackendError as e:
+            raise SystemExit(f"[rmcheck prepare] pfg.bundle could not parse the bundle: {e}") from None
+        for role, matches in roles.items():
+            if not matches or len(matches) > MAX_CANDIDATES:
+                places = ", ".join(f"{name} in {module_name(texts[index][0])}" for index, name in matches)
+                if role == "tool" and notes:
+                    places = ", ".join(([places] if places else []) + [f"refused {n}" for n in notes])
+                modules = ", ".join(module_name(texts[i][0]) for i in picked[role])
+                failures.append(f"{ANCHORS[role]}: found {len(matches)} in {modules}; expected 1 to "
+                                f"{MAX_CANDIDATES}" + (f" ({places})" if places else ""))
     if failures:
-        raise SystemExit("[rmcheck prepare] these anchors did not find their candidates:\n  "
+        raise SystemExit("[rmcheck prepare] these anchors did not find what they look for:\n  "
                          + "\n  ".join(failures)
-                         + f"\n(the anchors are constants in {os.path.abspath(__file__)})")
-    return roles, records
+                         + f"\n(the anchors are in {os.path.abspath(__file__)})")
+    return ({role: [{"chunk": module_name(texts[index][0]), "name": name} for index, name in matches]
+             for role, matches in roles.items()}, records)
 
 
 def server_dirs():
@@ -216,24 +368,22 @@ def extract(exe, vdir):
     return data
 
 
+def export_name(name):
+    return f"{EXPORT}_{name}"
+
+
 def export_statement(names):
-    """The statements appended to a chunk to put its candidates in __ccRmCheck.
-    Each reference sits in its own try, so a name that is not bound at module
-    level fails alone, when the chunk runs, instead of making the chunk fail to
-    link; rm-check-lib.mjs then finds that name missing. A name that is not bound
-    at module level but is a global, such as Map, gives the global, which the
-    self-test then refuses like any other function that does not behave."""
-    sets = "".join(f"try{{{EXPORT}[{json.dumps(n)}]={n}}}catch{{}}" for n in names)
-    return f"\nexport const {EXPORT}={{}};{sets}\n".encode()
+    """The export appended to a chunk for its module-level names."""
+    return ("\nexport{" + ",".join(f"{n} as {export_name(n)}" for n in names) + "};\n").encode()
 
 
 def write_modules(records, exports, write_dir, final_dir):
     """Write every module into write_dir, with bundle paths pointing at final_dir.
 
-    exports maps a module name to the names of the candidates it holds."""
+    exports maps a module name to the module-level names it exports."""
     absdir = final_dir.encode() + b"/"
     for _idx, name, contents in records:
-        base = module_name(name)
+        base = module_name(name.decode())
         path = os.path.join(write_dir, base)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         body = contents.replace(BUNFS, absdir)
@@ -278,18 +428,21 @@ def main(argv):
     data = extract(exe, vdir)
     roles, records = discover(data)
     exports = {}
-    for candidates in roles.values():
-        for c in candidates:
-            names = exports.setdefault(c["chunk"], [])
-            if c["fn"] not in names:
-                names.append(c["fn"])
+    for found in roles.values():
+        for place in found:
+            names = exports.setdefault(place["chunk"], [])
+            if place["name"] not in names:
+                names.append(place["name"])
+    manifest = {"version": version, "exe": exe,
+                **{role: [dict(place, export=export_name(place["name"])) for place in found]
+                   for role, found in roles.items()}}
     work = tempfile.mkdtemp(prefix="modules.", dir=vdir)
     try:
         # Import paths point at the final directory, so the tree only loads once
         # renamed there; the rename also makes a half-written tree invisible.
         write_modules(records, exports, work, final)
         with open(os.path.join(work, "manifest.json"), "w") as f:
-            json.dump({"version": version, "exe": exe, "export": EXPORT, **roles}, f)
+            json.dump(manifest, f)
         try:
             os.rename(work, final)
         except OSError:
