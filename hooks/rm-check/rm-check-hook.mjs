@@ -9,12 +9,14 @@
 // rewrite advice at once. Every other command, including rm on ordinary literal
 // paths, passes through untouched.
 //
-// prepare.py (next to this file) extracts the version's bundle and exports the
-// function; it runs once per version. Importing that function takes about
-// 0.45 s, so rm-check-server.mjs keeps it loaded per version and answers over a
-// Unix socket; the hook starts the server when none answers, and the server
-// exits after an idle period. When no server answers, the hook runs the check
-// in its own process. When the hook itself fails, it fails open:
+// prepare.py (next to this file) extracts the version's bundle and makes the
+// candidates for the check and for the two functions that set its directories
+// reachable; it runs once per version. Importing them and the self-test that
+// picks among them (rm-check-lib.mjs) take about 0.7 s, so rm-check-server.mjs
+// keeps the check loaded per version and answers over a Unix socket; the hook
+// starts the server when none answers, and the server exits after an idle
+// period. When no server answers, the hook runs the check in its own process.
+// When the hook itself fails, it fails open:
 // it warns in the session, rings the terminal bell and sends a desktop
 // notification, then exits 0 without a decision, so the command goes on to
 // Claude Code's own permission check and a flagged rm gets the harness prompt.
@@ -179,7 +181,7 @@ if (reply === null) {
 }
 if (reply === null) {
   try { reply = { message: await (await loadCheck(dir))(request) }; }
-  catch (e) { failOpen(`the ${found.version} permission check threw: ${e?.stack ?? e}`); }
+  catch (e) { failOpen(`the ${found.version} permission check could not be loaded or run: ${e?.stack ?? e}`); }
 }
 if (reply.error !== undefined) failOpen(`the ${found.version} rm-check server failed: ${reply.error}`);
 

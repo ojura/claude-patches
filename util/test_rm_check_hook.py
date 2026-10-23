@@ -196,3 +196,131 @@ def test_prepare_refuses_a_directory_outside_the_cache_layout():
                   "/x/cache/2.1.305/modules-v2", "/x/rm-check/2.1.305/other"):
         with pytest.raises(SystemExit, match="is not an absolute"):
             prepare.main(["/x/claude", "2.1.305", final])
+
+
+# A chunk that behaves like the three functions the hook needs, and like
+# functions that only look like them. Its check flags `rm -rf /`, and the
+# removal of its working directory or a parent of it; it follows a cd only into
+# the session's original directory.
+FAKE_CHUNK = r"""
+import { AsyncLocalStorage } from "node:async_hooks";
+const store = new AsyncLocalStorage();
+let originalCwd = "/start";
+const within = (path, dir) => dir === "/" || path === dir || path.startsWith(dir + "/");
+function run(dir, fn) { return store.run({ cwd: dir }, fn); }
+function runWithout(dir, fn) { return fn(); }
+function setOriginal(dir) { originalCwd = dir; }
+function setNothing(dir) {}
+async function check({ command }) {
+  let cwd = store.getStore()?.cwd ?? "/start";
+  const m = /^(?:cd (\S+) && )?rm -rf (\S+)$/.exec(command);
+  if (m === null) return { behavior: "passthrough", message: "" };
+  if (m[1] !== undefined && within(m[1], originalCwd)) cwd = m[1];
+  if (m[2] === "/" || within(cwd, m[2])) {
+    return { behavior: "ask", message: `removes ${m[2]}`,
+             decisionReason: { type: "safetyCheck", reason: "x", circuitBreaker: "dangerousRemoval" } };
+  }
+  return { behavior: "passthrough", message: "" };
+}
+function crashGuard(input, context) { return undefined; }
+function nested() { function hidden() {} return hidden; }
+"""
+DRIVER = """
+import { loadCheck } from %s;
+const [dir, request] = process.argv.slice(2);
+try {
+  const run = await loadCheck(dir);
+  console.log(JSON.stringify({ out: await run(JSON.parse(request)) }));
+} catch (e) {
+  console.log(JSON.stringify({ error: e.message }));
+}
+"""
+
+
+def load_fake(scratch, check, run, origin, request):
+    """Prepares the fake chunk with prepare.py's export statement, lists the
+    given candidates in a manifest, and returns what loadCheck and one request
+    give: {"out": the check's text or None} or {"error": message}."""
+    bun = find_bun()
+    if bun is None:
+        pytest.skip("bun is not installed")
+    prepare = load_prepare()
+    d = scratch("rmcheck-test-fake.")
+    names = ["check", "crashGuard", "run", "runWithout", "setOriginal", "setNothing", "hidden"]
+    with open(os.path.join(d, "fake.js"), "wb") as f:
+        f.write(FAKE_CHUNK.encode() + prepare.export_statement(names))
+    role = lambda fns: [{"chunk": "fake.js", "fn": fn} for fn in fns]  # noqa: E731
+    with open(os.path.join(d, "manifest.json"), "w") as f:
+        json.dump({"version": "0.0.0", "exe": "", "export": prepare.EXPORT, "check": role(check),
+                   "runInCwd": role(run), "setOriginalCwd": role(origin)}, f)
+    driver = os.path.join(d, "driver.mjs")
+    lib = os.path.join(REPO, "hooks", "rm-check", "rm-check-lib.mjs")
+    with open(driver, "w") as f:
+        f.write(DRIVER % json.dumps(lib))
+    p = subprocess.run([bun, driver, d, json.dumps(request)], text=True, capture_output=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)
+
+
+REQUEST = {"command": "cd / && rm -rf /s/c", "cwd": "/s/c", "originalCwd": "/s", "mode": "default"}
+
+
+def test_loadcheck_picks_the_functions_that_behave_as_the_hook_needs(scratch):
+    """Among candidates that only look right, the self-test picks the check and
+    the pair of directory functions that work; a name that is not bound at the
+    chunk's module level (hidden) is skipped."""
+    got = load_fake(scratch, ["crashGuard", "hidden", "check"], ["runWithout", "run"],
+                    ["setNothing", "setOriginal"], REQUEST)
+    assert got == {"out": "removes /s/c"}
+    got = load_fake(scratch, ["crashGuard", "check"], ["runWithout", "run"],
+                    ["setNothing", "setOriginal"], dict(REQUEST, cwd="/s"))
+    assert got == {"out": None}
+
+
+def test_loadcheck_refuses_candidates_that_do_not_behave(scratch):
+    """Without a working candidate for a role, loadCheck throws and says what
+    the candidates did."""
+    got = load_fake(scratch, ["crashGuard"], ["run"], ["setOriginal"], REQUEST)
+    assert "could not be identified" in got["error"] and "crashGuard in fake.js did not flag it" in got["error"]
+    got = load_fake(scratch, ["check"], ["runWithout"], ["setOriginal"], REQUEST)
+    assert "0 pairs pass" in got["error"] and "probe 1" in got["error"], got
+    got = load_fake(scratch, ["check"], ["run"], ["setNothing"], REQUEST)
+    assert "0 pairs pass" in got["error"] and "probe 3" in got["error"], got
+    got = load_fake(scratch, ["hidden"], ["run"], ["setOriginal"], REQUEST)
+    assert "offers no check function" in got["error"], got
+
+
+def discover_on(monkeypatch, modules):
+    """prepare.discover on synthetic modules {name: source}."""
+    prepare = load_prepare()
+    records = [(i, f"/$bunfs/root/{name}".encode(), src.encode()) for i, (name, src) in enumerate(modules.items())]
+    monkeypatch.setattr(prepare.bun_handler, "split_extracted_js", lambda data: records)
+    return prepare.discover(b"")
+
+
+BASH = ('var Xi=tn({name:Be,searchHint:"execute shell commands",create(e){return{async '
+        'checkPermissions(n,r){let s=rht(e,r);return bJn(n,s.shellPermission,await _Rr(n,'
+        's.shellPermission,void 0,(h)=>bJn(n,s.shellPermission,h,"eachVerdict")),"chosenVerdict")}}}});')
+RUN = "function Dg(e,o){return n.run({cwd:On(e)},o)}"
+ORIGIN = "function mI(e){DEn({originalCwd:e})}"
+
+
+def test_discover_finds_the_candidates_of_each_role(monkeypatch):
+    roles, _ = discover_on(monkeypatch, {"bash.js": BASH, "cwd.js": RUN, "state.js": ORIGIN})
+    assert roles == {"check": [{"chunk": "bash.js", "fn": "_Rr"}, {"chunk": "bash.js", "fn": "bJn"}],
+                     "runInCwd": [{"chunk": "cwd.js", "fn": "Dg"}],
+                     "setOriginalCwd": [{"chunk": "state.js", "fn": "mI"}]}
+
+
+def test_discover_names_every_anchor_that_fails(monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        discover_on(monkeypatch, {"other.js": "let x=1;"})
+    message = str(e.value)
+    for anchor in ("SEARCH_HINT", "CWD_RUN", "ORIGINAL_CWD_SET"):
+        assert anchor in message, message
+    with pytest.raises(SystemExit) as e:
+        discover_on(monkeypatch, {"bash.js": 'x={searchHint:"execute shell commands"}', "cwd.js": RUN,
+                                  "state.js": ORIGIN + ";var __ccRmCheck=1"})
+    message = str(e.value)
+    assert "SHELL_PERMISSION_CALL" in message and "EXPORT" in message, message
+    assert "CWD_RUN" not in message and "ORIGINAL_CWD_SET" not in message, message

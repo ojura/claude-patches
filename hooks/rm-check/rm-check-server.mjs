@@ -1,5 +1,7 @@
 // Keeps one Claude Code version's dangerous-removal check loaded and answers
-// the hook over a Unix socket, so a hook call does not pay the 0.45 s import.
+// the hook over a Unix socket, so a hook call does not pay the 0.45 s import
+// and the 0.2 s self-test. When the self-test fails, the server exits with its
+// message, and the hook, which then runs the check itself, fails open with it.
 //
 // Usage: rm-check-server.mjs <prepared dir> <socket path>
 //
