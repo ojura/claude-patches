@@ -109,7 +109,8 @@ class JSKeys:
 
 @dataclass(frozen=True)
 class Value:
-    """A binding's value under a fact, with the built-in operations it relies on."""
+    """A binding's value under a fact, with the built-in operations it relies on. For Values.expression,
+    binding is the handle of the expression."""
     value: object
     fact: str
     module: int
@@ -638,6 +639,15 @@ class Values:
         if isinstance(value, JSKeys):
             return {"kind": "object", "keys": list(value.keys), "accessors": sorted(value.accessors)}
         return {"kind": "primitive"}
+
+    def expression(self, module, handle, statement, declarator=None):
+        """The value of the literal expression at handle under the declared fact, as part of the
+        module-scope statement at index statement (and its declarator, for a variable declaration): the
+        names it reads must be initialized before that statement or declarator. Like the declared fact,
+        it makes no claim about later changes."""
+        frame = _Frame(module, statement, declarator, True, ())
+        value = self._evaluate(module, self._tree(module, handle), frame, "any")
+        return Value(value, "declared", module, handle, frozenset(frame.requires))
 
     def function(self, module, binding):
         """The Function a binding holds: a function declaration, or a variable with a function or arrow

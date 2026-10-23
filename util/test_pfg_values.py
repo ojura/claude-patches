@@ -305,6 +305,30 @@ def test_a_map_copies_a_map_and_keeps_the_first_key_with_the_last_value():
         assert b.value(0, "n", "entries").value == pv.JSMap((("a", num("2")), (num("1"), "x")))
 
 
+def test_a_literal_expression_inside_a_declaration_is_evaluated_as_declared():
+    with Build('var C=["a","b"];var d=f.kind({min:1,max:C.length,list:[...C,"c"]}),e=g([x]);') as b:
+        declaration = b.bundle.binding(0, b.binding(0, "d"))["declarations"][0]
+        call = b.bundle.syntax(0, declaration["init"]["h"], 4)
+        argument = call["arguments"][0]
+        # max reads a member, which is not a literal.
+        assert "not a literal" in pytest.raises(pb.Unresolved, b.values.expression, 0, argument["h"],
+                                                declaration["statement"], declaration["declarator"]).value.reason
+        later = b.bundle.binding(0, b.binding(0, "e"))["declarations"][0]
+        array = b.bundle.syntax(0, later["init"]["h"], 4)["arguments"][0]
+        assert "not declared" in pytest.raises(pb.Unresolved, b.values.expression, 0, array["h"],
+                                               later["statement"], later["declarator"]).value.reason
+    with Build('var C=["a","b"];var d=f.kind({min:1,list:[...C,"c"]});var late=["z"];var e=f.kind(late);') as b:
+        declaration = b.bundle.binding(0, b.binding(0, "d"))["declarations"][0]
+        argument = b.bundle.syntax(0, declaration["init"]["h"], 4)["arguments"][0]
+        value = b.values.expression(0, argument["h"], declaration["statement"], declaration["declarator"])
+        assert value.value == pv.JSObject((("min", num("1")), ("list", pv.JSArray(("a", "b", "c")))))
+        assert value.fact == "declared" and "Array.prototype.@@iterator" in value.requires
+        # A name that a later statement initializes is not initialized yet.
+        first = b.bundle.binding(0, b.binding(0, "d"))["declarations"][0]
+        later = b.bundle.syntax(0, b.bundle.binding(0, b.binding(0, "e"))["declarations"][0]["init"]["h"], 4)["arguments"][0]
+        assert "initialized after" in pytest.raises(pb.Unresolved, b.values.expression, 0, later["h"], first["statement"]).value.reason
+
+
 # Initialization order
 
 

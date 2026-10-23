@@ -12,6 +12,8 @@ Layout:
   engine     discover -> verify-all -> write-all, I/O-free
   bundle     a native build's modules, read out of the binary by bun_handler, as
              syntax and bindings through the node helper in js/
+  values     the constant values of a native build's bindings, and the check
+             that every use of a value keeps it
   js         facts.mjs, the node helper that parses each module with the
              TypeScript compiler vendored in js/vendor, and its tests
   REVISION   the version of what bundle extracts (see bundle's docstring)
