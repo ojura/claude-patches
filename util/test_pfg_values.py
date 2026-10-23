@@ -399,6 +399,23 @@ def test_a_function_is_classified_on_the_route_with_the_fewest_calls():
         assert error.sites == [(4, texts[4].index("t)}"), "the value is passed on more than four calls deep")]
 
 
+def test_a_function_imported_by_several_modules_is_read_once_in_its_module():
+    texts = ('export function f(a){return a}', 'import{f}from"/m0.js";f(1);', 'import{f as g}from"/m0.js";g(2);')
+    with Build(*texts) as b:
+        f, f1, g2 = b.binding(0, "f"), b.binding(1, "f"), b.binding(2, "g")
+        asked = []
+        facts = b.bundle.facts
+        b.bundle.facts = lambda index, queries: asked.append(index) or facts(index, queries)
+        first = b.values.function(1, f1)
+        assert first.module == 0 and 0 in asked
+        asked.clear()
+        second = b.values.function(2, g2)
+        # Module 2's record of g is asked for; module 0, which declares f, is not asked again.
+        assert second is first and asked == [2]
+        asked.clear()
+        assert b.values.declaring(2, g2) == (0, f) and asked == []
+
+
 def test_a_namespace_import_is_followed_through_member_reads():
     with Build('export var V=["a"];export function f(){}', 'import*as ns from"/m0.js";ns.V.includes("a");',
                'import*as ns from"/m0.js";ns.V.push("b");') as b:

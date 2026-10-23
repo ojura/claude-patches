@@ -245,6 +245,8 @@ class Values:
         self._reach = {}
         self._unfollowed_loads = None
         self._export_names = {}
+        self._declarations = {}
+        self._scopes = {}
 
     # -- refusals ----------------------------------------------------------------------------------
 
@@ -287,7 +289,16 @@ class Values:
 
     def declaring(self, module, binding):
         """(module, binding id) of the declaration a binding stands for: itself, or for an import the
-        binding its exporting module declares, through re-exports."""
+        binding its exporting module declares, through re-exports. The answers are kept, and so are the
+        lookups in the declaring module: the helper keeps one module's program at a time, so a client that
+        follows the imports of one function from many modules would otherwise have it build the declaring
+        module's program again for each importer."""
+        key = (module, binding)
+        if key not in self._declarations:
+            self._declarations[key] = self._declaring(module, binding)
+        return self._declarations[key]
+
+    def _declaring(self, module, binding):
         record = self._record(module, binding)
         if not record["kind"].startswith("import"):
             return module, binding
@@ -304,7 +315,9 @@ class Values:
         if resolved[0] != "binding":
             raise self._refuse(module, declaration["s"], f"{record['name']} is imported from an export that is not a binding")
         _, declaring_module, local = resolved
-        found = self.bundle.scope_binding(declaring_module, local)
+        if (declaring_module, local) not in self._scopes:
+            self._scopes[(declaring_module, local)] = self.bundle.scope_binding(declaring_module, local)
+        found = self._scopes[(declaring_module, local)]
         if "id" not in found:
             raise self._refuse(declaring_module, 0, f"module {declaring_module} exports {local}, which it does not declare")
         return declaring_module, found["id"]
@@ -659,6 +672,11 @@ class Values:
         if key in self._functions:
             return self._functions[key]
         declaring_module, declaring = self.declaring(module, binding)
+        if (declaring_module, declaring) != key:
+            # Kept under the declaring binding too, so each importer does not ask its module again.
+            result = self.function(declaring_module, declaring)
+            self._functions[key] = result
+            return result
         record = self._record(declaring_module, declaring)
         declarations = record["declarations"]
         if len(declarations) != 1:
