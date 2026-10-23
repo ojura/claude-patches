@@ -361,6 +361,44 @@ def test_a_use_in_an_importing_module_is_classified_there():
         assert "Array.prototype.includes" in value.requires
 
 
+def test_a_value_passed_to_an_imported_function_is_classified_where_the_function_is_declared():
+    # The 2.1.305 form of the rate-limit words: function t1e(e){return fo(cae,e)||e}, with fo imported.
+    declaring = 'export function fo(e,n){return Object.hasOwn(e,n)?e[n]:void 0}export function put(e){e.a="y"}'
+    with Build('import{fo}from"/m1.js";var V={a:"x"};function t(e){return fo(V,e)||e}', declaring) as b:
+        value = b.value(0, "V", "entries")
+        assert pv.string_map(value.value) == {"a": "x"} and "Object.hasOwn" in value.requires
+    with Build('import{put}from"/m1.js";var V={a:"x"};put(V);', declaring) as b:
+        assert b.refused(0, "V", "entries").sites == [(1, declaring.index('e.a="y"'), "a member of the value is written")]
+    # Through a default import and a re-export.
+    texts = ('import f from"/m1.js";import{g}from"/m2.js";var V=["x"];f(V);g(V);',
+             'export default function f(a){return a.includes("x")}', 'export{h as g}from"/m3.js";', 'export const h=(c)=>c.at(0);')
+    with Build(*texts) as b:
+        value = b.value(0, "V", "elements")
+        assert pv.strings(value.value) == ["x"]
+        assert {"Array.prototype.includes", "Array.prototype.at"} <= value.requires
+    # A function from outside the bundle, or an anonymous default export, refuses at the call.
+    with Build('import{z}from"zlib";import f from"/m1.js";var V=["x"];z(V);f(V);', 'export default function(a){}') as b:
+        assert sorted(site[2] for site in b.refused(0, "V", "elements").sites) == [
+            "the value is passed to f: f is imported from an export that is not a binding",
+            "the value is passed to z: z is imported from a module outside the bundle"]
+
+
+def test_a_function_is_classified_on_the_route_with_the_fewest_calls():
+    # j is called with the value directly and through g, h and i. On that long route, k(t) would be
+    # the fifth call.
+    texts = ('import{g}from"/m1.js";import{j}from"/m4.js";export var V=["x"];g(V);j(V);',
+             'import{h}from"/m2.js";export function g(q){h(q)}',
+             'import{i}from"/m3.js";export function h(r){i(r)}',
+             'import{j}from"/m4.js";export function i(s){j(s)}',
+             'import{k}from"/m5.js";export function j(t){k(t)}',
+             'export function k(u){return u.includes("x")}')
+    with Build(*texts) as b:
+        assert "Array.prototype.includes" in b.value(0, "V", "elements").requires
+    with Build(texts[0].replace("j(V);", ""), *texts[1:]) as b:
+        error = b.refused(0, "V", "elements")
+        assert error.sites == [(4, texts[4].index("t)}"), "the value is passed on more than four calls deep")]
+
+
 def test_a_namespace_import_is_followed_through_member_reads():
     with Build('export var V=["a"];export function f(){}', 'import*as ns from"/m0.js";ns.V.includes("a");',
                'import*as ns from"/m0.js";ns.V.push("b");') as b:

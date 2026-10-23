@@ -1652,10 +1652,13 @@ function topLevelStatement(node) {
 //   an accessor), and JSON.stringify calls an own toJSON (refused).
 //   An alias: `const W = V` (also let or var), with no other write to W; W's uses are classified.
 //   A parameter: V as an argument of a plain call of a function the module declares (a function
-//   declaration, or a variable never written that holds a function or arrow expression), with no
-//   spread argument before V, of a function that does not read arguments and has no rest parameter
-//   at or before V's position. The parameter that receives V must be a plain identifier; its uses
-//   are classified, up to four calls deep. Beyond the last parameter, V reaches only arguments.
+//   declaration, or a variable never written that holds a function or arrow expression) or imports
+//   by name or as a default, with no spread argument before V. The function must not read
+//   arguments or have a rest parameter at or before V's position, and the parameter that receives
+//   V must be a plain identifier. Its uses are classified, up to four calls from the binding on the
+//   route with the fewest calls. Beyond the last parameter, V reaches only arguments. A call of an
+//   imported function is listed in the result's calls; pfg.values finds the module that declares
+//   the function and classifies the parameter's uses there, with a uses query in mode parameter.
 //   An export: an export list entry, export default, or a declaration with export. pfg.values
 //   classifies the uses in the modules that import the value, and wherever a namespace holding it
 //   is taken.
@@ -1741,6 +1744,7 @@ class UseContext {
     this.refused = [];
     this.requires = new Set();
     this.exports = [];
+    this.calls = [];
     this.followed = [];
     this.queue = [];
     this.visited = new Set();
@@ -1755,8 +1759,8 @@ class UseContext {
   }
 
   result() {
-    return { refused: this.refused, requires: [...this.requires].sort(), exports: this.exports, followed: this.followed,
-      classified: this.classified };
+    return { refused: this.refused, requires: [...this.requires].sort(), exports: this.exports, calls: this.calls,
+      followed: this.followed, classified: this.classified };
   }
 }
 
@@ -2313,14 +2317,26 @@ class Facts {
   }
 
   // The uses of a binding's value in this module under the operation model. query: {id, model: {kind,
-  // keys, accessors}, mode: 'value' (default) or 'namespace' with names, the export names under which
-  // the namespace bound to id holds the value}.
+  // keys, accessors}, mode}, with mode one of
+  //   value (the default)  id is the binding that holds the value;
+  //   namespace            id is a namespace that holds the value under the export names in names;
+  //   parameter            id is a function that another module imports and calls with the value as
+  //                        the argument at position, depth calls from the value's binding.
   uses(query) {
     const ctx = new UseContext(query.model);
     const mode = query.mode ?? 'value';
-    if (mode !== 'value' && mode !== 'namespace') throw new RequestError(`a uses mode is value or namespace, not ${mode}`);
-    this.symbolOfId(query.id);
-    ctx.queue.push({ id: query.id, mode, names: new Set(query.names ?? []), depth: 0, root: mode === 'value', declaration: null });
+    if (!['value', 'namespace', 'parameter'].includes(mode)) throw new RequestError(`a uses mode is value, namespace or parameter, not ${mode}`);
+    const symbol = this.symbolOfId(query.id);
+    if (mode === 'parameter') {
+      for (const name of ['position', 'depth']) {
+        if (!Number.isInteger(query[name]) || query[name] < 0) throw new RequestError(`a parameter use needs ${name}, a whole number`);
+      }
+      const declaration = declarationsIn(symbol, this.sourceFile)[0];
+      const site = declaration ? declarationName(declaration) : this.sourceFile;
+      this.enterFunction(symbol, ts.isIdentifier(site) ? site.text : symbol.name, query.position, site, ctx, query.depth);
+    } else {
+      ctx.queue.push({ id: query.id, mode, names: new Set(query.names ?? []), depth: 0, root: mode === 'value', declaration: null });
+    }
     this.drainUses(ctx);
     return ctx.result();
   }
@@ -2343,10 +2359,13 @@ class Facts {
   }
 
   // Classifies the occurrences of every binding in the queue: the root binding, aliases, parameters
-  // and namespace variables.
+  // and namespace variables. The entry with the fewest calls goes first, so a binding the value reaches
+  // on several routes is classified at the depth of the route with the fewest calls.
   drainUses(ctx) {
     while (ctx.queue.length) {
-      const entry = ctx.queue.shift();
+      let next = 0;
+      for (let i = 1; i < ctx.queue.length; i += 1) if (ctx.queue[i].depth < ctx.queue[next].depth) next = i;
+      const [entry] = ctx.queue.splice(next, 1);
       const key = `${entry.mode} ${entry.id} ${[...entry.names].sort().join(',')}`;
       if (ctx.visited.has(key)) continue;
       ctx.visited.add(key);
@@ -2647,32 +2666,49 @@ class Facts {
     return this.parameterUse(call, position, node, ctx, depth);
   }
 
-  // The value passed to a function the module declares.
+  // The value passed to a function the module declares or imports.
   parameterUse(call, position, node, ctx, depth) {
     if (!ts.isCallExpression(call)) return this.refuseUse(ctx, node, 'the value is passed to a template tag');
     const callee = unparenthesized(call.expression);
     if (!ts.isIdentifier(callee)) return this.refuseUse(ctx, node, 'the value is passed to a function the model cannot identify');
     const symbol = this.resolve(callee);
     if (!symbol || this.idOf(symbol) === null) return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, which the module does not declare`);
+    const declarations = declarationsIn(symbol, this.sourceFile);
+    if (declarations.length !== 1 || !(ts.isImportSpecifier(declarations[0]) || ts.isImportClause(declarations[0]))) {
+      return this.enterFunction(symbol, callee.text, position, node, ctx, depth);
+    }
+    // An imported function: the module that declares it classifies the parameter's uses.
     const examined = this.examine(symbol);
     if (examined.refused.length) return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, a binding the binding model refuses`);
+    if (examined.occurrences.some((occurrence) => occurrence.roles.includes('write'))) {
+      return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, an import that is written`);
+    }
+    if (depth >= 4) return this.refuseUse(ctx, node, 'the value is passed on more than four calls deep');
+    ctx.calls.push({ name: callee.text, id: this.idOf(symbol), position, depth, s: start(node, this.sourceFile), e: node.end });
+  }
+
+  // The value passed as the argument at position of a plain call of the function bound to symbol, depth
+  // calls from the value's binding: the parameter that receives it is queued. Refusals are placed at site.
+  enterFunction(symbol, name, position, site, ctx, depth) {
+    const examined = this.examine(symbol);
+    if (examined.refused.length) return this.refuseUse(ctx, site, `the value is passed to ${name}, a binding the binding model refuses`);
     const declarations = declarationsIn(symbol, this.sourceFile);
     let fn = declarations.length === 1 ? declarations[0] : undefined;
     if (fn && ts.isVariableDeclaration(fn)) fn = unparenthesized(fn.initializer);
     if (!fn || !(ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn) || ts.isArrowFunction(fn))) {
-      return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, which is not a function declaration or a variable holding a function`);
+      return this.refuseUse(ctx, site, `the value is passed to ${name}, which is not a function declaration or a variable holding a function`);
     }
     if (examined.occurrences.some((occurrence) => occurrence.roles.includes('write'))) {
-      return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, a variable that is written`);
+      return this.refuseUse(ctx, site, `the value is passed to ${name}, a variable that is written`);
     }
-    if (depth >= 4) return this.refuseUse(ctx, node, 'the value is passed on more than four calls deep');
-    if (readsArguments(fn)) return this.refuseUse(ctx, node, `${callee.text} reads arguments, which hold the value`);
+    if (depth >= 4) return this.refuseUse(ctx, site, 'the value is passed on more than four calls deep');
+    if (readsArguments(fn)) return this.refuseUse(ctx, site, `${name} reads arguments, which hold the value`);
     const rest = fn.parameters.findIndex((parameter) => parameter.dotDotDotToken);
-    if (rest !== -1 && rest <= position) return this.refuseUse(ctx, node, `a rest parameter of ${callee.text} receives the value`);
+    if (rest !== -1 && rest <= position) return this.refuseUse(ctx, site, `a rest parameter of ${name} receives the value`);
     if (position >= fn.parameters.length) return;
     const parameter = fn.parameters[position];
     if (!ts.isIdentifier(parameter.name)) {
-      return this.refuseUse(ctx, node, `parameter ${position + 1} of ${callee.text}, which receives the value, is a pattern`);
+      return this.refuseUse(ctx, site, `parameter ${position + 1} of ${name}, which receives the value, is a pattern`);
     }
     ctx.queue.push({ id: this.idOf(this.resolve(parameter.name)), mode: 'value', names: new Set(), depth: depth + 1,
       root: false, declaration: parameter });
@@ -3150,7 +3186,7 @@ let lastFacts = null;
 //   text {s, e}              a slice of the module's text
 //   comments                 the comments before the module's first token
 //   premise {seeds}          the built-in scan with the module's bindings (Facts.premise)
-//   uses {id, model, mode, names}  the uses of a value under the operation model (Facts.uses)
+//   uses {id, model, mode, names, position, depth}  the uses of a value under the operation model (Facts.uses)
 //   loadUse {handle, model, names} the uses of a namespace from an import() or import.meta.require call
 function factsBatch(request) {
   const module = moduleOf(request.module);

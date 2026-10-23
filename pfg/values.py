@@ -16,8 +16,9 @@ its syntax, without running any code, and checks the claim the fact makes:
 
 For elements, entries and keys, every use of the value must be one that the operation model in
 pfg/js/facts.mjs lists: the uses in the binding's module, in every module that imports it, through
-re-exports, and wherever a namespace that holds it is taken (import * as, import() and
-import.meta.require). An import() or import.meta.require whose specifier is not a literal could load
+re-exports, wherever a namespace that holds it is taken (import * as, import() and
+import.meta.require), and those of the parameters that receive it, also of a function another module
+declares. An import() or import.meta.require whose specifier is not a literal could load
 any module, so it refuses every such fact, except for a template whose fixed head names a package
 outside the build: code loaded at run time from outside the binary is not part of the analysed
 program. Each Value lists in requires the built-in operations its evaluation and its uses rely on,
@@ -39,6 +40,8 @@ A refusal raises Unresolved for the first site; its sites attribute lists every 
 """
 from collections import deque
 from dataclasses import dataclass, field
+import heapq
+import itertools
 import json
 import re
 
@@ -738,20 +741,36 @@ class Values:
                         break
         return holders, nested
 
+    @staticmethod
+    def _query_key(module, query):
+        """What makes two use queries the same: for a parameter, the function and the position, since the
+        first query (the one with the fewest calls) classifies the same uses as any later one."""
+        if query.get("mode") == "parameter":
+            return module, "parameter", query["id"], query["position"]
+        return module, json.dumps(query, sort_keys=True)
+
     def _constancy(self, module, binding, model):
         """The built-in operations the uses of the value rely on, after classifying every use; raises
         Unresolved listing every refused use. The uses are classified in the binding's module, then in
-        every module that imports one of the names the value is exported under, and at every place a
-        namespace holding the value is taken, until no new place is found."""
+        every module that imports one of the names the value is exported under, in the module that
+        declares each imported function the value is passed to, and at every place a namespace holding
+        the value is taken, until no new place is found. Queries run in order of the number of calls
+        between the value's binding and the place, so that a parameter is classified at the depth of the
+        route with the fewest calls."""
         sites, requires = set(), set()
         if model["kind"] != "primitive":
             sites.update(self.unfollowed_loads())
-        pending = deque([(module, {"q": "uses", "id": binding, "model": model})])
+        pending, order = [], itertools.count()
+
+        def add(query_module, query):
+            heapq.heappush(pending, (query.get("depth", 0), next(order), query_module, query))
+
+        add(module, {"q": "uses", "id": binding, "model": model})
         done, targets = set(), set()
         while pending:
             while pending:
-                query_module, query = pending.popleft()
-                key = (query_module, json.dumps(query, sort_keys=True))
+                _, _, query_module, query = heapq.heappop(pending)
+                key = self._query_key(query_module, query)
                 if key in done:
                     continue
                 done.add(key)
@@ -760,6 +779,14 @@ class Values:
                 sites.update((query_module, item["s"], item["reason"]) for item in result["refused"])
                 if model["kind"] == "primitive":
                     continue
+                for call in result["calls"]:
+                    try:
+                        declaring_module, function = self.declaring(query_module, call["id"])
+                    except Unresolved as error:
+                        sites.add((query_module, call["s"], f"the value is passed to {call['name']}: {error.reason}"))
+                        continue
+                    add(declaring_module, {"q": "uses", "mode": "parameter", "id": function, "position": call["position"],
+                                           "depth": call["depth"], "model": model})
                 for export in result["exports"]:
                     try:
                         target = self.bundle.export(query_module, export["name"])
@@ -774,12 +801,12 @@ class Values:
                         if "id" not in found:
                             sites.add((importer, position, f"the import of {local} is not a binding the helper resolves"))
                             continue
-                        pending.append((importer, {"q": "uses", "id": found["id"], "model": model}))
+                        add(importer, {"q": "uses", "id": found["id"], "model": model})
             if model["kind"] == "primitive":
                 break
             for importer, query in self._namespace_queries(targets, model, sites):
-                if (importer, json.dumps(query, sort_keys=True)) not in done:
-                    pending.append((importer, query))
+                if self._query_key(importer, query) not in done:
+                    add(importer, query)
         if sites:
             raise self._refuse_all(sorted(sites))
         return requires

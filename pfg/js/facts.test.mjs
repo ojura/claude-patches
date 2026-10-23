@@ -1072,3 +1072,53 @@ test('the promise of import() is followed through await, then and Promise.all', 
     });
   }
 });
+
+test('a call of an imported function is listed, and a parameter query classifies the parameter where it is declared', async () => {
+  const importer = 'import{fo}from"/m.js";import d from"/m.js";import*as ns from"/m.js";const V=[1];fo(1,V);d(V);ns(V);';
+  const declaring = 'export function fo(a,b){return b.includes(a)}export default function(x){}export const W=1;' +
+    'export function deep(c){return c.includes(1)}export function rest(...r){}export function pattern({p}){}';
+  await withHelper([[0, '/a.js', importer], [1, '/m.js', declaring]], async (h) => {
+    const { id } = await bindingOf(h, 0, importer, 'V');
+    const [result] = await h.facts(0, [{ q: 'uses', id, model: { kind: 'array' } }]);
+    assert.deepEqual(result.calls.map((c) => [c.name, c.position, c.depth]), [['fo', 1, 0], ['d', 0, 0]]);
+    assert.equal(result.calls[0].s, spanOf(importer, 'V', 1).s);
+    // A namespace object is not a function.
+    assert.match(reasonsOf(result), /passed to ns, which is not a function declaration/);
+    assert.equal(result.refused.length, 1);
+    const parameter = async (name, position, depth) => {
+      const record = await bindingOf(h, 1, declaring, name);
+      const [answer] = await h.facts(1, [{ q: 'uses', mode: 'parameter', id: record.id, position, depth, model: { kind: 'array' } }]);
+      return answer;
+    };
+    const fo = await parameter('fo', 1, 0);
+    assert.deepEqual(fo.refused, []);
+    assert.ok(fo.requires.includes('Array.prototype.includes'));
+    assert.deepEqual(fo.followed.map((f) => f.depth), [1]);
+    assert.deepEqual((await parameter('deep', 0, 3)).refused, []);
+    assert.match(reasonsOf(await parameter('deep', 0, 4)), /more than four calls deep/);
+    assert.equal((await parameter('fo', 2, 0)).followed.length, 0);
+    assert.match(reasonsOf(await parameter('W', 0, 0)), /passed to W, which is not a function declaration/);
+    assert.match(reasonsOf(await parameter('rest', 0, 0)), /rest parameter of rest/);
+    assert.match(reasonsOf(await parameter('pattern', 0, 0)), /parameter 1 of pattern, which receives the value, is a pattern/);
+    const fn = (await bindingOf(h, 1, declaring, 'fo')).id;
+    const missing = await h.request('facts', { module: 1, queries: [{ q: 'uses', mode: 'parameter', id: fn, model: { kind: 'array' } }] });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.error.kind, 'request');
+    assert.match(missing.error.message, /a parameter use needs position/);
+  });
+  // At the call, an import four calls from the value is refused there.
+  const text = 'import{fo}from"/m.js";function a(x){b(x)}function b(y){c(y)}function c(z){d(z)}function d(w){fo(w)}const V=[1];a(V);fo(V);';
+  const result = await usesOf(text, 'V', { kind: 'array' });
+  assert.deepEqual(result.calls.map((c) => c.depth), [0]);
+  assert.match(reasonsOf(result), /more than four calls deep/);
+});
+
+test('a binding the value reaches on several routes is classified at the depth of the route with the fewest calls', async () => {
+  // In source order, V reaches q first through f (two calls) and then through the alias W (one call).
+  // Classified at two calls, j(s) would be a fifth call; at one call, it is the fourth.
+  const text = 'function g(q){h(q)}function h(r){i(r)}function i(s){j(s)}function j(t){t.includes(1)}' +
+    'function f(p){g(p)}const V=[1];f(V);const W=V;g(W);';
+  const result = await usesOf(text, 'V', { kind: 'array' });
+  assert.deepEqual(result.refused, [], reasonsOf(result));
+  assert.ok(result.requires.includes('Array.prototype.includes'));
+});
