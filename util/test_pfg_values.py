@@ -185,6 +185,31 @@ def test_behaviour_the_function_a_binding_holds_spans_its_declaration():
             b.values.function(0, b.binding(0, "Zoe"))
 
 
+def test_an_array_of_records_with_methods_is_unchanged_when_every_use_only_reads_it():
+    # As 2.1.309's idle compaction kinds: objects with string members and functions, read with find and
+    # some, also from a module that imports the array.
+    kinds = 'export var K=[{name:"a",flag:"f",isInUse:()=>x(),due(e){return e}},{name:"b",flag:"g",isInUse:()=>!0}];'
+    with Build(kinds + 'function pick(){return K.find((S)=>S.isInUse())}',
+               'import{K}from"/m0.js";K.some((e)=>e.flag==="g");') as b:
+        assert b.values.unchanged_array(1, b.binding(1, "K")) == {"Array.prototype.find", "Array.prototype.some"}
+    changes = [('K.push({name:"c"});', "push is called"), ("K=[];", "written"), ("K.length=0;", "written")]
+    for change, reason in changes:
+        with Build(kinds + change) as b, pytest.raises(pb.Unresolved, match=reason):
+            b.values.unchanged_array(0, b.binding(0, "K"))
+    # A write to a member of an element changes the element, not the array.
+    with Build(kinds + 'K.find((S)=>S.isInUse()).flag="h";') as b:
+        assert b.values.unchanged_array(0, b.binding(0, "K")) == {"Array.prototype.find"}
+    others = [('var K=new Array(2);', "not initialized with an array literal"),
+              ('function f(){var K=[1];return K}', "not a variable of the module's scope"),
+              ('var K;K=[1];', "not one variable declaration with an initializer")]
+    for text, reason in others:
+        with Build(text) as b:
+            at = text.index("K")
+            binding = b.bundle.binding_at(0, at, at + 1)["id"]
+            with pytest.raises(pb.Unresolved, match=reason):
+                b.values.unchanged_array(0, binding)
+
+
 def _esm(name, text, encoding=0):
     codec = {0: "utf-8", 1: "latin-1", 2: "utf-16-le"}[encoding]
     return tb._module(name, text.encode(codec), module_format=1, encoding=encoding)

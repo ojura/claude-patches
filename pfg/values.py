@@ -696,6 +696,27 @@ class Values:
         self._functions[key] = result
         return result
 
+    def unchanged_array(self, module, binding):
+        """The built-in operations that the uses of an array rely on, after checking that the binding is a
+        module-scope variable initialized with an array literal and that every use of it in the program
+        keeps the array, as value() checks for the elements fact: the binding is never written, and the
+        array is only read. The elements are not evaluated, so they may be values the evaluator does not
+        read, such as objects with methods, and a write to a member of an element is not a change of the
+        array. Raises Unresolved listing every use that may change it."""
+        declaring_module, declaring = self.declaring(module, binding)
+        record = self._record(declaring_module, declaring)
+        declarations = record["declarations"]
+        if record["kind"] not in ("var", "let", "const") or len(declarations) != 1 or "init" not in declarations[0]:
+            raise self._refuse(declaring_module, declarations[0]["s"],
+                               f"{record['name']} is not one variable declaration with an initializer")
+        declaration = declarations[0]
+        if not declaration.get("module"):
+            raise self._refuse(declaring_module, declaration["s"], f"{record['name']} is not a variable of the module's scope")
+        initializer = self._unparenthesized(declaring_module, self._tree(declaring_module, declaration["init"]["h"]))
+        if initializer["k"] != "ArrayLiteralExpression":
+            raise self._refuse(declaring_module, declaration["init"]["s"], f"{record['name']} is not initialized with an array literal")
+        return frozenset(self._constancy(declaring_module, declaring, {"kind": "array"}))
+
     # -- constancy ---------------------------------------------------------------------------------
 
     def unfollowed_loads(self):
