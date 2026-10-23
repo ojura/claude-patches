@@ -336,3 +336,45 @@ def test_discover_names_every_anchor_that_fails(monkeypatch):
     assert "TOOL_HINT" in message and "found 0" in message and "EXPORT" in message, message
     assert "refused Xi in bash.js: name 'Monitor'" in message, message
     assert "CWD:" not in message and "ORIGINAL_CWD" not in message, message
+
+
+def test_desktop_notifications_come_at_most_every_10_minutes(scratch):
+    """A failing hook warns in the session every time, and posts a desktop
+    notification only when the last one is 10 minutes old. A notify-send on
+    PATH records each call."""
+    bun = find_bun()
+    if bun is None:
+        pytest.skip("bun is not installed")
+    tools = scratch("rmcheck-test-bin.")
+    log = os.path.join(tools, "notifications.log")
+    with open(os.path.join(tools, "notify-send"), "w") as f:
+        f.write(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+    os.chmod(os.path.join(tools, "notify-send"), 0o755)
+    runtime = scratch("rmcheck-test-run.")
+    env = dict(os.environ, PATH=tools + os.pathsep + os.environ.get("PATH", ""),
+               XDG_CACHE_HOME=scratch("rmcheck-test-cache."), XDG_RUNTIME_DIR=runtime,
+               RMCHECK_CLAUDE_VERSION="0.0.0")
+    stamp = os.path.join(runtime, "rm-check", "last-notification")
+
+    def fail_once():
+        # Version 0.0.0 is not installed, so prepare.py fails and the hook fails open.
+        p = subprocess.run([bun, HOOK], cwd=HOME, env=env, text=True, capture_output=True, timeout=120,
+                           input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf x"},
+                                             "cwd": HOME}))
+        assert p.returncode == 0, p.stderr
+        assert "rm-check hook failed" in json.loads(p.stdout)["systemMessage"]
+
+    def posted():
+        return open(log).read().count("rm-check hook failed") if os.path.exists(log) else 0
+
+    fail_once()
+    fail_once()
+    assert posted() == 1
+    with open(stamp, "w") as f:
+        f.write(str(int((time.time() - 9 * 60) * 1000)))
+    fail_once()
+    assert posted() == 1
+    with open(stamp, "w") as f:
+        f.write(str(int((time.time() - 11 * 60) * 1000)))
+    fail_once()
+    assert posted() == 2

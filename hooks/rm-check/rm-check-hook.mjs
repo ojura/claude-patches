@@ -16,17 +16,18 @@
 // so rm-check-server.mjs keeps the check loaded per version and answers over
 // a Unix socket; the hook starts the server when none answers, and the server
 // exits after an idle period. When no server answers, the hook runs the check
-// in its own process. When the hook itself fails, it fails open:
-// it warns in the session, rings the terminal bell and sends a desktop
-// notification, then exits 0 without a decision, so the command goes on to
-// Claude Code's own permission check and a flagged rm gets the harness prompt.
+// in its own process. When the hook itself fails, it fails open: it warns in
+// the session, rings the terminal bell and sends a desktop notification (at
+// most one every 10 minutes), then exits 0 without a decision, so the command
+// goes on to Claude Code's own permission check and a flagged rm gets the
+// harness prompt.
 //
 // The check runs with the request's working directory (the hook input's cwd)
 // and the session's original working directory, set the way Claude Code sets
 // them (see rm-check-lib.mjs). Directories added with --add-dir or /add-dir are
 // not in the hook input, so removing one of those (or a parent of one) passes
 // here and still gets the harness prompt.
-import { readFileSync, readlinkSync, statSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, readlinkSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import { dirname, join } from "node:path";
@@ -35,20 +36,49 @@ import { LAYOUT, loadCheck } from "./rm-check-lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// While the hook is broken, every rm command in every session fails open, and a
+// critical notification stays on screen until it is dismissed. So the hook
+// posts at most one desktop notification every NOTIFY_INTERVAL_MS, counted over
+// all sessions with the time of the last one in a file in the runtime
+// directory. Two hooks that fail within the same few milliseconds can both post
+// one. When the file cannot be read or written, the hook posts.
+const NOTIFY_INTERVAL_MS = 10 * 60 * 1000;
+function notificationDue() {
+  try {
+    const dir = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`, "rm-check");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stamp = join(dir, "last-notification");
+    let last = 0;
+    try { last = Number(readFileSync(stamp, "utf8")) || 0; } catch { /* none posted yet */ }
+    const now = Date.now();
+    // A time ahead of now, left by a clock that was set back, counts as past.
+    if (now >= last && now - last < NOTIFY_INTERVAL_MS) return false;
+    const tmp = `${stamp}.${process.pid}`;
+    writeFileSync(tmp, String(now));
+    renameSync(tmp, stamp);
+  } catch { /* post this one */ }
+  return true;
+}
+
 // Warn as loudly as a hook can and let the command through. systemMessage is
 // shown in the session, terminalSequence is a BEL that Claude Code emits for the
 // hook, and notify-send posts a critical desktop notification over D-Bus, which
-// works whatever the terminal (tmux does not pass OSC notifications on).
+// works whatever the terminal (tmux does not pass OSC notifications on). The
+// session warning and the bell come with every failed check; the desktop
+// notification at most every NOTIFY_INTERVAL_MS.
 function failOpen(msg) {
   const text = String(msg);
   process.stderr.write(`rm-check hook: ${text}\n`);
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const brief = (lines.length > 1 ? `${lines[0]} ${lines.at(-1)}` : lines[0] ?? "").slice(0, 300);
-  try {
-    spawnSync("notify-send", ["-u", "critical", "-a", "Claude Code rm-check", "-i", "dialog-warning",
-      "rm-check hook failed", `${brief}\nClaude Code's own permission check still runs on the command.`],
-      { timeout: 3000, stdio: "ignore" });
-  } catch { /* the session warning below still reaches the user */ }
+  if (notificationDue()) {
+    try {
+      spawnSync("notify-send", ["-u", "critical", "-a", "Claude Code rm-check", "-i", "dialog-warning",
+        "rm-check hook failed", `${brief}\nClaude Code's own permission check still runs on the ` +
+        "command. Failures in the next 10 minutes show only in the sessions."],
+        { timeout: 3000, stdio: "ignore" });
+    } catch { /* the session warning below still reaches the user */ }
+  }
   process.stdout.write(JSON.stringify({
     systemMessage:
       "⚠ The rm-check hook failed and did not check this command. Claude Code's own " +

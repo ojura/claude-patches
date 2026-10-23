@@ -137,8 +137,10 @@ failed" warning with the cause in the session (`systemMessage`), rings the
 terminal bell (`terminalSequence`), posts a critical desktop notification with
 `notify-send`, and exits 0 without a decision. The command then goes on to
 Claude Code's own permission check, so a flagged rm gets the harness prompt as
-it would without the hook. The warning repeats on every command the hook checks
-until the hook is fixed.
+it would without the hook. The session warning and the bell repeat on every
+command the hook checks until the hook is fixed. The desktop notification comes
+at most once every 10 minutes, counted over all sessions: the time of the last
+one is in `$XDG_RUNTIME_DIR/rm-check/last-notification`.
 
 The hook runs the check on commands that mention `rm` or `rmdir` and on shell
 `-c` scripts (`sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `hush`,
