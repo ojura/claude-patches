@@ -103,7 +103,12 @@ BUILTIN_SCAN_LIMITS = {
         "in module 1520 at 109263 and 593604; next to isEmpty, zod defines format, flatten, addIssue and "
         "addIssues on the same prototype through a helper that receives it as a parameter, which the scan "
         "counts as unidentified uses. The other two (module 40 at 9369, module 1520 at 104580) skip the write "
-        "when the prototype already has the member, unless zod is initializing the same object again."),
+        "when the prototype already has the member, unless zod is initializing the same object again. An "
+        "instance passed to a function, which may read its prototype and hand it on, is not listed either: on "
+        "2.1.304, get-intrinsic's table in module 119 stores %ArrayIteratorPrototype%, %IteratorPrototype%, "
+        "%MapIteratorPrototype%, %SetIteratorPrototype% and %StringIteratorPrototype% as the prototypes of "
+        "iterators it creates, through a getProto function from another module (offsets 13276, 14404, "
+        "14530, 14950 and 15122), and code that reads the table can write their members."),
     "definer-calls": (
         "A definer called other than directly or through one call or apply: through a chain of call or apply, "
         "Reflect.apply or bind, or by a higher-order built-in it is passed to. The scan lists the definer where "
@@ -143,6 +148,38 @@ def builtin_write_affects(target, dependency):
         if left != right:
             return False
     return len(written) <= len(needed)
+
+
+def possible_writes(summary, dependency):
+    """The entries of a builtin_summary through which the program may change the slot dependency (a
+    path such as Set.prototype.has) without the scan identifying a write to it, as (category, entry)
+    pairs in the summary's order. They refuse nothing; the statement of the catalog's assumption lists
+    them for each dependency of a table and of a key proof.
+      unfollowed       a value whose path is a proper prefix of the slot's goes where the scan does not
+                       follow it, and the code there may write its members at any depth; the global
+                       object, an escaping definer (limit definer-calls) and a name inside a with
+                       statement (limit with) reach every slot;
+      dynamic          code the scan cannot see into reaches every slot;
+      prototypeWrites  a write into an object the scan cannot identify, under the slot's own key or an
+                       unknown one: the object may be the slot's;
+      unparsed         a module with parse diagnostics reaches every slot.
+    The convention for an escaped value follows its member paths only: code that receives Set.prototype
+    may write Set.prototype.has, and the scan does not count what it could reach through constructor,
+    __proto__ or the Function constructor, which would make every escape reach every slot. Uses of
+    values the scan cannot identify are counted in unidentified and not listed."""
+    needed = dependency.split(".")
+    found = []
+    for entry in summary["unfollowed"]:
+        value = entry["value"].split(".")
+        if entry.get("limit") in ("definer-calls", "with") or value[0] == "globalThis" or (
+                len(value) < len(needed) and needed[:len(value)] == value):
+            found.append(("unfollowed", entry))
+    found.extend(("dynamic", entry) for entry in summary["dynamic"])
+    for entry in summary["prototypeWrites"]:
+        if entry["target"].split(".")[-1] in ("*", needed[-1]):
+            found.append(("prototypeWrites", entry))
+    found.extend(("unparsed", entry) for entry in summary["unparsed"])
+    return found
 
 
 class Module:

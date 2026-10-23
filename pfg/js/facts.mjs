@@ -2127,10 +2127,12 @@ class Facts {
     const unknownOrigins = 'the variable can also receive values from declarations or writes outside the built-in value model';
     while (taken < scan.referenceValues.length || pending.length) {
       const { name, value, record } = pending.length ? pending.shift() : scan.referenceValues[taken++];
-      const unclassified = (reason, limit) => {
+      // A value the scan does not follow from here is unfollowed; one it follows through a variable that
+      // may also hold other values stays followed, and only its record says so.
+      const unclassified = (reason, limit, followedAnyway = false) => {
         record.status = 'unclassified';
         record.reason = reason;
-        scan.result.unfollowed.push({ ...scan.where(name), value: valueName(value), reason, ...(limit ? { limit } : {}) });
+        if (!followedAnyway) scan.result.unfollowed.push({ ...scan.where(name), value: valueName(value), reason, ...(limit ? { limit } : {}) });
       };
       const symbol = this.resolve(name);
       const id = this.idOf(symbol);
@@ -2146,7 +2148,7 @@ class Facts {
       }
       const key = `${id} ${valueName(value)}`;
       if (followed.has(key)) {
-        if (this.hasUnknownOrigins(symbol, scan)) unclassified(unknownOrigins);
+        if (this.hasUnknownOrigins(symbol, scan)) unclassified(unknownOrigins, undefined, true);
         else record.status = 'followed';
         continue;
       }
@@ -2163,7 +2165,7 @@ class Facts {
       }
       // Known built-in alternatives are still followed for writes; the record says that the variable may
       // also hold other values.
-      if (this.hasUnknownOrigins(symbol, scan)) unclassified(unknownOrigins);
+      if (this.hasUnknownOrigins(symbol, scan)) unclassified(unknownOrigins, undefined, true);
       else record.status = 'followed';
       followed.add(key);
       if (!held.some((known) => valueName(known) === valueName(value))) held.push(value);

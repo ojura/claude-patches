@@ -925,10 +925,16 @@ test('a definer writes every built-in target of a conditional or a variable with
 });
 
 test('an alias with other unmodelled values cannot hide an argument escape as a certain definer call', async () => {
-  const { facts } = await scans('var q=custom;q=Object.defineProperty;q(Set.prototype,"unrelated",{});');
+  const text = 'var q=custom;q=Object.defineProperty;q(Set.prototype,"unrelated",{});';
+  const { facts } = await scans(text);
   assert.ok(facts.writes.includes('Set.prototype.unrelated Object.defineProperty'));
-  assert.ok(facts.unfollowed.includes('Set.prototype: passed to a function'));
-  assert.ok(facts.unfollowed.some((entry) => entry.includes('values from declarations or writes outside')));
+  // The definer is still followed through q, so q's record says it is unclassified, and it is not an escape.
+  assert.deepEqual(facts.unfollowed, ['Set.prototype: passed to a function']);
+  await withHelper([[0, '/a.js', text]], async (h) => {
+    const [scan] = await h.facts(0, [{ q: 'premise' }]);
+    assert.deepEqual(scan.references.map((entry) => [entry.name, entry.status]), [['q', 'unclassified']]);
+    assert.match(scan.references[0].reason, /values from declarations or writes outside/);
+  });
 });
 
 test('a parse diagnostic refuses binding facts even for a declaration that parsed separately', async () => {

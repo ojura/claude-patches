@@ -608,6 +608,32 @@ def test_the_stated_limits_are_listed_in_the_summary_and_not_as_writes():
         assert summary["limits"]["instances"]["form"] == pb.BUILTIN_SCAN_LIMITS["instances"]
 
 
+def test_possible_writes_to_a_slot_list_escapes_of_its_ancestors_and_what_reaches_every_slot():
+    with build('f(Set.prototype);g(Map);h(Set.prototype.has);',
+               'function z(e){Object.getPrototypeOf(e).has=1;Object.getPrototypeOf(e)[k]=2;Object.getPrototypeOf(e).get=3}',
+               'k(Object.defineProperty);new Function("x");',
+               'var t=x;t=Symbol.iterator;q(t);') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+
+        def sites(slot):
+            return sorted((category, entry["module"], entry.get("value") or entry.get("target") or entry.get("kind"))
+                          for category, entry in pb.possible_writes(summary, slot))
+
+        every_slot = [("dynamic", 2, "Function constructor"), ("unfollowed", 2, "Object.defineProperty")]
+        assert sites("Set.prototype.has") == sorted([
+            ("unfollowed", 0, "Set.prototype"), ("prototypeWrites", 1, "(object).__proto__.has"),
+            ("prototypeWrites", 1, "(object).__proto__.*"), *every_slot])
+        # Code that receives Set.prototype.has may write its members, not the slot that holds it.
+        assert ("unfollowed", 0, "Set.prototype.has") not in sites("Set.prototype.has")
+        assert sites("Map.prototype.get") == sorted([
+            ("unfollowed", 0, "Map"), ("prototypeWrites", 1, "(object).__proto__.get"),
+            ("prototypeWrites", 1, "(object).__proto__.*"), *every_slot])
+        assert sites("Object.entries") == sorted([("prototypeWrites", 1, "(object).__proto__.*"), *every_slot])
+    with build('const =') as bundle:
+        summary = bundle.builtin_summary(bundle.builtin_scan())
+        assert [category for category, _ in pb.possible_writes(summary, "Object.entries")] == ["unparsed"]
+
+
 def test_builtin_write_dependencies_match_ancestors_and_unknown_members():
     assert pb.builtin_write_affects("Object", "Object.entries")
     assert pb.builtin_write_affects("Array.prototype.*", "Array.prototype.@@iterator")
