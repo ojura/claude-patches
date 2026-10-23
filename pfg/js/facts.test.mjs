@@ -690,6 +690,29 @@ test('a built-in value that escapes is unfollowed, and a prototype reached from 
   assert.equal(raw.unidentified, 1);
 });
 
+test('template tags receive their template object and unchanged substitution arguments', async () => {
+  // call takes the implicit template object as its this argument, leaving
+  // Set.prototype, "has" and the descriptor as Object.defineProperty's three arguments.
+  const { index, facts } = await scans('Object.defineProperty.call`${Set.prototype}${"has"}${{value:function(){this.add("b");return true}}}`;' +
+    'tag`${Set.prototype}`;Object.defineProperty.apply`${[Map.prototype,"get",{value:f}]}`;');
+  for (const result of [index, facts]) {
+    assert.deepEqual(result.writes, ['Set.prototype.has Object.defineProperty', 'Map.prototype.get Object.defineProperty']);
+    assert.ok(result.unfollowed.includes('Set.prototype: passed to a template tag'));
+    assert.ok(result.unfollowed.includes('Map.prototype: stored in an array literal'));
+    assert.equal(result.passed, 0);
+  }
+});
+
+test('a built-in called as a template tag gets its arguments: String.raw, as Claude Code builds regular expressions with it', async () => {
+  // String.raw is a built-in value the scan follows; calling it as a tag used to stop the index pass
+  // with "call.arguments is not iterable", since a tagged template has no arguments list.
+  const { index, facts } = await scans('var r=String.raw`a${1}b`,s=String.raw`c`;');
+  for (const result of [index, facts]) {
+    assert.deepEqual([result.writes, result.unfollowed, result.dynamic], [[], [], []]);
+    assert.equal(result.passed, 2);
+  }
+});
+
 test('the facts pass follows variables, also into a definer call and out through an export', async () => {
   const text = 'var p=Object.prototype;p.x=1;var dp=Object.defineProperty;dp(Set.prototype,"has",{});dp(obj,"x",{});' +
     'var a=Set;a=Map;a.y=1;var S=Set;export{S as T};export const P=Promise;';

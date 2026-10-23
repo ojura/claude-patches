@@ -596,10 +596,21 @@ class BuiltinScan {
     return keys.length ? keys : [];
   }
 
+  // The arguments of a call, construction or template tag. A tag receives its implicit template
+  // object first, represented by null here since it is a fresh frozen array, then each substitution
+  // unchanged. In particular, Object.defineProperty.call`${Set.prototype}${"has"}${descriptor}`
+  // gives defineProperty the target, key and descriptor after call removes its this argument.
+  argumentsOf(call) {
+    if (ts.isTaggedTemplateExpression(call)) {
+      return [null, ...(ts.isTemplateExpression(call.template) ? call.template.templateSpans.map((span) => span.expression) : [])];
+    }
+    return [...(call.arguments ?? [])];
+  }
+
   // A call of value at call (whose callee is node), with its arguments.
   call(node, call, value) {
     const name = valueName(value);
-    const args = [...call.arguments];
+    const args = this.argumentsOf(call);
     if (value.root === 'eval' && value.path.length === 0) {
       // A call whose callee is the name eval, also in parentheses, is a direct eval; eval reached any
       // other way, through (0,eval), globalThis.eval or ?.(), is indirect.
@@ -737,17 +748,12 @@ class BuiltinScan {
       if (ts.isTaggedTemplateExpression(outer) && outer.tag === current) return this.call(current, outer, value);
       if (ts.isNewExpression(outer) && outer.expression === current) return this.construct(outer, value);
       if ((ts.isCallExpression(outer) || ts.isNewExpression(outer)) && outer.arguments?.includes(current)) {
-        const callee = this.valueOf(outer.expression);
-        const calleeName = callee ? valueName(callee) : '';
-        const position = outer.arguments.indexOf(current);
-        const definerTarget = ts.isCallExpression(outer) && callee && (
-          (STATIC_DEFINERS.has(calleeName) && position === 0) ||
-          (callee.path.at(-1) === 'call' && STATIC_DEFINERS.has(valueName({ ...callee, path: callee.path.slice(0, -1) })) && position === 1) ||
-          (callee.path.at(-1) === 'call' && RECEIVER_DEFINERS.has(callee.path.at(-2)) && position === 0) ||
-          (callee.path.at(-1) === 'apply' && RECEIVER_DEFINERS.has(callee.path.at(-2)) && position === 0));
-        if (definerTarget && this.valueOf(current)) return;  // the definer's call records the write
-        if (callee && PROTOTYPE_READERS.has(calleeName) && position === 0) return;  // followed from the reader
-        return this.escape(current, value, ts.isNewExpression(outer) ? 'passed to a constructor' : 'passed to a function');
+        return this.argument(current, value, outer, outer.arguments.indexOf(current));
+      }
+      if (ts.isTemplateSpan(outer) && ts.isTemplateExpression(outer.parent) &&
+          ts.isTaggedTemplateExpression(outer.parent.parent) && outer.parent.parent.template === outer.parent) {
+        // A tagged substitution is an argument, not a string coercion.
+        return this.argument(current, value, outer.parent.parent, outer.parent.templateSpans.indexOf(outer) + 1);
       }
       if (ts.isBinaryExpression(outer)) {
         const op = outer.operatorToken.kind;
@@ -816,6 +822,24 @@ class BuiltinScan {
         : ts.isExportAssignment(outer) ? 'exported as the default export'
         : `used as the ${fieldOf(outer, current).field} of a ${kindName(outer)}`);
     }
+  }
+
+  // An argument passed unchanged to a function, constructor or template tag, at position (a tag's
+  // template object is at 0). Where a known definer receives it as its target, the definer's call
+  // records the write instead of recording an escape too.
+  argument(node, value, call, position) {
+    const callee = this.valueOf(ts.isTaggedTemplateExpression(call) ? call.tag : call.expression);
+    const calleeName = callee ? valueName(callee) : '';
+    const callable = ts.isCallExpression(call) || ts.isTaggedTemplateExpression(call);
+    const definerTarget = callable && callee && (
+      (STATIC_DEFINERS.has(calleeName) && position === 0) ||
+      (callee.path.at(-1) === 'call' && STATIC_DEFINERS.has(valueName({ ...callee, path: callee.path.slice(0, -1) })) && position === 1) ||
+      (callee.path.at(-1) === 'call' && RECEIVER_DEFINERS.has(callee.path.at(-2)) && position === 0) ||
+      (callee.path.at(-1) === 'apply' && RECEIVER_DEFINERS.has(callee.path.at(-2)) && position === 0));
+    if (definerTarget && this.valueOf(node)) return;  // the definer's call records the write
+    if (callable && callee && PROTOTYPE_READERS.has(calleeName) && position === 0) return;  // followed from the reader
+    return this.escape(node, value, ts.isTaggedTemplateExpression(call) ? 'passed to a template tag'
+      : ts.isNewExpression(call) ? 'passed to a constructor' : 'passed to a function');
   }
 
   // Whether a call of value gives a value the scan follows: the prototype readers' results.
