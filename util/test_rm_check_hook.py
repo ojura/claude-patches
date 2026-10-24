@@ -1,29 +1,30 @@
 """rm-check hook: the check runs with the request's directories.
 
-A session that started in /tmp ran `cd /home/juraj && ... rm -rf
-/tmp/cpa-deploy-7237e8a8` while its Bash working directory was
-/tmp/cpa-deploy-7237e8a8. Claude Code asked before running it, with
+In a session that started in /tmp and whose Bash working directory was
+/tmp/cpa-deploy-7237e8a8, Claude Code asked for approval before it ran
+`cd /home/juraj && ... rm -rf /tmp/cpa-deploy-7237e8a8`, with the reason
 "Dangerous rm operation on working directory or its ancestor:
-/tmp/cpa-deploy-7237e8a8": /home/juraj is outside the session's working
+/tmp/cpa-deploy-7237e8a8". /home/juraj is outside the session's working
 directories, so the check does not follow the cd and checks the rm in
-/tmp/cpa-deploy-7237e8a8. The check's message for that case says the command
-"would remove a workspace directory".
+/tmp/cpa-deploy-7237e8a8. The check's message for that case says that the
+command "would remove a workspace directory".
 
-The test repeats that with a new session directory S and its subdirectory
-S/child, on the newest Claude Code version installed under
-~/.local/share/claude/versions/, with the hook's own cache and runtime
-directories. The hook runs with RMCHECK_CLAUDE_VERSION, so it takes the
+The test repeats that example with a new session directory S and its
+subdirectory S/child, on the newest Claude Code version installed under
+~/.local/share/claude/versions/, and gives the hook new cache and runtime
+directories. The hook runs with RMCHECK_CLAUDE_VERSION set, so it takes the
 session's original directory from CLAUDE_PROJECT_DIR. For the same command
 `cd <home> && rm -rf S/child`:
 
-  - session in S, working directory S/child: denied with that message;
+  - session in S, working directory S/child: the hook denies the command with
+    that message;
   - session in S, working directory S: the rm removes a subdirectory, and the
     hook lets the command through;
   - session in <home>, working directory S/child: the check follows the cd to
     <home>, and the hook lets the command through.
 
-Each verdict must come out the same whether the hook, and the server it
-starts, run in the home directory or in S/child.
+Each verdict must be the same whether the hook and the server it starts run
+in the home directory or in S/child.
 """
 import importlib.util
 import json
@@ -107,9 +108,10 @@ def scratch():
 
 
 def run_hook(bun, env, start, command, cwd):
-    """Runs the hook in directory start for a request with working directory
-    cwd; returns its deny reason, or None when it lets the command through. A
-    hook that fails open fails the test."""
+    """Runs the hook in the directory start for a request whose working
+    directory is cwd, and returns the hook's reason for the denial, or None
+    when the hook lets the command through. A hook that fails open fails the
+    test."""
     p = subprocess.run(
         [bun, HOOK], cwd=start, env=env, text=True, capture_output=True, timeout=600,
         input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command},
@@ -126,7 +128,7 @@ def run_hook(bun, env, start, command, cwd):
 def test_check_uses_the_request_directories(scratch):
     version = newest_version()
     if version is None:
-        pytest.skip(f"no Claude Code version installed under {VERSIONS}")
+        pytest.skip(f"Claude Code is not installed under {VERSIONS}")
     bun = find_bun()
     if bun is None:
         pytest.skip("bun is not installed")
@@ -137,7 +139,8 @@ def test_check_uses_the_request_directories(scratch):
     command = f"cd {HOME} && rm -rf {child}"
     cases = [(session, child, True), (session, session, False), (HOME, child, False)]
     for start in (HOME, child):
-        # A runtime directory of its own gives each start directory its own server.
+        # Each start directory gets its own runtime directory, so the first hook
+        # there starts its own server, which runs in that start directory.
         runtime = scratch("rmcheck-test-run.")
         for project, cwd, denied in cases:
             env = dict(os.environ, XDG_CACHE_HOME=cache, XDG_RUNTIME_DIR=runtime,
@@ -162,8 +165,9 @@ def load_prepare():
 
 def test_prune_removes_other_layouts_and_keeps_what_servers_use(scratch):
     """prune(final) removes the modules directories of other layouts and the
-    versions nobody needs, and keeps the directories a running server was
-    started with. The versions 1.0.x are neither installed nor running."""
+    directories of other versions that are not installed or running, and keeps
+    the directories that a running server was started with. The versions 1.0.x
+    are neither installed nor running."""
     prepare = load_prepare()
     base = os.path.join(scratch("rmcheck-test-prune."), "rm-check")
     final = os.path.join(base, "1.0.0", "modules-v2")
@@ -172,8 +176,8 @@ def test_prune_removes_other_layouts_and_keeps_what_servers_use(scratch):
     removed = [os.path.join(base, "1.0.0", "modules"), os.path.join(base, "1.0.2", "modules-v2")]
     for d in kept + removed:
         os.makedirs(d)
-    # A process whose arguments look like a server's, for the two directories
-    # that a running server uses.
+    # For each of the two directories that a running server uses, start a
+    # process whose arguments look like a server's.
     servers = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
                                  "/x/rm-check-server.mjs", d, "/x/sock"])
                for d in (kept[2], kept[3])]
@@ -198,10 +202,11 @@ def test_prepare_refuses_a_directory_outside_the_cache_layout():
             prepare.main(["/x/claude", "2.1.305", final])
 
 
-# A chunk that behaves like the Bash tool and the two directory functions the
-# hook needs, and like look-alikes of them. Its tool's checkPermissions flags
-# `rm -rf /`, and the removal of its working directory or a parent of it; it
-# follows a cd only into the session's original directory.
+# A fake module with a Bash tool and two directory functions that behave as the
+# hook needs, and with look-alikes that ignore their arguments or lack
+# checkPermissions. bashTool's checkPermissions flags `rm -rf /` and the removal
+# of the working directory or one of its parents, and it follows a cd only into
+# the session's original directory.
 FAKE_CHUNK = r"""
 import { AsyncLocalStorage } from "node:async_hooks";
 const store = new AsyncLocalStorage();
@@ -239,9 +244,9 @@ try {
 
 
 def load_fake(scratch, tool, run, origin, request):
-    """Writes the fake chunk with prepare.py's export statement, lists the given
-    names for each role in a manifest, and returns what loadCheck and one
-    request give: {"out": the check's text or None} or {"error": message}."""
+    """Writes the fake module with prepare.py's export statement and a manifest
+    that lists the given names for each role, runs loadCheck and one request,
+    and returns {"out": the check's text or None} or {"error": the message}."""
     bun = find_bun()
     if bun is None:
         pytest.skip("bun is not installed")
@@ -278,9 +283,9 @@ def test_loadcheck_picks_what_behaves_as_the_hook_needs(scratch):
     assert got == {"out": None}
 
 
-def test_loadcheck_refuses_what_does_not_behave(scratch):
-    """Without a working candidate for a role, loadCheck throws and says what
-    the candidates did."""
+def test_loadcheck_refuses_look_alikes(scratch):
+    """When a role has only look-alikes, loadCheck throws and says what the
+    candidates did."""
     got = load_fake(scratch, ["lookalike"], ["run"], ["setOriginal"], REQUEST)
     assert "could not be identified" in got["error"] and "lookalike in fake.js did not flag it" in got["error"]
     got = load_fake(scratch, ["bashTool"], ["runWithout"], ["setOriginal"], REQUEST)
@@ -292,8 +297,8 @@ def test_loadcheck_refuses_what_does_not_behave(scratch):
 
 
 def discover_on(monkeypatch, modules):
-    """prepare.discover on synthetic modules {name: source}, which pfg.bundle
-    parses."""
+    """prepare.discover on the synthetic modules {name: source}. pfg.bundle
+    parses them with its node helper, so the test needs node."""
     if shutil.which("node") is None and not os.environ.get("npm_node_execpath"):
         pytest.skip("node is not installed")
     prepare = load_prepare()
@@ -306,9 +311,11 @@ NAME = 'var Be="Bash";export{Be};'
 BASH = ('import{Be}from"/$bunfs/root/name.js";function tn(d){return d}'
         'var Xi=tn({name:Be,searchHint:"execute shell commands",create(e){return{async '
         'checkPermissions(n,r){return n}}}});')
-# Look-alikes the anchors must refuse: a callback that is not the second
-# parameter, and parameters that are destructuring patterns with a free name as
-# the value, whose missing and null binding ids must not compare equal.
+# Look-alikes that the anchors must refuse: other(), whose callback is a free
+# name instead of its second parameter, and the two pattern() functions, whose
+# first parameter is a destructuring pattern and whose cwd or originalCwd value
+# is a free name. A destructuring pattern does not have a binding id and a free
+# name has a null one, and the anchors must not count the two as equal.
 CWD = ('import{AsyncLocalStorage as d}from"async_hooks";var n=new d;function On(e){return e}'
        'function Dg(e,o){return n.run({cwd:On(e)},o)}function other(e,o){return n.run({cwd:e},x)}'
        'function pattern({dir},fn){return n.run({cwd:free},fn)}')
@@ -340,8 +347,8 @@ def test_discover_names_every_anchor_that_fails(monkeypatch):
 
 def test_desktop_notifications_come_at_most_every_10_minutes(scratch):
     """A failing hook warns in the session every time, and posts a desktop
-    notification only when the last one is 10 minutes old. A notify-send on
-    PATH records each call."""
+    notification only when the last one is at least 10 minutes old. A fake
+    notify-send first on PATH records each call."""
     bun = find_bun()
     if bun is None:
         pytest.skip("bun is not installed")

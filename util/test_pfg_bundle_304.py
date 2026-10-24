@@ -1,7 +1,7 @@
 """Validate pfg's syntax, bindings, linking and built-in scan on the installed Claude Code 2.1.304.
 
 The tests skip when that binary is absent. CLAUDE_PFG_STRICT_GATES=pfg304 makes its absence a failure.
-The catalog repository separately tests its table predicates and expected table values.
+The catalog's repository tests its table predicates and the table values it expects.
 """
 import os
 from pathlib import Path
@@ -40,14 +40,14 @@ def summary(native):
     return native.builtin_summary(native.builtin_scan())
 
 
-def test_every_module_is_parsed_and_the_entrypoint_is_in_its_program(native):
+def test_every_module_parses_and_module_7_is_the_cli_entry_point_of_2_1_304(native):
     assert len(native.modules) == 2461
     assert all(record["diagnostics"] == [] for record in native.records.values())
     assert native.modules[7].name == "/$bunfs/root/cli"
     assert any("Version: 2.1.304" in comment["text"] for comment in native.leading_comments(7))
 
 
-def test_needle_hits_name_the_modules_with_the_flags_and_palette(native):
+def test_needle_hits_are_in_the_modules_with_the_flags_and_the_palette(native):
     assert {index for index, _ in native.hits("allowlist")} == {442}
     assert {index for index, _ in native.hits("idle")} == {442}
     assert {index for index, _ in native.hits("palette")} == {365}
@@ -97,7 +97,7 @@ def test_visible_builtin_writes_and_computed_global_keys_are_classified(summary)
     assert summary["unparsed"] == []
 
 
-def test_the_stated_limits_name_their_2_1_304_instances(native, summary):
+def test_the_stated_limits_list_their_2_1_304_instances(native, summary):
     # zod's six prototype writes, through Object.getPrototypeOf of a parameter or of its _zod member.
     assert {(entry["module"], entry["s"], entry["limit"]) for entry in summary["prototypeWrites"]} == {
         (40, 9369, "instances"), (41, 1322, "instances"), (41, 79473, "instances"),
@@ -112,7 +112,7 @@ def test_the_stated_limits_name_their_2_1_304_instances(native, summary):
     assert summary["limits"]["with"]["entries"] == {} and summary["limits"]["bounds"]["entries"] == {}
 
 
-def test_the_native_helper_is_the_loaded_protocol_and_typescript_version(native):
+def test_the_helper_runs_typescript_5_9_3_and_pfg_revision_is_the_loaded_one(native):
     assert native.typescript_version == "5.9.3"
     assert native.node_version.startswith("v")
     assert int((REPO / "pfg/REVISION").read_text().strip()) == pb.REVISION

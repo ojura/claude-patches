@@ -1,18 +1,19 @@
 // Keeps one Claude Code version's dangerous-removal check loaded and answers
-// the hook over a Unix socket, so a hook call does not pay the 0.45 s import
-// and the 0.2 s self-test. When the self-test fails, the server exits with its
-// message, and the hook, which then runs the check itself, fails open with it.
+// the hook over a Unix socket, so a hook call does not pay for the 0.45 s
+// import and the 0.2 s self-test. When the self-test fails, the server exits.
+// The hook then runs the check in its own process, where the self-test fails
+// the same way, and fails open with the self-test's message.
 //
 // Usage: rm-check-server.mjs <prepared dir> <socket path>
 //
-// The hook starts it when no server answers. A request is one JSON line
-// {command, cwd, originalCwd, mode}; the reply is one JSON line {message} (the
-// check's text, or null when the command is not flagged) or {error}. Requests
-// run one at a time, because each check sets the session's original working
-// directory, which the bundle keeps in process-wide state (see
-// rm-check-lib.mjs). After RMCHECK_IDLE_SECONDS (default 600) without a
-// request the server removes its socket and exits, which frees the loaded
-// bundle.
+// The hook starts a server when it does not get an answer on the socket. A
+// request is one JSON line {command, cwd, originalCwd, mode}. The reply is one
+// JSON line: {message} with the check's text, {message: null} when the check
+// does not flag the command, or {error}. Requests run one at a time, because
+// each check sets the session's original working directory, which the bundle
+// keeps in process-wide state (see rm-check-lib.mjs). When the server has not
+// had a request for RMCHECK_IDLE_SECONDS seconds (default 600), it removes its
+// socket and exits, and so frees the memory of the loaded bundle.
 import net from "node:net";
 import { unlinkSync } from "node:fs";
 import { loadCheck } from "./rm-check-lib.mjs";
@@ -55,8 +56,10 @@ function shutdown() {
   process.exit(0);
 }
 
-// A socket file left by a server that died refuses connections; a live server
-// answers, and then this one is not needed.
+// When the socket path is in use, this server connects to it. A socket file
+// left by a server that died refuses the connection, so this server removes the
+// file and listens again. When a live server accepts the connection, this one
+// exits, because the live server answers the hooks.
 function listen() {
   server.once("error", (e) => {
     if (e.code !== "EADDRINUSE") throw e;

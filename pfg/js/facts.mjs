@@ -1,27 +1,31 @@
-// The syntax and binding facts of the JavaScript modules of a Bun executable, for pfg/bundle.py.
+// A helper process for pfg/bundle.py that reports syntax and binding facts about the JavaScript modules
+// of a Bun executable.
 //
-// pfg.bundle starts this helper with `node --expose-gc facts.mjs`, streams it the modules that
-// bun_handler read out of the binary, and asks it for facts. The helper parses each module on its own,
-// with the TypeScript parser vendored in ./vendor/typescript, and never runs module code.
+// pfg.bundle starts this helper with `node --expose-gc facts.mjs`, sends it the modules that bun_handler
+// read out of the binary, and then asks it questions about them. The helper parses each module
+// separately, with the TypeScript parser vendored in ./vendor/typescript, and never runs module code.
 //
-// Protocol: UTF-8 JSON, one value per line, on stdin and stdout; stdout is reserved for this protocol.
+// Protocol: UTF-8 JSON, one value per line, on stdin and stdout. Only protocol messages go to stdout.
 //   - The first line the helper writes is {"hello": {"protocol": 1, "helper": "pfg-facts",
-//     "revision": R, "node": ..., "typescript": ...}}, R being the number in pfg/REVISION as this
-//     process read it.
+//     "revision": R, "node": ..., "typescript": ...}}, where R is the number this process read from
+//     pfg/REVISION when it started.
 //   - A request is {"id": n, "op": ..., ...}. Its reply is {"id": n, "ok": true, "result": ...} or
-//     {"id": n, "ok": false, "error": {"kind": "request" | "internal", "message": ...}}: "request" when
-//     the request names something absent or is malformed, "internal" for an exception in the helper.
-//   - A line without an id is a notification and does not receive a reply. "module" is the one notification; an
-//     error it causes is the reply to the next request.
+//     {"id": n, "ok": false, "error": {"kind": "request" | "internal", "message": ...}}. The kind is
+//     "request" when the request is malformed or refers to a module, node or binding that does not
+//     exist, and "internal", with the stack trace in detail, for any other exception in the helper.
+//   - A line without an id is a notification, which does not get a reply. The only notification is
+//     "module". If it fails, or a line is not JSON, the error is the reply to the next request.
 //   - The helper exits when its stdin closes.
 //
-// Positions are UTF-16 offsets into a module's text, as TypeScript counts them. A node is named by its
-// handle: the indices of the children on the path from the module's root, each index counting the
-// children in the order ts.forEachChild visits them, joined with dots ("" is the module itself).
+// Positions are UTF-16 offsets into a module's text, as TypeScript counts them. Requests and results
+// refer to a node by its handle: the child indices on the path from the module's root to the node, in
+// ts.forEachChild order, joined with dots; "" is the module itself. A handle identifies a node only
+// together with its module index.
 //
 // Requests:
 //   index {needles}               parse every module once and return a record of each (indexModule)
-//   facts {module, queries}       answer queries about one module with a checker (factsBatch)
+//   facts {module, queries}       answer queries about one module with a TypeScript type checker
+//                                 (factsBatch)
 //   vocabulary                    {operations}: every built-in operation a use can require
 //                                 (OPERATION_VOCABULARY)
 import fs from 'node:fs';
@@ -37,10 +41,10 @@ const REVISION = Number(fs.readFileSync(path.join(HERE, '..', 'REVISION'), 'utf8
 const PROTOCOL = 1;
 const K = ts.SyntaxKind;
 
-// The compiler options of the retained structural matcher, with every file a module: a Bun chunk is
-// an ES module even when it does not contain an import or export. The parser applies the same rule through
-// setExternalModuleIndicator; without it, a module with neither imports nor exports (2.1.304 has seven)
-// would be parsed and bound as a script.
+// The TypeScript compiler options. moduleDetection Force makes TypeScript treat every file as a module,
+// because a Bun chunk is an ES module even when it does not contain an import or export. PARSE_OPTIONS
+// gives the parser the same rule through setExternalModuleIndicator. Without it, a module with neither
+// imports nor exports (2.1.304 has seven) would be parsed and bound as a script.
 const OPTIONS = {
   allowJs: true, checkJs: false, noResolve: true, noLib: true, noEmit: true,
   target: ts.ScriptTarget.Latest, module: ts.ModuleKind.ESNext, moduleDetection: ts.ModuleDetectionKind.Force,
@@ -55,8 +59,9 @@ const modules = new Map();
 let deferredError = null;
 
 function fileName(index) {
-  // TypeScript leaves a root file without a known extension out of the program, as the entrypoint
-  // /$bunfs/root/cli would be; the module's Bun name stays in its record.
+  // TypeScript leaves a root file out of the program when its name does not end in a known extension,
+  // which would happen to the entrypoint /$bunfs/root/cli. So the program names each module by its
+  // index, and the module's record keeps its Bun name.
   return `/module/${index}.js`;
 }
 
@@ -70,9 +75,10 @@ function parse(module) {
   return ts.createSourceFile(fileName(module.index), module.text, PARSE_OPTIONS, true, ts.ScriptKind.JS);
 }
 
-// Release points: a full collection after a large module and after every 8 MB of parsed text, so that
-// parse trees which are already garbage do not pile up before V8 grows its heap. --expose-gc makes
-// global.gc available; it does not set a memory limit.
+// released() runs a full garbage collection after a module longer than a million UTF-16 code units, and
+// whenever more than 8 million code units have been parsed since the last collection. V8 then frees the
+// parse trees that are no longer referenced instead of growing its heap to hold them. --expose-gc only
+// makes global.gc available; the helper runs with V8's default heap limit.
 let sinceCollection = 0;
 function released(length) {
   sinceCollection += length;
@@ -108,8 +114,9 @@ function handleOf(node) {
   return parts.reverse().join('.');
 }
 
-// SyntaxKind's names, without its range markers: K[kind] gives FirstStatement for VariableStatement and
-// FirstLiteralToken for NumericLiteral, because those markers share the value.
+// The name of each SyntaxKind value, leaving out the First* and Last* range markers: K[kind] would give
+// FirstStatement for VariableStatement and FirstLiteralToken for NumericLiteral, because each of those
+// markers has the same value as the kind it marks.
 const KIND_NAMES = new Map();
 for (const [name, value] of Object.entries(K)) {
   if (typeof value === 'number' && !/^(First|Last)[A-Z]/.test(name) && !KIND_NAMES.has(value)) KIND_NAMES.set(value, name);
@@ -117,10 +124,11 @@ for (const [name, value] of Object.entries(K)) {
 const kindName = (node) => KIND_NAMES.get(node.kind) ?? K[node.kind];
 const start = (node, sourceFile) => node.getStart(sourceFile, false);
 
-// The fields of a node that hold its children: every field TypeScript 5.9.3's forEachChild visits
-// (forEachChildTable in the vendored typescript.js), with the ones JavaScript syntax uses first. A
-// child's field is the first that holds it; fieldOf throws when every known field fails to hold it, so a node kind
-// that a later TypeScript adds cannot go unnamed.
+// The fields that can contain a node's children: every field that forEachChild visits in TypeScript
+// 5.9.3 (forEachChildTable in the vendored typescript.js), with the fields of JavaScript syntax first. A
+// child's field is the first field that contains it. fieldOf throws when it does not find the child in
+// any of these fields, so a node kind or field that a later TypeScript version adds makes the request
+// fail instead of producing a step without a field name.
 const FIELDS = [
   'expression', 'name', 'propertyName', 'questionDotToken', 'arguments', 'elements', 'properties', 'left',
   'operatorToken', 'right', 'operand', 'initializer', 'objectAssignmentInitializer', 'equalsToken', 'condition',
@@ -155,10 +163,12 @@ function isFunctionLike(node) {
     ts.isConstructorDeclaration(node) || ts.isClassStaticBlockDeclaration(node);
 }
 
-// Whether a function reads its own `arguments`, in its parameters or its body. An arrow function inside
-// it shares that object. A nested non-arrow function has its own, but its computed name and its
-// decorators run in the enclosing function, as do a nested class's extends clause and the computed
-// names of its members, which the walk reaches through the class.
+// Whether a function reads its own `arguments` object, in its parameters or its body; false for an arrow
+// function, which does not have one, and for a function without a body. The walk enters nested arrow
+// functions, which share the object. It skips the parameters and body of a nested non-arrow function,
+// which has its own `arguments`, but visits that function's computed name and decorators, because they
+// are evaluated in the enclosing function. A nested class's extends clause and its members' computed
+// names are also evaluated there; the walk reaches them by descending into the class.
 function readsArguments(fn) {
   if (ts.isArrowFunction(fn) || !fn.body) return false;
   let found = false;
@@ -178,15 +188,16 @@ function readsArguments(fn) {
   return found;
 }
 
-// The cooked value of a string or template part as JavaScript computes it. A tagged template may hold
-// an escape that is not valid, such as \u{ZZ}; its cooked value is undefined, and TypeScript marks the
-// node with ContainsInvalidEscape while its text holds the escape's characters.
+// The cooked value of a string literal or template part, as JavaScript computes it. A tagged template
+// may contain an invalid escape such as \u{ZZ}. JavaScript gives that part the cooked value undefined,
+// while TypeScript sets ContainsInvalidEscape in the node's templateFlags and keeps the escape's
+// characters in its text.
 function cooked(node) {
   if ((node.templateFlags ?? 0) & ts.TokenFlags.ContainsInvalidEscape) return undefined;
   return node.text;
 }
 
-// var, let, const, using or await using.
+// The keyword of a variable declaration list: var, let, const, using or await using.
 function declarationListKind(list) {
   switch (list.flags & ts.NodeFlags.BlockScoped) {
     case ts.NodeFlags.Let: return 'let';
@@ -197,8 +208,8 @@ function declarationListKind(list) {
   }
 }
 
-// A literal primitive key: the JavaScript property name of a string, a number, true, false or null,
-// and of a minus sign before a number; undefined for any other expression.
+// The property name that a literal gives as a key: for a string, a number, true, false, null or a minus
+// sign before a number, the string JavaScript converts it to; undefined for any other expression.
 function literalKey(node) {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return cooked(node);
   if (ts.isNumericLiteral(node)) return String(Number(node.text));
@@ -211,8 +222,8 @@ function literalKey(node) {
   return undefined;
 }
 
-// The property name a member's name gives, or undefined when it is computed from an expression that is
-// not a literal primitive.
+// The property name of a member's name: the text of an identifier or private name, or the property name
+// of a literal (literalKey), also inside a computed name; undefined for any other computed name.
 function memberKey(name) {
   if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) return name.text;
   if (ts.isComputedPropertyName(name)) return literalKey(name.expression);
@@ -253,7 +264,8 @@ function isStatementLike(node) {
     ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isExportAssignment(node);
 }
 
-// The steps from a node up to the statement that holds it, that statement included.
+// The steps from a node up to the nearest statement that contains it, one for each parent on the way,
+// that statement included. A chain that reaches the source file ends there.
 function chainOf(node) {
   const steps = [];
   for (let child = node, parent = node.parent; parent; child = parent, parent = parent.parent) {
@@ -263,10 +275,12 @@ function chainOf(node) {
   return steps;
 }
 
-// Whether an identifier names a property, a member, a label, an import attribute or a module's public
-// name, which are not references to a binding of the module. The public names are the outside name of
-// an import or export specifier, both names of a re-export (`export {a as b} from "m"` names exports of
-// two modules), and the name of `export * as n from "m"`.
+// Whether an identifier is a property name, a member name, a label, an import attribute key, or a name
+// in a module's imports and exports. Such an identifier does not refer to a binding of the module. The
+// import and export names are the imported name of an import specifier (a in `import {a as b}`), the
+// exported name of an export specifier (b in `export {a as b}`), both names of a re-export
+// (`export {a as b} from "m"`, where a is an export of m and b an export of this module), and n in
+// `export * as n from "m"`.
 function isPropertyName(node) {
   const parent = node.parent;
   if (!parent) return false;
@@ -284,9 +298,6 @@ function isPropertyName(node) {
   return false;
 }
 
-// ---------------------------------------------------------------------------------------------------
-// The index pass
-
 const BINARY_ASSIGNMENTS = new Set([
   K.EqualsToken, K.PlusEqualsToken, K.MinusEqualsToken, K.AsteriskEqualsToken, K.AsteriskAsteriskEqualsToken,
   K.SlashEqualsToken, K.PercentEqualsToken, K.LessThanLessThanEqualsToken, K.GreaterThanGreaterThanEqualsToken,
@@ -296,69 +307,82 @@ const BINARY_ASSIGNMENTS = new Set([
 // ---------------------------------------------------------------------------------------------------
 // The built-in scan
 //
-// The catalog's tables rely on the built-in operations its model uses (new Set, Set.prototype.has,
-// Array.prototype.includes and the like) keeping their standard behaviour. The scan starts at each
-// built-in name and follows the use forms listed below. Standard behaviour remains an assumption;
-// passed counts matched use forms, not a proof about code invoked by arguments, getters or callbacks.
-// It sorts each place a value goes into:
-//   passed        a call, construction, member read, comparison, typeof, test, discarded value or
-//                 class heritage clause that matches the model;
-//   writes        a write that replaces a built-in or one of its members (below);
-//   globalWrites  a write to the global object under a key that is not a built-in's name;
-//   references    the value is stored in a variable; the facts pass follows the variable's uses;
-//   unfollowed    the value goes where the scan does not follow it: passed to a function, stored in an
-//                 object or array, returned, thrown, yielded, spread, a member call the scan cannot name;
-//   dynamic       code the scan cannot see into: a direct eval call, any other call of eval, a call or
-//                 construction of the Function constructor or its async and generator kinds, a call of a
-//                 .constructor the scan cannot identify, and eval or Function going where the scan does
-//                 not follow them;
+// The tables that the catalog reads out of the bundle are correct only while the built-in operations the
+// operation model relies on (new Set, Set.prototype.has, Array.prototype.includes and others) behave as
+// the language specifies. The scan starts at each built-in name and follows the value through the kinds
+// of use listed below. It cannot prove that the built-ins behave as specified: passed counts the uses
+// whose form matches the model, and the scan does not check code that such a use runs through its
+// arguments, getters or callbacks. The scan sorts each use of a built-in value into one of these groups:
+//   passed           a call, construction, member read, comparison, typeof, test, discarded value or
+//                    class extends clause that matches the model, counted for each value;
+//   writes           a write that replaces a built-in or one of its members (see "Writes" below);
+//   globalWrites     a write to the global object under a key that is not a built-in's name;
+//   registryWrites   a write under a key that is a Symbol.for result;
+//   unknownKeys      a write to the global object under a key the scan cannot read, or below such a key;
+//   references       the value is stored in a variable, and the facts pass follows the variable's uses;
+//   exports          the value is exported, and pfg/bundle.py passes it on to the importing modules;
+//   unfollowed       the scan stops following the value: it is passed to a function, stored in an object
+//                    or array, returned, thrown, yielded or spread, or a member of globalThis, Object or
+//                    Reflect is called with a key the scan cannot read;
+//   dynamic          code the scan cannot see into: a direct eval call, any other call of eval, a call
+//                    or construction of the Function constructor or its async and generator variants, a
+//                    call of a .constructor the scan cannot identify, and eval or a function constructor
+//                    that goes where the scan stops following it;
 //   prototypeWrites  a write into an object reached by .constructor, .__proto__ or getPrototypeOf from
-//                 an object the scan cannot identify.
-// The writes: an assignment of any operator, ++, --, delete, or a destructuring or for-in/of target, at
-// a built-in's name or at a member of a built-in value; a call of Object.defineProperty,
+//                    an object the scan cannot identify.
+// Writes: an assignment with any assignment operator, ++, --, delete, or a destructuring or for-in/of
+// target, at a built-in's name or at a member of a built-in value; a call of Object.defineProperty,
 // defineProperties, assign or setPrototypeOf, or of Reflect.set, defineProperty, deleteProperty or
-// setPrototypeOf, directly or through call or apply, with a built-in value as the target; a call of
-// __defineGetter__ or __defineSetter__ on a built-in value, also through call or apply; a mutating
-// array method (push, pop, shift, unshift, splice, sort, reverse, fill, copyWithin) called on
-// Array.prototype. A write names its target as a path, such as Set.prototype.has, or
-// %ArrayIteratorPrototype%.next for the prototype of an array's iterators; a key the scan cannot read is
-// *, and a well-known symbol is @@iterator and the like.
+// setPrototypeOf, made directly or through call or apply, with a built-in value as the target; a call of
+// __defineGetter__ or __defineSetter__ on a built-in value, also through call or apply; and a call of a
+// mutating array method (push, pop, shift, unshift, splice, sort, reverse, fill, copyWithin) on
+// Array.prototype. A write entry gives its target as a path, such as Set.prototype.has, or
+// %ArrayIteratorPrototype%.next for the prototype of array iterators. A key the scan cannot read appears
+// as *, and a well-known symbol as @@iterator, @@toPrimitive and so on.
 //
-// Values: a built-in's name (BUILTINS), the global object under any of its names (globalThis.Set is
-// Set), and every static member read from a built-in value, normalized where the language fixes the
-// result for a recognized constructor or prototype. Native error and typed-array prototypes retain
-// their distinct parents. An arbitrary member's type is not inferred: Math.PI.constructor must not be
-// called Function merely because Math is a built-in. An instance is a new object whose prototype the
-// scan names: a literal ([], {}, a function or arrow expression, a regular expression, and a string,
-// number, bigint or boolean, whose members are read from its wrapper's prototype), `new X()` with X a
-// built-in constructor, and the iterator the iterator methods of Array, Set, Map and String return. A
-// write into an instance's own member is not a write to a built-in; its constructor and __proto__ are
-// followed from where it is created. An object literal with a spread, a computed key the scan cannot
-// read, or its own constructor or __proto__ member, and a class expression, are not identified, since
-// their members can differ from those of their prototype. A value the scan
-// cannot identify is (object); its writes are prototypeWrites, calls of its constructor are dynamic
-// code, and its other uses are counted only. Calls have special rules for definers, prototype readers,
-// eval and function constructors, and for the mutating methods of Array.prototype, which write the
-// members of their this value also through call, apply, bind and Reflect.apply. Template tags receive
-// their implicit template object and their raw substitution values as arguments.
+// Built-in values: a built-in's name (BUILTINS), the global object under any of its names
+// (globalThis.Set is Set), and every member read from a built-in value. Where the language fixes the
+// result of a constructor or __proto__ read, the value is that result: Set.prototype.constructor is Set,
+// Set.constructor is Function, and Set.prototype.__proto__ is Object.prototype. A native error
+// constructor and its prototype inherit from Error and Error.prototype, and a typed array constructor
+// and its prototype from %TypedArray% and %TypedArray%.prototype. The scan does not know the type of any
+// other member, so the constructor of such a member is an (object) value: Math.PI.constructor is Number,
+// and the scan cannot tell that from Math being a built-in. An instance is a new object whose prototype
+// the scan knows: a literal ([], {}, a function or arrow expression, a regular expression, or a string,
+// number, bigint or boolean, whose members are read from the prototype of its wrapper object), `new X()`
+// with X a built-in constructor, and the iterator that an iterator method of Array, Set, Map, String or
+// a typed array returns. A write to an instance's own member does not change a built-in, so the scan
+// does not record it. Reading constructor or __proto__ from an instance gives the built-in constructor
+// or prototype, and the scan follows that value from the read. The scan does not identify an object
+// literal with a spread, with a computed key it cannot read, or with its own constructor or __proto__
+// member, or a class expression, because their members can differ from those of their prototype. A value
+// the scan cannot identify appears as (object): a write through it is a prototypeWrites entry, a call of
+// its constructor is dynamic code, and its other uses only add to the unidentified count. The scan has
+// separate cases for calls of definers, prototype readers, eval, the function constructors and the
+// mutating methods of Array.prototype (BuiltinScan.call, followResults and argument). A mutating method
+// writes the members of its this value, also when it is called through call, apply, bind or
+// Reflect.apply. A template tag receives the template object and then the value of each substitution,
+// unconverted, as its arguments.
 //
-// An expression may hold several values (BuiltinScan.abstract): a conditional, a logical operator or a
-// variable assigned more than once gives each, and a write or a definer through it reaches each. The
-// facts pass follows a variable through its occurrences with every value it receives, and repeats its
-// pass over the module until no variable gains a value, because a use classified early can give a
-// variable a value that an earlier use needed. It is flow-insensitive: after `var t=Set;t=t.prototype`
-// the variable holds Set, Set.prototype and the values derived from them again, up to the bounds below.
-// A variable with a source outside the model (Facts.hasUnknownOrigins) may also hold a value the scan
-// does not identify; its known values are still followed.
+// An expression can have several values (BuiltinScan.abstract): a conditional or logical expression has
+// the values of its operands, and a variable assigned more than once has every value assigned to it. A
+// write or a definer call through such an expression is recorded for each of its values. The facts pass
+// follows a variable through its occurrences with every value it receives, and repeats its pass over the
+// module until the values of every variable stay the same, because classifying a use can give a variable
+// a value that a use classified earlier in the pass needed. The analysis is flow-insensitive, that is,
+// it ignores statement order: after `var t=Set;t=t.prototype`, t holds Set, Set.prototype,
+// Set.prototype.prototype and so on, up to the bounds below. A variable that has a source outside the
+// model (Facts.hasUnknownOrigins) may also hold a value the scan cannot identify; the scan still follows
+// its known values.
 //
-// The forms the scan does not identify are stated limits; an entry that comes from one has the limit's
-// name in its limit field, and pfg/bundle.py states them (BUILTIN_SCAN_LIMITS):
-//   instances      a write through an object whose prototype the scan does not name, such as an object a
-//                  parameter or a variable holds;
-//   definer-calls  a definer bound, passed or stored where the scan does not follow it, which may be called
-//                  from there;
-//   with           a built-in's name inside a with statement, or a built-in value as a with's object;
-//   bounds         a value derived more than MAX_VALUE_PATH members deep, or past the
+// The scan reports the forms it cannot identify as limits. An entry found through one of them has the
+// limit's name in its limit field, and pfg/bundle.py describes each limit (BUILTIN_SCAN_LIMITS):
+//   instances      a write through an object whose prototype the scan does not know, such as an object
+//                  received as a parameter or read from a variable;
+//   definer-calls  a definer that is bound, passed or stored somewhere the scan does not follow, from
+//                  where it may be called;
+//   with           a built-in's name inside a with statement, or a built-in value as the object of one;
+//   bounds         a value more than MAX_VALUE_PATH members deep, or a value beyond the
 //                  MAX_VALUES_PER_VARIABLE values a variable can hold; a write through it is not recorded.
 
 const GLOBAL_NAMES = new Set(['globalThis', 'global', 'self', 'window']);
@@ -377,7 +401,8 @@ const NATIVE_ERRORS = new Set(['AggregateError', 'EvalError', 'RangeError', 'Ref
 const TYPED_ARRAYS = new Set(['BigInt64Array', 'BigUint64Array', 'Float16Array', 'Float32Array', 'Float64Array', 'Int8Array',
   'Int16Array', 'Int32Array', 'Uint8Array', 'Uint8ClampedArray', 'Uint16Array', 'Uint32Array']);
 const CODE_RUNNERS = new Set(['eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
-// Definers with the target as their first argument, and the key as their second where there is one.
+// The definers, which take their target as the first argument. The value says what the later arguments
+// give: a key, objects whose keys the definer writes, or a prototype.
 const STATIC_DEFINERS = new Map([
   ['Object.defineProperty', 'key'], ['Object.defineProperties', 'keys'], ['Object.assign', 'keys'],
   ['Object.setPrototypeOf', 'prototype'], ['Reflect.set', 'key'], ['Reflect.defineProperty', 'key'],
@@ -402,10 +427,10 @@ const UNKNOWN = '(object)';
 const MAX_VALUE_PATH = 6;
 const MAX_VALUES_PER_VARIABLE = 16;
 
-// A value with instance set stands for a new object whose prototype is the value's path, as
-// Set.prototype for `new Set()` (see "Values" above); its name ends in #instance.
+// A value with instance set is a new object whose prototype is the object at the value's path, such as
+// Set.prototype for `new Set()` (see "Built-in values" above). Its name ends in #instance.
 const valueName = (value) => [value.root, ...value.path].join('.') + (value.instance ? '#instance' : '');
-// The methods that return an iterator, and the intrinsic prototype of that iterator.
+// Maps each method that returns an iterator to the intrinsic prototype of that iterator.
 const ITERATOR_METHODS = new Map([
   ...['@@iterator', 'values', 'keys', 'entries'].flatMap((name) => [
     [`Array.prototype.${name}`, '%ArrayIteratorPrototype%'], [`Set.prototype.${name}`, '%SetIteratorPrototype%'],
@@ -419,8 +444,8 @@ const ITERATOR_PROTOTYPES = new Set(ITERATOR_METHODS.values());
 // Iterator.prototype, not a constructor.
 const isIteratorPrototype = (value) => value.path.length === 0 && ITERATOR_PROTOTYPES.has(value.root);
 
-// The intrinsic prototype of the iterator a call of the value returns, or undefined. A method called
-// through call or apply returns the same kind of iterator.
+// The intrinsic prototype of the iterator that a call of callee returns, or undefined. Calling the
+// method through call or apply returns the same kind of iterator.
 function iteratorPrototypeOf(callee) {
   const path = callee.instance ? undefined : [callee.root, ...callee.path];
   if (!path) return undefined;
@@ -428,14 +453,17 @@ function iteratorPrototypeOf(callee) {
   return ITERATOR_METHODS.get(path.join('.'));
 }
 
-// What an expression may evaluate to (BuiltinScan.abstract): the built-in values the scan identifies,
-// and whether it may also be a value the scan does not identify. Empty values without unknown means the
-// expression holds no built-in value the scan knows of: it reads a variable that has not received one
-// yet in this pass, or one whose sources the scan identifies and which holds none, as after `var x;`.
+// BuiltinScan.abstract describes what an expression may evaluate to as {values, unknown}: values are the
+// built-in values the scan identifies, and unknown is true when the expression may also evaluate to a
+// value the scan cannot identify. UNIDENTIFIED is the description of an expression the scan cannot
+// identify at all. A result with empty values and unknown false means that the expression does not
+// evaluate to a built-in value the scan knows of: it reads a variable that has not received one yet in
+// this pass, or a variable whose identified sources have not given it one, as after `var x;`.
 const UNIDENTIFIED = Object.freeze({ values: [], unknown: true });
 
-// Tells values apart, including how a call would receive this: a method read through an instance is
-// called with the instance as this.
+// The key that tells values apart. It includes how a call would receive this, because a method read
+// through an instance is called with the instance as this, and whether the value is a member of the
+// global object under a key that is not a built-in's name (foreign).
 const valueKey = (value) => `${valueName(value)}${value.receiver ? ' through an instance' : ''}${value.foreign ? ' (global key)' : ''}`;
 
 function distinct(values) {
@@ -446,10 +474,10 @@ function union(...parts) {
   return { values: distinct(parts.flatMap((part) => part.values)), unknown: parts.some((part) => part.unknown) };
 }
 
-// Whether a built-in value is an object, a function or a symbol, which a test always finds true: a
-// built-in's name, an intrinsic prototype, the prototype object of a constructor, a well-known symbol,
-// or an object instance. A primitive's instance can be false, and so can a member the scan does not
-// type, such as Array.prototype.length.
+// Whether a built-in value is always truthy, because it is an object, a function or a symbol: a
+// built-in's name, an intrinsic prototype, a constructor's prototype object, a well-known symbol, or an
+// instance of an object type. An instance of a primitive type (String, Number, BigInt, Boolean) can be
+// falsy, and so can a member whose type the scan does not know, such as Array.prototype.length.
 function isTruthy(value) {
   if (value.foreign || value.root === UNKNOWN) return false;
   if (value.instance) return !['String', 'Number', 'BigInt', 'Boolean'].includes(value.root);
@@ -464,8 +492,9 @@ function isArrayMutator(value) {
     ARRAY_MUTATORS.has(value.path[1]);
 }
 
-// The argument position at which a call of fn passes a definer, or a mutating method of Array.prototype
-// called or bound through call, apply or bind, its target, or -1.
+// The index of the argument that a call of fn uses as its target, or -1. fn can be a definer from
+// STATIC_DEFINERS called directly or through call, __defineGetter__ or __defineSetter__ called through
+// call or apply, or a mutating method of Array.prototype called through call, apply or bind.
 function definerTargetPosition(fn) {
   if (STATIC_DEFINERS.has(valueName(fn))) return 0;
   const last = fn.path.at(-1);
@@ -476,12 +505,15 @@ function definerTargetPosition(fn) {
   return -1;
 }
 
-// The value of reading key from value, normalized where the language fixes the result.
+// The value that reading key from value gives. A constructor or __proto__ read gives the value the
+// language fixes for it where there is one: Set.prototype.constructor is Set, and
+// Set.prototype.__proto__ is Object.prototype.
 function memberValue(value, key) {
   if (value.instance) {
     const prototype = { root: value.root, path: value.path };
     if (key === '__proto__') return prototype;
-    // A member read through an instance keeps the instance as the receiver a call would get.
+    // A method read through an instance is called with the instance as this, so the result records the
+    // instance as its receiver.
     return { ...memberValue(prototype, key), receiver: 'instance' };
   }
   const { root, path } = value;
@@ -496,19 +528,20 @@ function memberValue(value, key) {
   if (root === UNKNOWN) return { root, path: [...path, key] };
   if (key === 'constructor') {
     if (path.length === 1 && path[0] === 'prototype' && HAS_PROTOTYPE.has(root)) return { root, path: [] };
-    // Iterator.prototype.constructor, which the iterator prototypes inherit, is an accessor.
+    // The iterator prototypes inherit constructor from Iterator.prototype, where it is an accessor
+    // property, so its value is unknown.
     if (isIteratorPrototype(value)) return { root: UNKNOWN, path: ['constructor'] };
     if (path.length === 0 && NAMESPACES.has(root)) return { root: 'Object', path: [] };
     if (path.length === 0) return { root: 'Function', path: [] };
-    // A member can be a primitive, a function or another object. Without its type, its constructor is
-    // unknown; Math.PI.constructor, for example, is Number, not Function.
+    // A member can be a primitive, a function or another object, and the scan does not know which, so
+    // its constructor is unknown: Math.PI.constructor, for example, is Number, not Function.
     return { root: UNKNOWN, path: ['constructor'] };
   }
   if (key === '__proto__') return prototypeOf(value);
   return { root, path: [...path, key] };
 }
 
-// The prototype of a built-in value, where the language fixes it.
+// The prototype of a built-in value where the language specifies it, and an (object) value otherwise.
 function prototypeOf(value) {
   if (value.instance) return { root: value.root, path: value.path };
   const { root, path } = value;
@@ -530,14 +563,17 @@ function prototypeOf(value) {
   return { root: UNKNOWN, path: ['__proto__'] };
 }
 
-// The constructor of a literal's kind, for literal.constructor, literal.__proto__ and getPrototypeOf.
+// The built-in constructor of the object a literal creates, such as Array for [] and RegExp for /x/, which
+// decides literal.constructor, literal.__proto__ and getPrototypeOf(literal). It is undefined for a class
+// expression, an object literal whose members can differ from its prototype's, and any other expression.
 function literalConstructor(node) {
   let current = node;
   while (ts.isParenthesizedExpression(current)) current = current.expression;
   if (ts.isArrayLiteralExpression(current)) return 'Array';
   if (ts.isObjectLiteralExpression(current)) {
-    // An object literal can declare its own constructor or prototype. Those members are handled from
-    // their initializer where possible; an unknown key or spread prevents assuming the inherited value.
+    // An object literal can define its own constructor or __proto__ member, which memberRead reads from
+    // its initializer where it can. A key the scan cannot read or a spread can also define these
+    // members, so the inherited values cannot be assumed.
     if (current.properties.some((property) => ts.isSpreadAssignment(property) ||
         memberKey(property.name) === undefined || ['constructor', '__proto__'].includes(memberKey(property.name)))) return undefined;
     return 'Object';
@@ -552,7 +588,7 @@ function literalConstructor(node) {
     const generator = Boolean(current.asteriskToken);
     return generator ? (isAsync ? 'AsyncGeneratorFunction' : 'GeneratorFunction') : isAsync ? 'AsyncFunction' : 'Function';
   }
-  // A class expression can have heritage, static fields or static blocks that change these members.
+  // A class expression's extends clause, static fields or static blocks can change these members.
   return undefined;
 }
 
@@ -578,10 +614,11 @@ function writeHow(expression) {
 }
 
 class BuiltinScan {
-  // freeValue(identifier) gives the value a free built-in's name holds, else null. isFree(identifier)
-  // tells whether a name is a free name, not a variable of the module. In the facts pass,
-  // variableValue(identifier) gives what a variable of the module may hold (see abstract), and null for
-  // a free name; in the index pass every name the module declares is a value the scan does not identify.
+  // freeValue(identifier) returns the built-in value of a free name, or null for any other name.
+  // isFree(identifier) tells whether a name is free, that is, the module does not declare it. In the
+  // facts pass, variableValue(identifier) returns the values a variable of the module may hold, in the
+  // form abstract returns, and null for a free name. The index pass does not set variableValue, so there
+  // every name the module declares has a value the scan cannot identify.
   constructor(sourceFile, freeValue, handleOf, isFree) {
     this.sourceFile = sourceFile;
     this.freeValue = freeValue;
@@ -597,9 +634,11 @@ class BuiltinScan {
     return { s: start(node, this.sourceFile), e: node.end, h: this.handleOf(node) };
   }
 
-  // A key is literal, a registry symbol, a well-known symbol, a string drawn from a proved finite
-  // list, or unknown. requires lists the built-in operations a proof uses. The summary invalidates
-  // that proof if the scan detects a write to a dependency.
+  // The keys an expression can give as a property key: a literal key, a Symbol.for result (@registry), a
+  // well-known symbol (@@iterator and so on), one of a finite list of strings that a proof establishes
+  // (finiteKeys), or the unknown key *. requires lists the built-in operations the proof relies on. When
+  // the scan finds a write to one of them, builtin_summary in pfg/bundle.py drops the proof and records
+  // the write under the key * instead.
   keyInfo(expression) {
     if (!expression) return { keys: ['*'], requires: [] };
     const literal = literalKey(expression);
@@ -619,8 +658,8 @@ class BuiltinScan {
     return keys.length === 1 ? keys[0] : '*';
   }
 
-  // Whether an expression is a call of the built-in Symbol.for, or, in the facts pass, a variable that
-  // holds one and is never written (registryVariable).
+  // Whether an expression is a call of the built-in Symbol.for or, in the facts pass, a variable whose
+  // initializer is such a call and that is never written (registryVariable).
   registry(expression) {
     let current = expression;
     while (ts.isParenthesizedExpression(current)) current = current.expression;
@@ -644,14 +683,16 @@ class BuiltinScan {
     void how;
   }
 
-  // What an expression may evaluate to: the built-in values the scan identifies, and whether it may also
-  // be a value the scan does not identify (unknown). Every possible value counts, so that a write through
-  // a variable or a conditional reaches each built-in it may hold. Literals, `new X()` of a built-in
-  // constructor and the iterators of the iterator methods are instances; the && operator passes on its
-  // left operand only when that can be false, and || and ?? pass on their right operand unless the left
-  // one names an always truthy built-in directly (leftDecides). With onlyValues, the result's unknown is
-  // not computed where it cannot become a value: whether a variable has a source outside the model costs
-  // a walk over its occurrences.
+  // What an expression may evaluate to: values are the built-in values the scan identifies, and unknown
+  // is true when it may also evaluate to a value the scan cannot identify. The result has every possible
+  // value, so that a write through a variable or a conditional is recorded for each built-in the
+  // expression may evaluate to. A literal, `new X()` with X a built-in constructor, and the iterator an
+  // iterator method returns evaluate to instances. `a && b` evaluates to a only when a is falsy, so its
+  // result has the values of a that can be falsy and all values of b. `a || b` and `a ?? b` have the
+  // values of a, and also those of b unless a is an always truthy built-in named directly (leftDecides).
+  // With onlyValues, abstract does not compute unknown for a variable, because that takes a walk over
+  // the variable's occurrences; memberRead still computes it for the object of a constructor or
+  // __proto__ read, where an unknown object turns into an (object) value.
   abstract(expression, onlyValues = false) {
     let current = expression;
     while (ts.isParenthesizedExpression(current) || ts.isNonNullExpression?.(current) || ts.isAwaitExpression(current)) {
@@ -691,9 +732,10 @@ class BuiltinScan {
     return value ? { values: [value], unknown: false } : UNIDENTIFIED;
   }
 
-  // A member read. An object literal's own constructor or __proto__ member gives its initializer's value
-  // when no later member can replace it; those keys of an object the scan does not identify give an
-  // (object) value, whose writes are prototypeWrites.
+  // The values of a member read. Reading constructor or __proto__ from an object literal that defines
+  // that member gives the value of the member's initializer, as long as no later member can replace it.
+  // Reading constructor or __proto__ from an object the scan cannot identify gives an (object) value,
+  // and a write through that value is a prototypeWrites entry.
   memberRead(current, onlyValues = false) {
     const key = ts.isPropertyAccessExpression(current) ? current.name.text : this.keyOf(current.argumentExpression);
     const special = key === 'constructor' || key === '__proto__';
@@ -710,14 +752,16 @@ class BuiltinScan {
         break;
       }
     }
-    // Those keys of an object the scan does not identify are values of their own.
+    // constructor and __proto__ of an object the scan cannot identify are (object) values, so the
+    // object's unknown flag is computed for them even with onlyValues.
     const base = this.abstract(current.expression, onlyValues && !special);
     const values = base.values.map((value) => memberValue(value, key));
     if (base.unknown && special) values.push({ root: UNKNOWN, path: [key] });
     return { values: distinct(values), unknown: base.unknown && !special };
   }
 
-  // A call's result: the prototypes a prototype reader returns, and the iterators of the iterator methods.
+  // What a call may return: the prototypes a prototype reader returns, and the iterators an iterator
+  // method returns. A call of any other function makes the result unknown.
   callResult(call, onlyValues = false) {
     const callee = this.abstract(call.expression, onlyValues);
     const values = [];
@@ -731,7 +775,8 @@ class BuiltinScan {
     return { values: distinct(values), unknown };
   }
 
-  // `new X(...)` of a built-in constructor X is an instance of X.prototype.
+  // `new X(...)` with X a built-in constructor gives an instance whose prototype is X.prototype. Any
+  // other construction gives unknown.
   construction(expression, onlyValues = false) {
     const callee = this.abstract(expression.expression, onlyValues);
     const values = [];
@@ -755,13 +800,13 @@ class BuiltinScan {
     return distinct(values);
   }
 
-  // The built-in values an expression may hold, for a definer's target.
+  // The built-in values an expression may evaluate to, for the target of a definer or a mutating method.
   possibleValues(expression) {
     return this.abstract(expression, true).values;
   }
 
-  // The value of node when it names a built-in directly: a free built-in's name, or a chain of member
-  // reads without ?. from one; else null.
+  // The built-in value of node when node refers to a built-in directly: a free built-in name, or a chain
+  // of member reads without ?. that starts at one. null otherwise.
   builtinReference(node) {
     let current = node;
     while (ts.isParenthesizedExpression(current)) current = current.expression;
@@ -773,17 +818,19 @@ class BuiltinScan {
     return null;
   }
 
-  // Whether the left operand of || or ?? always gives the result, so the right one never runs: it names
-  // a built-in directly, and that built-in is always truthy (isTruthy), which also rules out null and
-  // undefined. A variable never counts, since the abstract values have no element for undefined or
-  // null: `var w;if(c)w=Set;w||Map` gives Map when c is false.
+  // Whether the left operand of || or ?? always determines the result, so the right operand is never
+  // evaluated. That is so when the left operand refers to a built-in directly and that built-in is
+  // always truthy (isTruthy), which also means that it is not null or undefined. A variable never
+  // qualifies, because the values abstract returns do not include undefined or null: after
+  // `var w;if(c)w=Set;`, `w||Map` gives Map when c is false.
   leftDecides(left) {
     const value = this.builtinReference(left);
     return value !== null && isTruthy(value);
   }
 
-  // A mutating method of Array.prototype runs with the value of thisNode as this, and may write any of
-  // its members, as Array.prototype.push(...) writes Array.prototype's.
+  // A mutating method of Array.prototype runs with thisNode's value as this and can write any member of
+  // that value; Array.prototype.push(...), for example, writes members of Array.prototype. The write is
+  // recorded under the key * for each built-in value thisNode may evaluate to.
   mutate(node, thisNode, how) {
     for (const target of thisNode ? this.possibleValues(thisNode) : []) this.writeKeys(node, target, ['*'], how);
   }
@@ -805,8 +852,9 @@ class BuiltinScan {
     }
   }
 
-  // Writes each possible key. A proof records the fallback target in case a built-in operation it
-  // depends on is written elsewhere in the program.
+  // Records a write of each possible key of value. When the keys come from a proof, each entry also
+  // lists the operations the proof relies on (keyRequires) and a fallback target, value.* (keyFallback),
+  // which builtin_summary uses if the program writes one of those operations.
   writeKeys(node, value, keys, how, requires = []) {
     if (value.instance) return;
     const proof = requires.length ? { keyRequires: requires, keyFallback: valueName(value) + '.*' } : {};
@@ -822,8 +870,9 @@ class BuiltinScan {
     }
   }
 
-  // The keys a definer writes, and the dependencies of their proofs. Object literal sources can have
-  // several static keys. A spread or an expression the key model does not cover gives an unknown key.
+  // The keys a definer writes, and the built-in operations that the proofs of those keys rely on. A
+  // source that is an object literal can give several keys. A spread, a source that is not an object
+  // literal, or a computed key that keyInfo cannot resolve gives the unknown key *.
   definerKeys(kind, args) {
     if (kind === 'prototype') return { keys: ['__proto__'], requires: [] };
     if (kind === 'key') return this.keyInfo(args[1]);
@@ -845,10 +894,10 @@ class BuiltinScan {
     return { keys: [...new Set(keys)], requires: [...new Set(requires)] };
   }
 
-  // The arguments of a call, construction or template tag. A tag receives its implicit template
-  // object first, represented by null here since it is a fresh frozen array, then each substitution
-  // unchanged. In particular, Object.defineProperty.call`${Set.prototype}${"has"}${descriptor}`
-  // gives defineProperty the target, key and descriptor after call removes its this argument.
+  // The argument expressions of a call, construction or tagged template. A tag receives the template
+  // object first, which is null here because it is a new frozen array and never a built-in value, and
+  // then each substitution unchanged. Object.defineProperty.call`${Set.prototype}${"has"}${descriptor}`
+  // passes the target, key and descriptor to defineProperty: call takes the template object as this.
   argumentsOf(call) {
     if (ts.isTaggedTemplateExpression(call)) {
       return [null, ...(ts.isTemplateExpression(call.template) ? call.template.templateSpans.map((span) => span.expression) : [])];
@@ -856,13 +905,13 @@ class BuiltinScan {
     return [...(call.arguments ?? [])];
   }
 
-  // A call of value at call (whose callee is node), with its arguments.
+  // Classifies a call of value: call is the call or tagged template expression, and node is its callee.
   call(node, call, value) {
     const name = valueName(value);
     const args = this.argumentsOf(call);
     if (value.root === 'eval' && value.path.length === 0) {
-      // A call whose callee is the name eval, also in parentheses, is a direct eval; eval reached any
-      // other way, through (0,eval), globalThis.eval or ?.(), is indirect.
+      // A call whose callee is the identifier eval, possibly in parentheses, is a direct eval. Any other
+      // call of eval, such as (0,eval)(), globalThis.eval() or eval?.(), is an indirect eval.
       this.result.dynamic.push({ ...this.where(call), kind: isDirectEval(call) ? 'direct eval' : 'indirect eval' });
       return;
     }
@@ -903,8 +952,8 @@ class BuiltinScan {
         return;
       }
       if (isArrayMutator(target)) {
-        // M.call(T, ...) and M.apply(T, list) run M with T as this, as T.M(...) does, and the function
-        // M.bind(T) returns does whenever it is called.
+        // M.call(T, ...) and M.apply(T, list) run M with T as this, like T.M(...). M.bind(T) returns a
+        // function that does the same each time it is called, so the write is recorded at the bind.
         this.mutate(call, args[0], `${receiver} through ${last}`);
         return;
       }
@@ -920,7 +969,7 @@ class BuiltinScan {
       return;
     }
     if (target && RECEIVER_DEFINERS.has(last)) {
-      // value is X.__defineGetter__: it defines key args[0] on X.
+      // value is X.__defineGetter__ or X.__defineSetter__, which defines the key args[0] on X.
       const info = this.keyInfo(args[0]);
       this.writeKeys(call, target, info.keys, last, info.requires);
       return;
@@ -935,14 +984,15 @@ class BuiltinScan {
     }
     if (last === '*' && target && (valueName(target) === 'globalThis' || ['Object', 'Reflect'].includes(valueName(target)))) {
       this.result.unfollowed.push({ ...this.where(call), value: name,
-        reason: `a member of ${valueName(target)} the scan cannot name is called, which may be eval, Function or a definer` });
+        reason: `a member of ${valueName(target)} under an unknown key is called, and that member may be eval, Function or a definer` });
       return;
     }
     this.pass(value, 'call');
   }
 
-  // A definer called with definerArgs, its target first; receiver for __defineGetter__ through call or
-  // apply, whose target is the this argument.
+  // Records the writes of a definer called with definerArgs, whose first element is the target. receiver
+  // is set for __defineGetter__ or __defineSetter__ called through call or apply, whose target is the
+  // this argument of call or apply.
   define(call, name, definerArgs, receiver) {
     if (receiver) {
       const targets = receiver.args[0] ? this.possibleValues(receiver.args[0]) : [];
@@ -962,8 +1012,8 @@ class BuiltinScan {
     for (const target of targets) this.writeKeys(call, target, info.keys, name, info.requires);
   }
 
-  // Classifies the value of node, which is value, by where it goes. variable is true when node is a
-  // variable that holds the value: writing it changes the variable, not the built-in.
+  // Classifies the use of value at node by following node up through its parents. variable is true when
+  // node is a variable that holds value: assigning to node then changes the variable, not the built-in.
   follow(node, value, variable = false) {
     let current = node;
     for (;;) {
@@ -1009,7 +1059,8 @@ class BuiltinScan {
       }
       if (ts.isTemplateSpan(outer) && ts.isTemplateExpression(outer.parent) &&
           ts.isTaggedTemplateExpression(outer.parent.parent) && outer.parent.parent.template === outer.parent) {
-        // A tagged substitution is an argument, not a string coercion.
+        // In a tagged template, a substitution is an argument of the tag. In an untagged template it is
+        // converted to a string and counts as an operand (below).
         return this.argument(current, value, outer.parent.parent, outer.parent.templateSpans.indexOf(outer) + 1);
       }
       if (ts.isBinaryExpression(outer)) {
@@ -1066,7 +1117,7 @@ class BuiltinScan {
       }
       if (ts.isDecorator(outer)) return this.pass(value, 'decorator');
       if (ts.isWithStatement(outer) && outer.expression === current) {
-        return this.escape(current, value, 'the object of a with statement, whose members the names inside it can write', 'with');
+        return this.escape(current, value, 'the object of a with statement, and names inside the statement can write its members', 'with');
       }
       if (ts.isExportSpecifier(outer) && !outer.parent.parent.moduleSpecifier) {
         if (value.root !== UNKNOWN && !value.foreign) {
@@ -1080,16 +1131,19 @@ class BuiltinScan {
         : ts.isPropertyAssignment(outer) || ts.isShorthandPropertyAssignment(outer) ? 'stored in an object literal'
         : ts.isArrayLiteralExpression(outer) ? 'stored in an array literal'
         : ts.isSpreadElement(outer) || ts.isSpreadAssignment(outer) ? 'spread'
-        : ts.isParameter(outer) || ts.isBindingElement(outer) ? 'a default value'
+        : ts.isParameter(outer) || ts.isBindingElement(outer) ? 'used as a default value'
         : ts.isPropertyDeclaration(outer) ? 'stored in a class field'
         : ts.isExportAssignment(outer) ? 'exported as the default export'
         : `used as the ${fieldOf(outer, current).field} of a ${kindName(outer)}`);
     }
   }
 
-  // An argument passed unchanged to a function, constructor or template tag. Where every function the
-  // call may call receives it as a definer's target, the callee's scan records the write, and where every
-  // one is a prototype reader, the callee's scan follows the prototype; otherwise the value escapes.
+  // Classifies a value passed unchanged as an argument to a function, constructor or template tag. When
+  // every function the call may call is a definer that takes this argument as its target, the scan
+  // records the write when it follows the callee. When every such function is a prototype reader and
+  // this is its first argument, the scan follows the prototype from the callee. Reflect.apply with
+  // mutating methods of Array.prototype is handled the same way (below). These cases need every value of
+  // the callee to be identified; otherwise the value escapes and is listed as unfollowed.
   argument(node, value, call, position) {
     const calleeNode = ts.isTaggedTemplateExpression(call) ? call.tag : call.expression;
     const callable = ts.isCallExpression(call) || ts.isTaggedTemplateExpression(call);
@@ -1097,10 +1151,9 @@ class BuiltinScan {
     const definer = functions.length > 0 && functions.every((fn) => definerTargetPosition(fn) === position) &&
       this.possibleValues(node).some((target) => valueName(target) === valueName(value));
     const reader = functions.length > 0 && position === 0 && functions.every((fn) => PROTOTYPE_READERS.has(valueName(fn)));
-    // Reflect.apply(M, T, list) with M only ever a mutating method of Array.prototype: the call records the
-    // write to T, so neither M nor T escapes there.
-    // The full abstract value, whose unknown counts a variable that may also hold a value the scan does
-    // not identify.
+    // Reflect.apply(M, T, list) where every value of M is a mutating method of Array.prototype: the call
+    // records the write to T, so neither M nor T escapes here. M is evaluated without onlyValues, so
+    // that unknown is true when M is a variable that may also hold a value the scan cannot identify.
     const applied = callable && call.arguments?.[0] ? this.abstract(call.arguments[0]) : UNIDENTIFIED;
     const mutated = functions.length > 0 && functions.every((fn) => valueName(fn) === 'Reflect.apply') && !applied.unknown &&
       applied.values.length > 0 && applied.values.every(isArrayMutator) && (position === 0 ||
@@ -1110,8 +1163,8 @@ class BuiltinScan {
       : ts.isNewExpression(call) ? 'passed to a constructor' : 'passed to a function');
   }
 
-  // A call of a prototype reader gives the prototype of each object its argument may be; each is
-  // followed from the call.
+  // When value is a prototype reader, the call returns the prototype of each object its first argument
+  // may be, and the scan follows each of those prototypes from the call.
   followResults(call, value) {
     if (!PROTOTYPE_READERS.has(valueName(value)) || !call.arguments[0]) return;
     for (const prototype of this.prototypesOf(call.arguments[0])) this.follow(call, prototype);
@@ -1137,27 +1190,32 @@ class BuiltinScan {
       this.result.dynamic.push({ ...this.where(node), kind: `${value.root === 'eval' ? 'eval' : `the ${value.root} constructor`} ${reason}` });
       return;
     }
-    // A definer that goes where the scan does not follow may be called from there: through call,
-    // apply, Reflect.apply or bind, or by a higher-order built-in. A mutating method of Array.prototype
-    // called from there writes only index members and the length of its this value, none of which is a
-    // dependency slot, so the scan does not record a limit for it.
+    // Code that receives a definer where the scan stops following it may call the definer: through call,
+    // apply, Reflect.apply or bind, or by passing it to a higher-order built-in, so such an entry gets
+    // the definer-calls limit. A mutating method of Array.prototype called from such a place writes only
+    // index members and the length of its this value, and the tables and key proofs do not depend on
+    // those, so its entry does not get a limit.
     const definer = STATIC_DEFINERS.has(valueName(value)) || RECEIVER_DEFINERS.has(value.path.at(-1));
     const stated = limit ?? (definer ? 'definer-calls' : undefined);
     this.result.unfollowed.push({ ...this.where(node), value: valueName(value), reason, ...(stated ? { limit: stated } : {}) });
   }
 
-  // A variable receives value: the caller follows its uses.
+  // Records that the variable at name receives value; the facts pass then follows the variable's uses
+  // with that value (referenceValues).
   reference(name, value, from) {
     if (value.root === UNKNOWN) this.result.unidentified += 1;
     if (value.foreign) return;
     const record = { ...this.where(from), value: valueName(value), unknown: value.root === UNKNOWN || undefined,
       name: name.text, at: start(name, this.sourceFile) };
     this.result.references.push(record);
-    // A method read through an instance and stored in a variable is called without that instance as this.
+    // A method read through an instance and stored in a variable is later called without that instance
+    // as this, so the stored value does not keep the receiver.
     this.referenceValues.push({ name, value: { root: value.root, path: value.path }, record });
   }
 
-  // A destructuring pattern receives value: each element with a static key receives that member.
+  // Records a destructuring pattern that receives value. Each element with a property key receives that
+  // member of value, under the key * when the scan cannot read the key; an element by position or a rest
+  // element makes value escape.
   destructure(pattern, value, from) {
     const elements = ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern) ? pattern.elements
       : ts.isObjectLiteralExpression(pattern) ? pattern.properties : pattern.elements;
@@ -1192,16 +1250,18 @@ class BuiltinScan {
   }
 }
 
-// A built-in's name inside a with statement may name a member of the with's object instead. Both passes
-// follow it as the built-in, so a write through it counts, and record the place with this note. A key
-// read under with is not proved to be a Symbol.for result or a well-known symbol.
-const WITH_NOTE = 'a with statement may give the name another value; the scan follows it as the built-in';
+// Inside a with statement, a built-in's name may refer to a member of the statement's object instead.
+// Both passes follow the name as the built-in, so a write through it is recorded, and they also record
+// the place with this note. A key read inside a with statement is never proved to be a Symbol.for result
+// or a well-known symbol.
+const WITH_NOTE = 'the name may refer to a member of the with statement\'s object; the scan follows it as the built-in';
 
 function noteWith(scan, node) {
   scan.result.unfollowed.push({ ...scan.where(node), value: node.text, reason: WITH_NOTE, limit: 'with' });
 }
 
-// The value a built-in's name holds: the global object under any of its names, else the built-in.
+// The value of a free built-in name: the global object for each of its names, and the built-in itself
+// for any other name.
 function nameValue(name) {
   return GLOBAL_NAMES.has(name) ? { root: 'globalThis', path: [] } : { root: name, path: [] };
 }
@@ -1214,18 +1274,21 @@ function scanBuiltins(names, reaches, scan) {
     if (value) scan.follow(node, value);
   }
   for (const node of reaches) {
-    // A write to the object's own constructor or __proto__ member is a write the object's own follow sees.
+    // A write to an object's constructor or __proto__ member is recorded when the scan follows the
+    // object itself, so it is skipped here.
     if (isWriteTarget(node)) continue;
     const key = ts.isPropertyAccessExpression(node) ? node.name.text : literalKey(node.argumentExpression);
     let object = node.expression;
     while (ts.isParenthesizedExpression(object)) object = object.expression;
     if (ts.isObjectLiteralExpression(object)) {
-      // The literal's own member, or the one it inherits: no name leads here.
+      // A name never leads to an object literal, so the scan follows the literal's own or inherited
+      // constructor or __proto__ from this read.
       for (const value of scan.abstract(node).values) scan.follow(node, value);
       continue;
     }
-    // A built-in value that a built-in's name or a followed variable leads to is followed from there. An
-    // instance, which no name leads to, and an object the scan does not identify are followed from here.
+    // A built-in value reached from a built-in's name or a followed variable is followed from that name
+    // or variable. A name never leads to an instance or to an object the scan cannot identify, so their
+    // constructor and __proto__ are followed from this read.
     const base = scan.abstract(node.expression);
     for (const value of base.values) if (value.instance) scan.follow(node, memberValue(value, key));
     if (base.unknown) scan.follow(node, { root: UNKNOWN, path: [key] });
@@ -1233,11 +1296,14 @@ function scanBuiltins(names, reaches, scan) {
   return scan.result;
 }
 
-// A scan's lists in source order.
+// Sorts every list of a scan result by start offset, so that its entries are in source order.
 function inSourceOrder(result) {
   for (const value of Object.values(result)) if (Array.isArray(value)) value.sort((a, b) => a.s - b.s);
   return result;
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The index pass
 
 function staticSpecifier(node) {
   if (!node) return { form: 'none' };
@@ -1254,8 +1320,8 @@ function indexModule(module, needles, byName) {
       message: ts.flattenDiagnosticMessageText(d.messageText, '\n') })),
     loads: [], hits: Object.create(null),
   };
-  // The built-in scan's starting points, scanned after the walk, when the module's declarations are known:
-  // occurrences of a built-in's name, and .constructor and .__proto__ reads.
+  // Where the built-in scan starts: each occurrence of a built-in's name (names) and each .constructor
+  // or .__proto__ read (reaches). The scan runs after the walk, once the declarations are known.
   const declared = new Set();
   const names = [];
   const reaches = [];
@@ -1385,14 +1451,15 @@ function indexModule(module, needles, byName) {
     if (isFunction) functions.pop();
   };
   visit(sourceFile);
-  // A name the module declares anywhere is a value this pass does not identify; the facts pass resolves it.
+  // This pass does not resolve scopes, so freeValue gives null for a built-in name that the module
+  // declares anywhere, and the facts pass resolves its occurrences.
   const freeValue = (identifier) => (BUILTINS.has(identifier.text) && !declared.has(identifier.text) &&
     !isPropertyName(identifier) && !isDeclarationName(identifier) ? nameValue(identifier.text) : null);
   const scan = new BuiltinScan(sourceFile, freeValue, handleOf, (identifier) => !declared.has(identifier.text) && !insideWith(identifier));
   for (const node of names) if (!declared.has(node.text) && insideWith(node)) noteWith(scan, node);
   record.premise = inSourceOrder(scanBuiltins(names, reaches, scan));
-  // A built-in's name the module declares somewhere may be a local binding where it occurs; the facts
-  // pass resolves those occurrences.
+  // scoped lists the built-in names that the module declares somewhere. An occurrence of such a name may
+  // refer to a local binding, and the facts pass resolves it.
   record.premise.scoped = [...new Set(names.map((node) => node.text).filter((name) => declared.has(name)))];
   return record;
 }
@@ -1443,16 +1510,17 @@ function programFor(module) {
 // ---------------------------------------------------------------------------------------------------
 // The binding model
 //
-// The facts about a binding (its record, its occurrences, and the names canonical text gives it) are
-// given only for a binding whose every declaration and every reference has a form listed here. Every
-// other binding is refused: its record has a `refused` list of {s, e, reason}, and the queries that
-// would give its occurrences or rename it give that list instead. TypeScript's binder supplies the
-// symbols, and this model accepts a symbol as one JavaScript binding, with exactly the references
-// TypeScript resolves to it, only where the two agree.
+// The helper gives the facts about a binding (its record, its occurrences, and its name in canonical
+// text) only when each of its declarations and references has one of the forms listed here. Any other
+// binding is refused: its record has a `refused` list of {s, e, reason}, and the occurrences query, and
+// a canonical query whose text would rename the binding, return the refusals instead. The symbols come
+// from TypeScript's binder. The model treats a symbol as one JavaScript binding, with exactly the
+// references TypeScript resolves to it, and it does that only where TypeScript's scoping agrees with
+// JavaScript's.
 //
 // Declarations:
-//   var, let and const declarations, with identifiers or destructuring patterns, in a statement or in
-//     a for, for-in or for-of head;
+//   var, let and const declarations, with identifiers or destructuring patterns, in a statement or in a
+//     for, for-in or for-of head;
 //   function and class declarations with a name;
 //   the name of a function expression or class expression, bound inside the expression;
 //   parameters of functions, arrow functions, methods, accessors and constructors, with identifiers or
@@ -1466,36 +1534,37 @@ function programFor(module) {
 //   the local name in an export list without a from clause.
 // Scopes, as binding records report them:
 //   the module: its top-level declarations, its vars outside functions, and its imports;
-//   a function: its parameters, its vars, and the function declarations directly in its body; when
-//     the parameter list has expressions (defaults, or patterns with defaults or computed keys), the
-//     vars and those function declarations belong to the function body, which JavaScript then gives an
-//     environment of its own;
-//   a block, switch case block or for head: let, const, class, and a function declaration nested in a
-//     block, a function body counting as a block of its own;
+//   a function: its parameters, its vars, and the function declarations directly in its body. When the
+//     parameter list has expressions (defaults, or patterns with defaults or computed keys), JavaScript
+//     gives the function body an environment of its own, and the vars and those function declarations
+//     belong to the body;
+//   a block, a switch case block or a for head: its let, const and class declarations, and the function
+//     declarations nested in a block. For let, const and class, a function body is a block too;
 //   a class static block: the vars and function declarations directly in it;
-//   a catch clause: its variable; a function or class expression: its own name.
+//   a catch clause: its variable;
+//   a function or class expression: its own name.
 // Refused:
-//   every binding in a module TypeScript reports a parse diagnostic for;
-//   using and await using declarations, and declarations of any other kind;
-//   declarations JavaScript merges into one binding but TypeScript's binder keeps apart, which it
-//     reports at their names, as `var V=1;function V(){}` in a function body;
+//   every binding in a module for which TypeScript reports a parse diagnostic;
+//   using and await using declarations, and declarations of any kind not listed above;
+//   declarations that JavaScript merges into one binding but TypeScript's binder keeps apart, reporting
+//     each of their names as a duplicate, as `var V=1;function V(){}` in a function body;
 //   a parameter and a var of the same name in the body of a function whose parameter list has
 //     expressions: two bindings in JavaScript, one symbol in TypeScript;
-//   a catch variable and a var of the same name in its catch block: the var's initializer assigns
-//     the catch variable (ECMAScript Annex B.3.4), so neither symbol has the right writes;
-//   a class declaration whose name is written: the references in the class body go to an inner
-//     binding that stays the class;
-//   a binding in whose scope a direct eval call or a with statement occurs, which can read and write
-//     it by name;
-//   a delete of the name, a reference in any other position, and a reference outside the scopes of
-//     the binding's declarations.
-// Modelled exactly where TypeScript differs:
-//   a reference in a parameter list (in a default or a computed key, at any depth of nested functions
-//     there) that TypeScript resolves to a declaration in that function's body is resolved again from
-//     outside the function, where JavaScript looks it up: TypeScript resolves the x of
+//   a catch variable and a var of the same name in its catch block: the var's initializer assigns the
+//     catch variable (ECMAScript Annex B.3.4), so neither symbol has the right writes;
+//   a class declaration whose name is written: the references in the class body resolve to an inner
+//     binding that always refers to the class;
+//   a binding whose scope contains a direct eval call or a with statement, which can read and write it
+//     by name;
+//   a delete of the name, a reference in any other position, and a reference outside the scopes of the
+//     binding's declarations.
+// Where TypeScript differs from JavaScript in these cases, the model follows JavaScript:
+//   a reference in a parameter list (in a default or a computed key, also inside functions nested there)
+//     that TypeScript resolves to a declaration in that function's body is resolved again from outside
+//     the function, where JavaScript looks it up. TypeScript resolves the x of
 //     `function f(a=x){function x(){}}` to the body's x;
-//   the named default export of a function or class is a binding under its local name, though
-//     TypeScript names its symbol "default".
+//   `export default function f` and `export default class C` declare a binding under their local name,
+//     although TypeScript names its symbol "default".
 
 function declarationName(declaration) {
   return ts.getNameOfDeclaration(declaration) ?? declaration;
@@ -1523,10 +1592,11 @@ function bindingKind(declaration) {
   return kindName(declaration);
 }
 
-// A symbol's declarations in a module. In a JavaScript file TypeScript also records some references as
-// declarations of a binding, to type the members they add: the object of a property assignment (the p
-// of `p.x=1` and of `p.a.b=1`) and the first argument of `Object.defineProperty(p, ...)`. Those are
-// Identifier nodes, which a declaration never is; they are references and are left out here.
+// A symbol's declarations in a module, sorted by the position of their names. In a JavaScript file,
+// TypeScript also records some references as declarations of a binding, so that it can type the members
+// they add: the object of a property assignment (the p of `p.x=1` and of `p.a.b=1`) and the first
+// argument of `Object.defineProperty(p, ...)`. Those entries are Identifier nodes, and a declaration
+// never is one, so they are references and the filter leaves them out.
 function declarationsIn(symbol, sourceFile) {
   return (symbol.declarations ?? []).filter((d) => d.getSourceFile() === sourceFile && !ts.isIdentifier(d))
     .sort((a, b) => start(declarationName(a), sourceFile) - start(declarationName(b), sourceFile));
@@ -1539,11 +1609,12 @@ function patternRoot(node) {
   return current;
 }
 
-// The one symbol the helper uses for a binding. TypeScript gives an exported declaration (`export let x`,
-// `export function f`, `export default function f`) two symbols with the same declarations: the module's
-// export symbol, which every reference resolves to, and a local symbol in the module's scope table, which
-// points to it as exportSymbol. Both stand for one binding; this is the export symbol. Import aliases are
-// left as they are: following them would lead to TypeScript's unknown symbol, because module resolution is disabled.
+// The one symbol the helper uses for a binding. TypeScript gives an exported declaration
+// (`export let x`, `export function f`, `export default function f`) two symbols with the same
+// declarations: the module's export symbol, which every reference resolves to, and a local symbol in the
+// module's scope table, whose exportSymbol is the export symbol. Both symbols describe one binding, and
+// the helper uses the export symbol. An import alias is returned unchanged: resolving it would give
+// TypeScript's unknown symbol, because module resolution is disabled (noResolve).
 function bindingSymbol(symbol) {
   return symbol?.exportSymbol ?? symbol;
 }
@@ -1563,16 +1634,16 @@ function isModelledDeclaration(declaration) {
   return ts.isImportSpecifier(declaration) || ts.isImportClause(declaration) || ts.isNamespaceImport(declaration);
 }
 
-// Whether a function's parameter list holds an expression: a default, or a pattern with a default or a
-// computed key. JavaScript then evaluates the parameters in an environment of their own.
+// Whether a function's parameter list contains an expression: a default, or a pattern with a default or
+// a computed key. JavaScript then evaluates the parameters in an environment of their own.
 function hasParameterExpressions(fn) {
   const inPattern = (name) => !ts.isIdentifier(name) && name.elements.some((element) => ts.isBindingElement(element) &&
     (element.initializer || (element.propertyName && ts.isComputedPropertyName(element.propertyName)) || inPattern(element.name)));
   return (fn.parameters ?? []).some((parameter) => parameter.initializer || inPattern(parameter.name));
 }
 
-// The var scope around a node: the module, a class static block, or a function, which is its body when
-// its parameter list has expressions.
+// The var scope that contains a node: the module, a class static block, or a function. For a function
+// whose parameter list has expressions, the var scope is the function's body.
 function varScope(node) {
   for (let current = node.parent; current; current = current.parent) {
     if (ts.isSourceFile(current) || ts.isClassStaticBlockDeclaration(current)) return current;
@@ -1613,8 +1684,8 @@ function contains(outer, node) {
   return node.pos >= outer.pos && node.end <= outer.end;
 }
 
-// Whether a declaration is a var (or an element of one) or a function declaration: the declarations
-// that share one binding with a parameter of the same name in the function body.
+// Whether a declaration is a var declaration (or an element of one) or a function declaration. In a
+// function body, these are the declarations that share one binding with a parameter of the same name.
 function isVarLike(declaration) {
   const root = ts.isBindingElement(declaration) ? patternRoot(declaration) : declaration;
   return (ts.isVariableDeclaration(root) && !ts.isCatchClause(root.parent) && declarationListKind(root.parent) === 'var') ||
@@ -1637,7 +1708,7 @@ function boundNames(name, into = []) {
   return into;
 }
 
-// The var declarations of a name directly in a catch clause's block, outside nested functions.
+// The var declarations of a name anywhere in a catch clause's block outside nested functions and classes.
 function catchBlockVars(clause, name) {
   const found = [];
   const visit = (node) => {
@@ -1682,70 +1753,73 @@ function topLevelStatement(node) {
 // ---------------------------------------------------------------------------------------------------
 // The operation model
 //
-// pfg.values evaluates a binding's initializer, then asks whether the program keeps that value.
-// Facts.uses classifies every use of the binding in one module, with the uses of the variables and
-// parameters the value reaches there; Facts.loadUse does the same from an import() or
-// import.meta.require call whose module exports the value. Each use must match a form listed here;
-// any other use is refused, with its place and the reason. A primitive cannot change, so for one
-// only writes to its binding count. For a value of kind array, set, map or object:
+// pfg.values evaluates a binding's initializer and then asks whether the program leaves that value
+// unchanged. Facts.uses classifies every use of the binding in one module, including the uses of the
+// variables and parameters that receive the value there. Facts.loadUse does the same, starting from an
+// import() or import.meta.require call whose module exports the value. Each use must match one of the
+// forms listed here; any other use is refused, and the refusal gives its position and the reason. A
+// primitive cannot be modified, so for a primitive only writes to its binding are refused, and its other
+// uses are only counted. For a value of kind array, set, map or object:
 //
-//   Parents that hand the value on unchanged: parentheses, either operand of ||, && and ??, a
-//   branch of ?:, the last operand of a comma, the right side of a destructuring assignment, and
-//   await (for an object, only without an own then member, which await would call).
-//   Reads, which run none of the value's code: typeof, void, !, the test of if, while, do, for and
-//   ?:, === and !==, switch and case, a discarded expression, for-in, `k in V`, and
-//   `V instanceof C` with C the free name Array, Set, Map or Object.
-//   Conversions to a primitive: String(V), a template substitution, a computed key, an element
-//   key, unary + - ~, the arithmetic and bitwise operators, == != and the relational comparisons,
-//   and `V in o`. For an object they call its own toString or valueOf with V as this, so they are
-//   refused when the object has either.
-//   Member reads: V.p, V[k] (also optionally chained) and destructuring of V. For an object, a
-//   read of an accessor calls its getter with V as this, so it is refused; so is a computed key or
-//   a rest element when the object has an accessor.
-//   Read methods: a call of a method in READ_METHODS with V as this (a member of V that is called,
-//   also through parentheses). A callback argument must be an arrow or function expression written
-//   in the call that does not read arguments, has no rest parameter at or before the position at
-//   which the method passes the container, and declares no parameter at that position. For an
-//   object, an own member named like the method refuses the call.
-//   Iteration of an array, a Set or a Map through its built-in iterator: for-of, [...V], f(...V),
-//   array destructuring, Array.from(V), new Set(V), new Map(V).
+//   Parents that pass the value on unchanged: parentheses, either operand of ||, && and ??, a branch of
+//   ?:, the last operand of a comma, the right side of a destructuring assignment, and await (for an
+//   object, only when it does not have an own then member, which await would call).
+//   Reads, which do not run any of the value's code: typeof, void, !, the test of if, while, do, for and
+//   ?:, === and !==, switch and case, a discarded expression, for-in, `k in V`, and `V instanceof C`
+//   with C the free name Array, Set, Map or Object.
+//   Conversions to a primitive: String(V), a template substitution, a computed key, an element key,
+//   unary + - ~, the arithmetic and bitwise operators, == != and the relational comparisons, and
+//   `V in o`. For an object, a conversion calls the object's own toString or valueOf with V as this, so
+//   conversions are refused when the object has either.
+//   Member reads: V.p, V[k] (also optionally chained) and destructuring of V. For an object, reading an
+//   accessor calls its getter with V as this, so such a read is refused, and so is a computed key or a
+//   rest element when the object has an accessor.
+//   Read methods: a call V.m(...) of a method m in READ_METHODS, which runs with V as this, also written
+//   as (V.m)(...). The first argument, the callback, must be an arrow or function expression written in
+//   the call. It must not read arguments, must not have a rest parameter at or before the position at
+//   which the method passes V to it, and must not declare a parameter at that position. For an object,
+//   the call is refused when the object has an own member with the method's name.
+//   Iteration of an array, a Set or a Map through its built-in iterator: for-of, [...V], f(...V), array
+//   destructuring, Array.from(V), new Set(V), new Map(V).
 //   Object spread {...V}: refused for an object with an accessor.
-//   Built-in functions with V as an argument, in exactly these forms: Object.keys(V),
-//   Object.values(V), Object.entries(V), Object.hasOwn(V, k), Array.isArray(V), Array.from(V),
-//   JSON.stringify(V), String(V), new Set(V) and new Map(V), with the name of the built-in free.
-//   Object.values, Object.entries and JSON.stringify read every member (refused for an object with
-//   an accessor), and JSON.stringify calls an own toJSON (refused).
-//   An alias: `const W = V` (also let or var), with no other write to W; W's uses are classified.
-//   A parameter: V as an argument of a plain call of a function the module declares (a function
-//   declaration, or a variable never written that holds a function or arrow expression) or imports
-//   by name or as a default, with no spread argument before V. The function must not read
-//   arguments or have a rest parameter at or before V's position, and the parameter that receives
-//   V must be a plain identifier. Its uses are classified, up to four calls from the binding on the
-//   route with the fewest calls. Beyond the last parameter, V reaches only arguments. A call of an
-//   imported function is listed in the result's calls; pfg.values finds the module that declares
-//   the function and classifies the parameter's uses there, with a uses query in mode parameter.
-//   An export: an export list entry, export default, or a declaration with export. pfg.values
-//   classifies the uses in the modules that import the value, and wherever a namespace holding it
-//   is taken.
-// Everything else is refused, among it: a write to the binding or to a member of the value; a
-// store into an object or array literal, a class field, or another variable by assignment; a
-// return, throw or yield; a call of the value, or of a member outside READ_METHODS; the value as
-// any other argument, as the this of call, apply or bind, or as a template tag's substitution; and
+//   Built-in functions with V as an argument, in exactly these forms: Object.keys(V), Object.values(V),
+//   Object.entries(V), Object.hasOwn(V, k), Array.isArray(V), Array.from(V), JSON.stringify(V),
+//   String(V), new Set(V) and new Map(V), where the built-in's name is free. Object.values,
+//   Object.entries and JSON.stringify read every member, so they are refused for an object with an
+//   accessor, and JSON.stringify, which calls an own toJSON, is also refused for an object that has one.
+//   An alias: `const W = V` (or let or var), with W written only there; the uses of W are classified.
+//   A parameter: V as an argument of a plain call f(...) of a function that the module declares or
+//   imports by name or as a default, when a spread argument does not come before V. A declared function
+//   is a function declaration, or a variable that is never written and holds a function or arrow
+//   expression. The function must not read arguments or have a rest parameter at or before V's position,
+//   and the parameter that receives V must be a plain identifier. The parameter's uses are classified in
+//   turn, up to four calls away from the binding, counted along the chain with the fewest calls. When V
+//   is passed beyond the last parameter, the function could reach it only through arguments, which it
+//   does not read, so the call is accepted. A call of an imported function is listed in the result's
+//   calls, and pfg.values classifies the parameter's uses in the module that declares the function, with
+//   a uses query in mode parameter.
+//   An export: an export list entry, export default, or a declaration with export. pfg.values classifies
+//   the uses in the modules that import the value, and the uses of each namespace object containing it.
+// Every other use is refused, for example: a write to the binding or to a member of the value; storing
+// the value in an object or array literal, a class field, or another variable by assignment; a return,
+// throw or yield; a call of the value, or of a member that is not in READ_METHODS; the value as any
+// other argument, as the this of call, apply or bind, or as a template tag's substitution; and
 // instanceof with another right operand, which calls that operand's Symbol.hasInstance.
-// Each accepted operation adds the built-in operations it relies on to requires, from
-// OPERATION_VOCABULARY; pfg.values passes them on in each Value, and its caller checks them against
-// the built-in scan.
+// Each accepted use adds the built-in operations it relies on, named as in OPERATION_VOCABULARY, to
+// requires. pfg.values passes them on in each Value, and its caller checks them against the writes the
+// built-in scan found.
 //
-// A namespace that holds the value under some export names is followed too. A member read with
-// one of those names is a use of the value; a read of another name is a read; destructuring with
-// static keys gives aliases of the value; `const ns2 = ns` gives another namespace variable. A
-// computed member, a rest element, a call of a member (whose this would be the namespace), await
-// (which would call an exported then), and any other use of the namespace are refused. The promise
-// of import(M) may be awaited, given to .then with an arrow or function expression whose first
-// parameter receives the namespace (a function expression must not read arguments), or be an
-// element of the array literal given to Promise.all, whose result is awaited into an array pattern
-// or given to .then the same way; the pattern element at the import's position receives the
-// namespace.
+// The model also follows a namespace object that contains the value under one or more export names.
+// Reading one of those names from it is a use of the value, and reading any other name is accepted as a
+// read, as are discarding the namespace, typeof, void, ! and === or !==. Destructuring with keys the
+// scan can read creates aliases of the value, and `const ns2 = ns` creates another namespace variable. A
+// computed member, a rest element, a call of a member (whose this would be the namespace), await (which
+// would call an exported then), and any other use of the namespace are refused. The promise that
+// import(M) returns may be discarded, awaited, passed to .then with an arrow or function expression
+// whose first parameter receives the namespace (a function expression must not read arguments), or put
+// in the array literal passed to Promise.all. The result of Promise.all must in turn be awaited into an
+// array pattern or passed to .then in the same way, and the pattern element at the import's position
+// receives the namespace.
 
 const CONTAINER_CONSTRUCTORS = { array: 'Array', set: 'Set', map: 'Map', object: 'Object' };
 const PROTOTYPE_CHAINS = {
@@ -1757,9 +1831,9 @@ const ITERATION_REQUIRES = {
   set: ['Set.prototype.@@iterator', '%SetIteratorPrototype%.next'],
   map: ['Map.prototype.@@iterator', '%MapIteratorPrototype%.next'],
 };
-// The read methods of each kind of value: container is the position at which the method passes the
-// value to its callback, and species marks a method that creates its result through the value's
-// constructor (ArraySpeciesCreate).
+// The read methods of each kind of value. container is the index, counting from 0, of the callback
+// parameter that receives the value, and species marks a method that creates its result through the
+// value's constructor (ArraySpeciesCreate).
 const READ_METHODS = {
   array: new Map([
     ['includes', {}], ['indexOf', {}], ['lastIndexOf', {}], ['join', {}], ['at', {}], ['keys', {}], ['values', {}],
@@ -1783,8 +1857,9 @@ const INSTANCEOF_CONSTRUCTORS = new Set(['Array', 'Set', 'Map', 'Object']);
 const CONVERSION_HOOKS = ['toString', 'valueOf'];
 const VALUE_KINDS = new Set(['array', 'set', 'map', 'object', 'primitive']);
 const ARTICLES = { array: 'an array', set: 'a Set', map: 'a Map', object: 'an object' };
-// Every built-in operation a use can require; UseContext.require refuses any other name, so that the
-// test that the built-in scan can name a write to each covers all of them (request vocabulary).
+// Every built-in operation a use can require. UseContext.require throws for any other name, so the test
+// that checks that the built-in scan can name a write to each operation (through the vocabulary request)
+// covers every operation a use can require.
 const OPERATION_VOCABULARY = (() => {
   const prototypes = [...new Set(Object.values(PROTOTYPE_CHAINS).flat())];
   const hooks = [...READING_FUNCTIONS.values()].filter((reading) => reading.hook).map((reading) => reading.hook);
@@ -1803,7 +1878,7 @@ const OPERATION_VOCABULARY = (() => {
 class UseContext {
   constructor(model) {
     if (!model || !VALUE_KINDS.has(model.kind)) {
-      throw new RequestError(`a value model needs a kind among ${[...VALUE_KINDS].join(', ')}: ${JSON.stringify(model)}`);
+      throw new RequestError(`a value model needs a kind, one of ${[...VALUE_KINDS].join(', ')}: ${JSON.stringify(model)}`);
     }
     this.model = { kind: model.kind, keys: model.keys ?? [], accessors: model.accessors ?? [] };
     this.refused = [];
@@ -1829,7 +1904,7 @@ class UseContext {
   }
 }
 
-// What a refused use does, in words, from its parent.
+// The reason text for a refused use: what the parent expression does with the value.
 function storeReason(outer, current) {
   if (ts.isReturnStatement(outer) || (ts.isArrowFunction(outer) && outer.body === current)) return 'the value is returned';
   if (ts.isThrowStatement(outer)) return 'the value is thrown';
@@ -1837,12 +1912,13 @@ function storeReason(outer, current) {
   if (ts.isPropertyAssignment(outer) || ts.isShorthandPropertyAssignment(outer)) return 'the value is stored in an object literal';
   if (ts.isArrayLiteralExpression(outer)) return 'the value is stored in an array literal';
   if (ts.isPropertyDeclaration(outer)) return 'the value is stored in a class field';
-  if (ts.isParameter(outer) || ts.isBindingElement(outer)) return 'the value is a default value';
+  if (ts.isParameter(outer) || ts.isBindingElement(outer)) return 'the value is used as a default value';
   if (ts.isExpressionWithTypeArguments(outer)) return 'the value is the base of a class';
   return `the value is used as the ${fieldOf(outer, current).field} of a ${kindName(outer)}`;
 }
 
-// The problem with a callback that a read method calls with the value at position at, or null.
+// Why a read method's callback cannot be accepted, when the method passes the value to the callback's
+// parameter at index at (counting from 0); null when it can.
 function callbackProblem(argument, at) {
   let fn = argument;
   while (fn && ts.isParenthesizedExpression(fn)) fn = fn.expression;
@@ -1852,7 +1928,7 @@ function callbackProblem(argument, at) {
   const rest = fn.parameters.findIndex((parameter) => parameter.dotDotDotToken);
   if (rest !== -1 && rest <= at) return 'a rest parameter of the callback receives the value';
   if (fn.parameters.length > at) return `the callback declares parameter ${at + 1}, which receives the value`;
-  if (readsArguments(fn)) return 'the callback reads arguments, which hold the value';
+  if (readsArguments(fn)) return 'the callback reads arguments, an object that contains the value';
   return null;
 }
 
@@ -1862,7 +1938,7 @@ function unparenthesized(node) {
   return current;
 }
 
-// The outermost expression that is node in parentheses.
+// The outermost parenthesized expression around node, or node itself when it is not in parentheses.
 function outermostParentheses(node) {
   let current = node;
   while (current.parent && ts.isParenthesizedExpression(current.parent)) current = current.parent;
@@ -1901,9 +1977,9 @@ class Facts {
     return id;
   }
 
-  // The symbol an identifier refers to in JavaScript: TypeScript's, except that a reference in a
-  // parameter list which TypeScript resolves into that function's body is resolved again from outside
-  // the function (see the binding model).
+  // The symbol an identifier refers to under JavaScript's scoping rules. This is TypeScript's symbol,
+  // except for a reference in a parameter list that TypeScript resolves to a declaration in the
+  // function's body; that reference is resolved again from outside the function (see the binding model).
   resolve(node) {
     const parent = node.parent;
     let symbol;
@@ -1930,8 +2006,8 @@ class Facts {
     return symbol;
   }
 
-  // The identifiers of the module that are not property names, by spelling, found in one walk.
-  // The local symbol of each exported declaration in the module's scope table, by its export symbol.
+  // Maps the export symbol of each exported declaration to the declaration's local symbol in the
+  // module's scope table.
   exportLocals() {
     if (this.locals) return this.locals;
     this.locals = new Map();
@@ -1941,6 +2017,8 @@ class Facts {
     return this.locals;
   }
 
+  // Maps each spelling to the module's identifiers with that spelling, except property names. The map
+  // is built in one walk and cached.
   identifierIndex() {
     if (this.identifiers) return this.identifiers;
     const index = new Map();
@@ -1957,7 +2035,7 @@ class Facts {
     return index;
   }
 
-  // Direct eval calls and with statements, which can read and write any binding whose scope holds them.
+  // Direct eval calls and with statements, which can read and write any binding whose scope contains them.
   dynamicScopes() {
     if (this.dynamicSites) return this.dynamicSites;
     const sites = [];
@@ -1971,8 +2049,8 @@ class Facts {
     return sites;
   }
 
-  // The occurrences of a binding and the reasons it is refused. Only the identifiers spelled like its
-  // declarations are resolved.
+  // The occurrences of a binding and the reasons it is refused. Only identifiers with the same spelling
+  // as the symbol's name or one of its declaration names are resolved.
   examine(given) {
     const symbol = bindingSymbol(given);
     if (this.examined.has(symbol)) return this.examined.get(symbol);
@@ -1988,14 +2066,14 @@ class Facts {
       }
     }
     // An exported declaration also has a local symbol in the module's scope table, whose exportSymbol is
-    // the export symbol (bindingSymbol). Another declaration of the name at the module's top level goes
-    // into that local symbol only: `export var x=1;var x=2;` is one JavaScript binding, and
-    // `export function f(){}function f(){}` a module JavaScript rejects. Either way the export symbol's
-    // declarations leave it out, so the binding is refused.
+    // the export symbol (bindingSymbol). TypeScript adds another top-level declaration of the same name
+    // to that local symbol only. `export var x=1;var x=2;` is one binding in JavaScript, and JavaScript
+    // rejects a module with `export function f(){}function f(){}`. In both cases the export symbol's
+    // declarations do not include the other declaration, so the binding is refused.
     for (const declaration of declarationsIn(this.exportLocals().get(symbol) ?? { declarations: [] }, sourceFile)) {
       if (!declarations.includes(declaration)) {
-        refuse(declaration, 'the module declares the name again besides its exported declaration, which TypeScript keeps in ' +
-          'another symbol');
+        refuse(declaration, 'the module declares the name again besides its exported declaration, and TypeScript puts the ' +
+          'second declaration in a separate symbol');
       }
     }
     const modelled = declarations.filter(isModelledDeclaration);
@@ -2023,8 +2101,8 @@ class Facts {
         for (let current = declaration.parent; current && !isFunctionLike(current); current = current.parent) {
           if (ts.isCatchClause(current) && current.variableDeclaration && contains(current.block, declaration) &&
               boundNames(current.variableDeclaration.name).includes(name.text)) {
-            refuse(declaration, 'the catch clause around it has a variable of the same name, which its initializer ' +
-              'assigns instead of this var');
+            refuse(declaration, 'the catch clause around it has a variable of the same name, and the initializer of ' +
+              'this var assigns that variable instead of the var');
           }
         }
       }
@@ -2052,7 +2130,7 @@ class Facts {
       } else if (roles.includes('delete-operand')) {
         refuse(node, 'the name is deleted');
       } else if (!scopes.some((scope) => contains(scope, node))) {
-        refuse(node, 'TypeScript resolves a reference here that lies outside the scope of every declaration');
+        refuse(node, 'TypeScript resolves this reference to the binding, outside the scopes of all its declarations');
       }
       if (roles.includes('write') && declarations.some((d) => ts.isClassDeclaration(d))) {
         refuse(node, 'the class name is written here, while the class body keeps an inner binding to the class');
@@ -2063,11 +2141,12 @@ class Facts {
     return result;
   }
 
-  // The symbol of a binding id: the identifier at the id's position is one of its declaration names.
+  // The symbol of a binding id, resolved from the identifier at the id's offset, which is the start of
+  // one of the binding's declaration names.
   symbolOfId(id) {
     const match = typeof id === 'string' ? /^m(\d+)@(\d+)$/.exec(id) : null;
     if (!match || Number(match[1]) !== this.module.index) {
-      throw new RequestError(`binding ${id} is not one of module ${this.module.index}`);
+      throw new RequestError(`binding ${id} does not belong to module ${this.module.index}`);
     }
     if (!this.symbols.has(id)) {
       const token = ts.getTokenAtPosition(this.sourceFile, Number(match[2]));
@@ -2078,8 +2157,8 @@ class Facts {
     return symbol;
   }
 
-  // The binding a name has in the module scope: a top-level declaration, a var anywhere outside a
-  // function, or an import.
+  // The binding a name has in the module scope (a top-level declaration, a var anywhere outside a
+  // function, or an import), or {free: name} when the module scope does not declare the name.
   scopeBinding(name) {
     const symbol = bindingSymbol(this.sourceFile.locals?.get(ts.escapeLeadingUnderscores(name)));
     const id = symbol ? this.idOf(symbol) : null;
@@ -2139,12 +2218,12 @@ class Facts {
     return record;
   }
 
-  // The built-in scan of this module with its bindings (see "The built-in scan"). A built-in's name
-  // counts where it is free; a variable that receives a value is followed through its occurrences, and
-  // one the binding model refuses is unfollowed. seeds gives what import bindings receive from other
-  // modules' exports, as [{at, values, unknown}]: at is the position of the import's local name, values
-  // are paths such as Set.prototype, and unknown says that the exporting variable may also hold a value
-  // the scan does not identify.
+  // Runs the built-in scan on this module with its bindings (see "The built-in scan"). An occurrence of a
+  // built-in's name is scanned only where the name is free. A variable that receives a built-in value is
+  // followed through its occurrences, and the value is unfollowed when the binding model refuses the
+  // variable. seeds lists what import bindings receive from other modules' exports, as
+  // [{at, values, unknown}]: at is the position of the import's local name, values are paths such as
+  // Set.prototype, and unknown is true when the exporting variable may also hold other values.
   premise(seeds) {
     const seeded = new Map();
     for (const seed of seeds ?? []) {
@@ -2153,10 +2232,10 @@ class Facts {
       seeded.set(seed.at, { values: [...new Set([...known.values, ...seed.values.map(String)])], unknown: known.unknown || Boolean(seed.unknown) });
     }
     const values = new Map();
-    // Each pass classifies every use with what the earlier passes found each variable may hold, and may
-    // find more: a variable's value can come from a use classified before the variable got it. The
-    // passes repeat until no variable gains a value. Values only accumulate, and the bounds on each
-    // variable's values keep them finite.
+    // Each pass classifies every use with the values that earlier passes found for each variable, and
+    // may find more, because a use can be classified before the variable it reads has received all its
+    // values. The passes repeat until the values of every variable stay the same. Values are only ever
+    // added, and the bounds on each variable's values keep their number finite, so the loop ends.
     let signature = null;
     for (;;) {
       const result = this.premisePass(seeded, values);
@@ -2169,7 +2248,8 @@ class Facts {
   premisePass(seeded, values) {
     const sourceFile = this.sourceFile;
     const free = (identifier) => this.idOf(this.resolve(identifier)) === null;
-    // TypeScript resolves globalThis to a symbol of its own, without a declaration in the module.
+    // TypeScript resolves globalThis to a built-in symbol that does not have a declaration in the
+    // module, so idOf gives null for it and free() treats it as free.
     const freeValue = (identifier) => (!isPropertyName(identifier) && !isDeclarationName(identifier) && BUILTINS.has(identifier.text) &&
       free(identifier) ? nameValue(identifier.text) : null);
     const scan = new BuiltinScan(sourceFile, freeValue, handleOf, (identifier) => free(identifier) && !insideWith(identifier));
@@ -2178,8 +2258,8 @@ class Facts {
     scan.seeded = seeded;
     scan.origins = new Map();
     scan.visiting = new Set();
-    // A variable may hold the values it received so far, and a value the scan does not identify when it
-    // has a source outside the model (hasUnknownOrigins).
+    // A variable's values are the values it has received so far. unknown is true when the variable also
+    // has a source outside the model (hasUnknownOrigins); it is not computed with onlyValues.
     scan.variableValue = (identifier, onlyValues) => {
       const symbol = this.resolve(identifier);
       if (!symbol || this.idOf(symbol) === null) return null;
@@ -2202,7 +2282,7 @@ class Facts {
     const pending = [];
     for (const [at, seed] of seeded) {
       const token = ts.getTokenAtPosition(sourceFile, at);
-      if (!ts.isIdentifier(token) || start(token, sourceFile) !== at) throw new RequestError(`position ${at} does not identify an identifier`);
+      if (!ts.isIdentifier(token) || start(token, sourceFile) !== at) throw new RequestError(`position ${at} is not the start of an identifier`);
       for (const value of seed.values) {
         const [root, ...path] = value.split('.');
         const record = { ...scan.where(token), value, name: token.text, at, import: true };
@@ -2217,8 +2297,9 @@ class Facts {
     const unknownOrigins = 'the variable can also receive values from declarations or writes outside the built-in value model';
     while (taken < scan.referenceValues.length || pending.length) {
       const { name, value, record } = pending.length ? pending.shift() : scan.referenceValues[taken++];
-      // A value the scan does not follow from here is unfollowed; one it follows through a variable that
-      // may also hold other values stays followed, and only its record says so.
+      // unclassified marks the reference record with the reason and lists the value as unfollowed. With
+      // followedAnyway, used for a variable that may also hold other values, the scan still follows the
+      // value and only the record is marked.
       const unclassified = (reason, limit, followedAnyway = false) => {
         record.status = 'unclassified';
         record.reason = reason;
@@ -2242,19 +2323,19 @@ class Facts {
         else record.status = 'followed';
         continue;
       }
-      // A variable that derives its value from its own value, as `t = t.prototype`, gets a new value each
-      // round. The bounds stop that derivation.
+      // A variable whose value is derived from its own value, as in `t = t.prototype`, gets a new value
+      // in each pass. MAX_VALUE_PATH stops that.
       if (value.path.length > MAX_VALUE_PATH) {
         unclassified(`a value derived more than ${MAX_VALUE_PATH} members deep is not followed`, 'bounds');
         continue;
       }
       const held = values.get(symbol) ?? [];
       if (held.length >= MAX_VALUES_PER_VARIABLE && !held.some((known) => valueName(known) === valueName(value))) {
-        unclassified(`the variable holds more than ${MAX_VALUES_PER_VARIABLE} built-in values, and the others are not followed`, 'bounds');
+        unclassified(`the variable already holds ${MAX_VALUES_PER_VARIABLE} built-in values, and further values are not followed`, 'bounds');
         continue;
       }
-      // Known built-in alternatives are still followed for writes; the record says that the variable may
-      // also hold other values.
+      // The scan still follows the variable's known built-in values for writes; the record says that the
+      // variable may also hold other values.
       if (this.hasUnknownOrigins(symbol, scan)) unclassified(unknownOrigins, undefined, true);
       else record.status = 'followed';
       followed.add(key);
@@ -2268,7 +2349,8 @@ class Facts {
       }
       for (const node of examined.nodes) if (!isDeclarationName(node)) scan.follow(node, value, true);
     }
-    // An export of a variable with sources outside the model passes that on to its importers.
+    // An export of a variable that has sources outside the model is marked unknown, so the seeds of its
+    // importers are unknown too.
     for (const entry of scan.result.exports) {
       const token = ts.getTokenAtPosition(sourceFile, entry.s);
       const symbol = ts.isIdentifier(token) ? this.resolve(token) : undefined;
@@ -2278,19 +2360,21 @@ class Facts {
   }
 
   // Whether a variable may hold a value from a source outside the built-in value model, which the scan
-  // then does not identify. The sources outside it: a parameter, a catch variable, a function or class,
-  // an import that no export seeds with built-in values or whose exporting variable has such sources
-  // itself, a binding the binding model refuses, an element of an array pattern, a rest element or an
-  // element with a default, and a declaration or `=` assignment whose value the scan does not identify,
-  // is an instance or is a member read through one; and every other write, as a compound assignment, a
-  // for-in or for-of head or a destructuring target. A variable whose sources are other variables
-  // depends on their sources; a cycle among them adds no source. This does not stop the scan from
-  // following the variable's known built-in values, but makes the variable an uncertain callee.
+  // then cannot identify. These sources are outside the model: a parameter, a catch variable, a function
+  // or class, an import without a seed or whose seed is unknown because the exporting variable has such
+  // a source, a binding the binding model refuses, an element of an array pattern, a rest element, an
+  // element with a default, a declaration or `=` assignment whose value the scan cannot identify, is an
+  // instance or is a member read through one, and every other kind of write, such as a compound
+  // assignment, a for-in or for-of head or a destructuring target. A variable whose sources are other
+  // variables has their sources, and a cycle among them does not add a source. The scan still follows
+  // the variable's known built-in values, but a call through the variable may call a function the scan
+  // cannot identify, so an argument of such a call escapes.
   hasUnknownOrigins(symbol, scan) {
     if (scan.origins.has(symbol)) return scan.origins.get(symbol);
     if (scan.visiting.has(symbol)) return false;
-    // Only the outermost query sees every source: an inner one stops where the cycle began. A found
-    // source outside the model holds wherever it was found.
+    // Only the outermost query sees every source, because an inner query stops at the variable where the
+    // cycle began, so a false answer is cached only for the outermost query. A source outside the model
+    // found by any query is valid everywhere, so a true answer is always cached.
     const outermost = scan.visiting.size === 0;
     scan.visiting.add(symbol);
     let unknown;
@@ -2306,14 +2390,15 @@ class Facts {
   originsOutsideModel(symbol, scan) {
     const sourceFile = this.sourceFile;
     const declarations = declarationsIn(symbol, sourceFile);
-    // An import holds what the exporting module's variable holds; an ES module cannot assign it.
+    // An import binding has the values of the exporting module's variable, and an ES module cannot
+    // assign to an import binding.
     if (declarations.every((d) => ts.isImportSpecifier(d) || ts.isImportClause(d))) {
       return declarations.some((d) => {
         const seed = scan.seeded.get(start(declarationName(d), sourceFile));
         return !seed || seed.unknown;
       });
     }
-    // The declarations decide most variables before their occurrences are resolved.
+    // For most variables, the declarations alone give the answer, before any occurrence is resolved.
     for (const declaration of declarations) {
       const root = ts.isBindingElement(declaration) ? patternRoot(declaration) : declaration;
       if (!ts.isVariableDeclaration(root) || catchClauseOf(declaration)) return true;
@@ -2343,10 +2428,12 @@ class Facts {
     return false;
   }
 
-  // In `for (let [key, value] of Object.entries({a: ..., b: ...}))`, key can be a or b. The
-  // pattern must have exactly two identifiers without defaults or rest elements, and the key binding
-  // may only be written by that loop head. Array iteration is used both by for-of and by destructuring
-  // each pair, so its operations are dependencies of the proof as well as Object.entries.
+  // The keys that a for-of loop over Object.entries gives its key variable: in
+  // `for (let [key, value] of Object.entries({a: ..., b: ...}))`, key is "a" or "b". The pattern must be
+  // exactly two identifiers without defaults or rest elements, the object must be a literal without
+  // spreads whose keys the scan can read, and only that loop head may write the key variable. Both the
+  // for-of and the destructuring of each pair use array iteration, so the proof relies on its operations
+  // as well as on Object.entries. A `__proto__: x` member sets the prototype and is not a key.
   entriesKeys(identifier, scan) {
     if (!ts.isIdentifier(identifier)) return null;
     const symbol = this.resolve(identifier);
@@ -2386,8 +2473,8 @@ class Facts {
     return { keys: [...new Set(keys)], requires: ['Object.entries', 'Array.prototype.@@iterator', '%ArrayIteratorPrototype%.next'] };
   }
 
-  // Whether an identifier is a variable the binding model accepts, with one declaration whose
-  // initializer is a call of the built-in Symbol.for, and is not written afterwards.
+  // Whether an identifier refers to a variable that the binding model accepts, that has exactly one
+  // declaration, whose initializer is a call of the built-in Symbol.for, and that is never written.
   holdsRegistrySymbol(identifier, scan) {
     const symbol = this.resolve(identifier);
     if (!symbol) return false;
@@ -2402,12 +2489,13 @@ class Facts {
     return ts.isCallExpression(initializer) && !initializer.questionDotToken && scan.registry(initializer);
   }
 
-  // The uses of a binding's value in this module under the operation model. query: {id, model: {kind,
-  // keys, accessors}, mode}, with mode one of
+  // Classifies the uses of a binding's value in this module under the operation model. query is
+  // {id, model: {kind, keys, accessors}, mode}, with mode one of
   //   value (the default)  id is the binding that holds the value;
-  //   namespace            id is a namespace that holds the value under the export names in names;
+  //   namespace            id is a namespace variable whose object contains the value under the export
+  //                        names in names;
   //   parameter            id is a function that another module imports and calls with the value as
-  //                        the argument at position, depth calls from the value's binding.
+  //                        the argument at index position, depth calls away from the value's binding.
   uses(query) {
     const ctx = new UseContext(query.model);
     const mode = query.mode ?? 'value';
@@ -2427,8 +2515,8 @@ class Facts {
     return ctx.result();
   }
 
-  // The uses of the namespace that the import() or import.meta.require call at handle loads, which
-  // holds the value under names.
+  // Classifies the uses of the namespace object that the import() or import.meta.require call at handle
+  // loads; the namespace contains the value under the export names in names.
   loadUse(query) {
     const ctx = new UseContext(query.model);
     const node = nodeAt(this.sourceFile, query.handle);
@@ -2444,9 +2532,9 @@ class Facts {
     ctx.refused.push({ s: start(node, this.sourceFile), e: node.end, reason });
   }
 
-  // Classifies the occurrences of every binding in the queue: the root binding, aliases, parameters
-  // and namespace variables. The entry with the fewest calls goes first, so a binding the value reaches
-  // on several routes is classified at the depth of the route with the fewest calls.
+  // Classifies the occurrences of every binding in the queue: the root binding, aliases, parameters and
+  // namespace variables. The entry with the lowest depth is taken first, so a binding that the value
+  // reaches through several call chains is classified at the depth of the chain with the fewest calls.
   drainUses(ctx) {
     while (ctx.queue.length) {
       let next = 0;
@@ -2466,11 +2554,12 @@ class Facts {
         const root = ts.isBindingElement(declaration) ? patternRoot(declaration) : declaration;
         if (!exportedByModifier(root)) continue;
         const name = declarationName(declaration);
-        if (entry.mode === 'namespace') this.refuseUse(ctx, name, 'a namespace that holds the value is exported');
+        if (entry.mode === 'namespace') this.refuseUse(ctx, name, 'a namespace that contains the value is exported');
         else ctx.exports.push({ name: name.text, s: start(name, this.sourceFile) });
       }
-      // The root binding has one declaration that assigns it, the one pfg.values evaluated; an alias
-      // or a parameter is assigned only where the value reaches it.
+      // The root binding may have one initialized declaration, the one whose initializer pfg.values
+      // evaluated. An alias or a parameter receives the value only at entry.declaration, so every other
+      // initialized declaration of it is refused.
       const assigning = [];
       for (const node of examined.nodes) {
         const roles = rolesOf(node);
@@ -2494,7 +2583,8 @@ class Facts {
     }
   }
 
-  // Follows an expression whose value is the value, up through the parents that hand it on.
+  // Follows an expression that evaluates to the value up through the parents that pass it on unchanged,
+  // and classifies the use at the first parent that does something else with it.
   valueUse(expression, ctx, depth) {
     const { kind } = ctx.model;
     let current = expression;
@@ -2618,7 +2708,7 @@ class Facts {
     }
   }
 
-  // A conversion of the value to a primitive.
+  // Classifies a conversion of the value to a primitive.
   convertUse(node, ctx) {
     const { kind, keys } = ctx.model;
     if (kind === 'object') {
@@ -2631,7 +2721,7 @@ class Facts {
     if (kind === 'array') ctx.require('Array.prototype.join');
   }
 
-  // A member of the value, read or called.
+  // Classifies a read or a call of a member of the value.
   memberUse(access, ctx) {
     if (isWriteTarget(access)) return this.refuseUse(ctx, access, 'a member of the value is written');
     const key = ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
@@ -2654,7 +2744,7 @@ class Facts {
     if ((kind === 'set' || kind === 'map') && key === 'size') ctx.require(`${CONTAINER_CONSTRUCTORS[kind]}.prototype.size`);
   }
 
-  // A call of a member of the value, with the value as this.
+  // Classifies a call of a member of the value, which runs with the value as this.
   methodUse(key, call, access, ctx) {
     const { kind, keys } = ctx.model;
     const method = key === undefined ? undefined : READ_METHODS[kind].get(key);
@@ -2676,7 +2766,7 @@ class Facts {
 
   iterateUse(node, ctx) {
     const { kind } = ctx.model;
-    if (kind === 'object') return this.refuseUse(ctx, node, 'the value is iterated, and an object literal has no iterator');
+    if (kind === 'object') return this.refuseUse(ctx, node, 'the value is iterated, and an object literal is not iterable');
     ctx.require(...ITERATION_REQUIRES[kind]);
   }
 
@@ -2702,7 +2792,7 @@ class Facts {
     }
   }
 
-  // The dotted name of a free built-in an expression reads, such as Object.keys, or null.
+  // The dotted path that an expression reads from a free built-in name, such as Object.keys, or null.
   freeBuiltinPath(expression) {
     let current = unparenthesized(expression);
     const parts = [];
@@ -2715,7 +2805,7 @@ class Facts {
     return [current.text, ...parts].join('.');
   }
 
-  // The value as the argument at position of a call or construction.
+  // Classifies the value passed as the argument at index position of a call or construction.
   argumentUse(call, position, node, ctx, depth) {
     const { kind, keys, accessors } = ctx.model;
     const args = call.arguments;
@@ -2752,7 +2842,7 @@ class Facts {
     return this.parameterUse(call, position, node, ctx, depth);
   }
 
-  // The value passed to a function the module declares or imports.
+  // Classifies the value passed to a function that the module declares or imports.
   parameterUse(call, position, node, ctx, depth) {
     if (!ts.isCallExpression(call)) return this.refuseUse(ctx, node, 'the value is passed to a template tag');
     const callee = unparenthesized(call.expression);
@@ -2763,7 +2853,7 @@ class Facts {
     if (declarations.length !== 1 || !(ts.isImportSpecifier(declarations[0]) || ts.isImportClause(declarations[0]))) {
       return this.enterFunction(symbol, callee.text, position, node, ctx, depth);
     }
-    // An imported function: the module that declares it classifies the parameter's uses.
+    // For an imported function, pfg.values classifies the parameter's uses in the declaring module.
     const examined = this.examine(symbol);
     if (examined.refused.length) return this.refuseUse(ctx, node, `the value is passed to ${callee.text}, a binding the binding model refuses`);
     if (examined.occurrences.some((occurrence) => occurrence.roles.includes('write'))) {
@@ -2773,8 +2863,9 @@ class Facts {
     ctx.calls.push({ name: callee.text, id: this.idOf(symbol), position, depth, s: start(node, this.sourceFile), e: node.end });
   }
 
-  // The value passed as the argument at position of a plain call of the function bound to symbol, depth
-  // calls from the value's binding: the parameter that receives it is queued. Refusals are placed at site.
+  // Queues the parameter that receives the value, which is passed as the argument at index position of a
+  // plain call of the function whose binding is symbol, depth calls away from the value's binding.
+  // Refusals are recorded at site.
   enterFunction(symbol, name, position, site, ctx, depth) {
     const examined = this.examine(symbol);
     if (examined.refused.length) return this.refuseUse(ctx, site, `the value is passed to ${name}, a binding the binding model refuses`);
@@ -2788,7 +2879,7 @@ class Facts {
       return this.refuseUse(ctx, site, `the value is passed to ${name}, a variable that is written`);
     }
     if (depth >= 4) return this.refuseUse(ctx, site, 'the value is passed on more than four calls deep');
-    if (readsArguments(fn)) return this.refuseUse(ctx, site, `${name} reads arguments, which hold the value`);
+    if (readsArguments(fn)) return this.refuseUse(ctx, site, `${name} reads arguments, an object that contains the value`);
     const rest = fn.parameters.findIndex((parameter) => parameter.dotDotDotToken);
     if (rest !== -1 && rest <= position) return this.refuseUse(ctx, site, `a rest parameter of ${name} receives the value`);
     if (position >= fn.parameters.length) return;
@@ -2806,7 +2897,8 @@ class Facts {
     ctx.queue.push({ id, mode: 'value', names: new Set(), depth, root: false, declaration });
   }
 
-  // Follows an expression whose value is a namespace holding the value under names.
+  // Follows an expression that evaluates to a namespace object containing the value under the export
+  // names in names.
   namespaceUse(expression, names, ctx, depth) {
     let current = expression;
     for (;;) {
@@ -2818,12 +2910,12 @@ class Facts {
       }
       if ((ts.isPropertyAccessExpression(outer) || ts.isElementAccessExpression(outer)) && outer.expression === current) {
         const key = ts.isPropertyAccessExpression(outer) ? outer.name.text : literalKey(outer.argumentExpression);
-        if (key === undefined) return this.refuseUse(ctx, outer, 'a computed member of a namespace that holds the value');
-        if (isWriteTarget(outer)) return this.refuseUse(ctx, outer, 'a member of a namespace that holds the value is written');
+        if (key === undefined) return this.refuseUse(ctx, outer, 'a computed member of a namespace that contains the value is read');
+        if (isWriteTarget(outer)) return this.refuseUse(ctx, outer, 'a member of a namespace that contains the value is written');
         const callee = outermostParentheses(outer);
         if ((ts.isCallExpression(callee.parent) && callee.parent.expression === callee) ||
             (ts.isTaggedTemplateExpression(callee.parent) && callee.parent.tag === callee)) {
-          return this.refuseUse(ctx, outer, 'a member of a namespace that holds the value is called with the namespace as this');
+          return this.refuseUse(ctx, outer, 'a member of a namespace that contains the value is called with the namespace as this');
         }
         if (names.has(key)) return this.valueUse(outer, ctx, depth);
         return;
@@ -2836,44 +2928,46 @@ class Facts {
           return;
         }
         if (ts.isObjectBindingPattern(outer.name)) return this.namespacePattern(outer.name, names, ctx, depth);
-        return this.refuseUse(ctx, current, 'a namespace that holds the value is destructured as an array');
+        return this.refuseUse(ctx, current, 'a namespace that contains the value is destructured as an array');
       }
       if (ts.isExpressionStatement(outer) || ts.isTypeOfExpression(outer) || ts.isVoidExpression(outer)) return;
       if (ts.isPrefixUnaryExpression(outer) && outer.operator === K.ExclamationToken) return;
       if (ts.isBinaryExpression(outer) && [K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken].includes(outer.operatorToken.kind)) return;
-      if (ts.isAwaitExpression(outer)) return this.refuseUse(ctx, current, 'await calls a then member of a namespace that holds the value');
-      return this.refuseUse(ctx, current, 'a namespace that holds the value is used outside the forms the model follows');
+      if (ts.isAwaitExpression(outer)) return this.refuseUse(ctx, current, 'await calls a then member of a namespace that contains the value');
+      return this.refuseUse(ctx, current, 'a namespace that contains the value is used outside the forms the model follows');
     }
   }
 
-  // An object pattern that destructures a namespace holding the value under names.
+  // Classifies an object pattern that destructures a namespace containing the value under the export
+  // names in names.
   namespacePattern(pattern, names, ctx, depth) {
     for (const element of pattern.elements) {
-      if (element.dotDotDotToken) return this.refuseUse(ctx, element, 'a rest element collects the members of a namespace that holds the value');
+      if (element.dotDotDotToken) return this.refuseUse(ctx, element, 'a rest element collects the members of a namespace that contains the value');
       const key = element.propertyName ? memberKey(element.propertyName) : ts.isIdentifier(element.name) ? element.name.text : undefined;
-      if (key === undefined) return this.refuseUse(ctx, element, 'a computed key destructures a namespace that holds the value');
+      if (key === undefined) return this.refuseUse(ctx, element, 'a computed key destructures a namespace that contains the value');
       if (!names.has(key)) continue;
       if (element.initializer && !isLiteralExpression(element.initializer)) {
-        this.refuseUse(ctx, element, 'the member that holds the value has a default that runs code');
+        this.refuseUse(ctx, element, 'the element that receives the value has a default that runs code');
         continue;
       }
       if (!ts.isIdentifier(element.name)) {
-        this.refuseUse(ctx, element, 'the member that holds the value is destructured further');
+        this.refuseUse(ctx, element, 'the element that receives the value is a nested pattern');
         continue;
       }
       const id = this.idOf(this.resolve(element.name));
       if (id === null) {
-        this.refuseUse(ctx, element, 'the member that holds the value is bound to a name the module does not declare');
+        this.refuseUse(ctx, element, 'the element that receives the value binds a name the module does not declare');
         continue;
       }
       ctx.queue.push({ id, mode: 'value', names: new Set(), depth, root: false, declaration: element });
     }
   }
 
-  // A pattern that receives a namespace holding the value under names: a variable or an object pattern.
+  // Classifies the element or parameter that receives a namespace containing the value under names; it
+  // must be a variable or an object pattern.
   namespaceTarget(element, names, ctx, depth) {
     if (element.initializer && !isLiteralExpression(element.initializer)) {
-      return this.refuseUse(ctx, element, 'the namespace has a default that runs code');
+      return this.refuseUse(ctx, element, 'the element that receives the namespace has a default that runs code');
     }
     if (ts.isIdentifier(element.name)) {
       const id = this.idOf(this.resolve(element.name));
@@ -2885,7 +2979,7 @@ class Facts {
     return this.refuseUse(ctx, element, 'the namespace is destructured as an array');
   }
 
-  // The promise from import(M), whose module's namespace holds the value under names.
+  // Classifies the uses of the promise import(M) returns; M's namespace contains the value under names.
   importPromiseUse(call, names, ctx) {
     const current = outermostParentheses(call);
     const outer = current.parent;
@@ -2896,40 +2990,40 @@ class Facts {
       return this.thenUse(outer.parent, (parameter) => this.namespaceTarget(parameter, names, ctx, 0), ctx);
     }
     if (ts.isArrayLiteralExpression(outer)) return this.promiseAllUse(outer, outer.elements.indexOf(current), names, ctx);
-    return this.refuseUse(ctx, current, 'the promise of a namespace that holds the value is used outside the forms the model follows');
+    return this.refuseUse(ctx, current, 'the promise of a namespace that contains the value is used outside the forms the model follows');
   }
 
-  // promise.then(callback): receive is given the callback's first parameter.
+  // Classifies promise.then(callback) and passes the callback's first parameter to receive.
   thenUse(call, receive, ctx) {
     const callback = unparenthesized(call.arguments[0]);
     if (!callback || !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
       return this.refuseUse(ctx, call, 'then is given a callback that is not an arrow or function expression written in the call');
     }
     if (ts.isFunctionExpression(callback) && readsArguments(callback)) {
-      return this.refuseUse(ctx, callback, 'the callback reads arguments, which hold what the promise gives');
+      return this.refuseUse(ctx, callback, 'the callback reads arguments, an object that contains the resolved value');
     }
     ctx.require('Promise.prototype.then');
     const first = callback.parameters[0];
     if (!first) return;
-    if (first.dotDotDotToken) return this.refuseUse(ctx, first, 'a rest parameter receives what the promise gives');
+    if (first.dotDotDotToken) return this.refuseUse(ctx, first, 'a rest parameter receives the resolved value');
     return receive(first);
   }
 
-  // import(M) as the element at index of the array literal given to Promise.all.
+  // Classifies import(M) as the element at index of the array literal passed to Promise.all.
   promiseAllUse(array, index, names, ctx) {
     if (array.elements.slice(0, index).some(ts.isSpreadElement)) {
       return this.refuseUse(ctx, array, 'a spread element before the import hides its position');
     }
     const all = outermostParentheses(array).parent;
     if (!ts.isCallExpression(all) || all.arguments[0] !== outermostParentheses(array) || this.freeBuiltinPath(all.expression) !== 'Promise.all') {
-      return this.refuseUse(ctx, array, 'an array holding the promise of a namespace that holds the value is used outside Promise.all');
+      return this.refuseUse(ctx, array, 'an array with the promise of a namespace that contains the value is used outside Promise.all');
     }
     ctx.require('Promise.all', 'Promise.resolve', 'Promise.prototype.then', ...ITERATION_REQUIRES.array);
     const element = (pattern) => {
       for (const [position, item] of pattern.elements.entries()) {
         if (position > index) break;
         if (ts.isBindingElement(item) && item.dotDotDotToken) {
-          return this.refuseUse(ctx, item, 'a rest element collects the namespace that holds the value');
+          return this.refuseUse(ctx, item, 'a rest element collects the namespace that contains the value');
         }
       }
       const item = pattern.elements[index];
@@ -2943,22 +3037,22 @@ class Facts {
       const holder = awaited.parent;
       if (ts.isExpressionStatement(holder)) return;
       if (ts.isVariableDeclaration(holder) && holder.initializer === awaited && ts.isArrayBindingPattern(holder.name)) return element(holder.name);
-      return this.refuseUse(ctx, outer, 'the namespaces Promise.all gives are used outside the forms the model follows');
+      return this.refuseUse(ctx, outer, 'the namespaces from Promise.all are used outside the forms the model follows');
     }
     if (ts.isExpressionStatement(outer)) return;
     if (ts.isPropertyAccessExpression(outer) && outer.expression === current && outer.name.text === 'then' &&
         ts.isCallExpression(outer.parent) && outer.parent.expression === outer) {
       return this.thenUse(outer.parent, (parameter) => {
         if (parameter.initializer && !isLiteralExpression(parameter.initializer)) {
-          return this.refuseUse(ctx, parameter, 'the namespaces have a default that runs code');
+          return this.refuseUse(ctx, parameter, 'the parameter receiving the namespaces has a default that runs code');
         }
         if (!ts.isArrayBindingPattern(parameter.name)) {
-          return this.refuseUse(ctx, parameter, 'the array of namespaces Promise.all gives is not destructured');
+          return this.refuseUse(ctx, parameter, 'the array of namespaces from Promise.all is not destructured');
         }
         return element(parameter.name);
       }, ctx);
     }
-    return this.refuseUse(ctx, current, 'the promise Promise.all gives is used outside the forms the model follows');
+    return this.refuseUse(ctx, current, 'the promise Promise.all returns is used outside the forms the model follows');
   }
 
   // Every occurrence of a binding, declarations included, or {refused} for a binding the model refuses.
@@ -2989,16 +3083,17 @@ class Facts {
     } else if (ts.isBigIntLiteral(node) || ts.isRegularExpressionLiteral(node)) {
       result.text = node.text;
     }
-    // What a node holds outside its children: operators that are token kinds rather than child nodes,
-    // the keyword of a declaration list, a meta property and a heritage clause, and `export =`.
+    // Facts about a node that are not in its children: an operator that TypeScript stores as a token
+    // kind instead of a child node, the keyword of a declaration list, of a meta property and of a
+    // heritage clause, and whether an export assignment is `export =`.
     if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) result.op = ts.tokenToString(node.operator);
     else if (ts.isBinaryExpression(node)) result.op = ts.tokenToString(node.operatorToken.kind);
     else if (ts.isVariableDeclarationList(node)) result.declares = declarationListKind(node);
     else if (ts.isMetaProperty(node)) result.keyword = ts.tokenToString(node.keywordToken);
     else if (ts.isHeritageClause(node)) result.token = ts.tokenToString(node.token);
     else if (ts.isExportAssignment(node)) result.exportEquals = Boolean(node.isExportEquals);
-    // A call, member access or non-null assertion inside an optional chain: a?.b() short-circuits the
-    // call although only the access has the ?. token.
+    // optionalChain marks a call, member access or non-null assertion inside an optional chain: in a?.b(),
+    // the call is skipped when a is null or undefined, although only the access has the ?. token.
     if (node.flags & ts.NodeFlags.OptionalChain) result.optionalChain = true;
     if (ts.isComputedPropertyName(node) || ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node) ||
         ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) {
@@ -3034,20 +3129,21 @@ class Facts {
     return found;
   }
 
-  // The node at handle as TypeScript prints it, without comments, after renaming every binding to a
-  // name that a source identifier cannot have, since ‹ and › cannot occur in a JavaScript identifier: the
-  // parameters declared inside the node ‹p0›, ‹p1›, ... and its other declarations ‹l0›, ... in the order
-  // they are declared; the bindings that roles names (binding id to role) ‹ROLE›; other bindings of the
-  // module ‹m0›, ... in the order they are first used. A role is upper case, so it never spells a
-  // generated name. Free names, property names and literals stay as written, and so do the public names
-  // of a module: an import specifier is written out as `a as ‹l0›`, a local export specifier as
-  // `‹l0› as a`, a re-export and an `export * as` name stay, and a declaration exported by an export
-  // modifier keeps its name. Shorthand properties and object binding elements are written out as
-  // key: value (with their defaults), so a key is never renamed with the binding it holds. Two texts are
-  // equal when the nodes have the same syntax, the same literals, free names and public names, and the
-  // same pattern of bindings; others lists the binding ids behind ‹m0›, ‹m1›, ..., for a caller that
-  // needs to know which bindings they are. A node that holds a direct eval call or a with statement, or
-  // that names a binding the binding model refuses, gives {refused} instead.
+  // The canonical text of the node at handle: the node as TypeScript prints it, without comments, after
+  // every binding is renamed to a name that cannot occur in the source, because ‹ and › are not valid in
+  // a JavaScript identifier. The new names are ‹p0›, ‹p1›, ... for the parameters declared inside the
+  // node and ‹l0›, ‹l1›, ... for its other declarations, in declaration order; ‹ROLE› for each binding
+  // in roles, which maps a binding id to a role; and ‹m0›, ‹m1›, ... for the module's other bindings, in
+  // the order of their first use. A role is upper case, so it can never equal a generated name. Free
+  // names, property names and literals stay as written, and so do the module's import and export names:
+  // an import specifier is printed as `a as ‹l0›`, a local export specifier as `‹l0› as a`, the names of
+  // a re-export and of `export * as` stay, and a declaration with an export modifier keeps its name.
+  // Shorthand properties and object binding elements are printed as key: value (with their defaults), so
+  // that renaming a binding never renames a property key. Two texts are equal when the nodes have the
+  // same syntax, the same literals, free names and import and export names, and the same pattern of
+  // bindings. others lists the binding ids of ‹m0›, ‹m1›, ..., for a caller that needs to know which
+  // bindings they are. A node that contains a direct eval call or a with statement, or that refers to a
+  // binding the binding model refuses, gives {refused} instead.
   canonical(handle, roles) {
     for (const role of Object.values(roles)) {
       if (typeof role !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(role)) {
@@ -3060,7 +3156,7 @@ class Facts {
     for (const site of this.dynamicScopes()) {
       if (contains(node, site.node)) {
         refused.push({ s: start(site.node, sourceFile), e: site.node.end,
-          reason: 'the text holds a direct eval call or a with statement, which can reach its bindings by name' });
+          reason: 'the text contains a direct eval call or a with statement, which can reach its bindings by name' });
       }
     }
     const names = new Map();
@@ -3068,7 +3164,8 @@ class Facts {
     let parameters = 0;
     let locals = 0;
     const admit = (symbol) => refused.push(...this.examine(symbol).refused);
-    // Declares each name an identifier or pattern binds, naming it with generate(identifier).
+    // Gives each name that an identifier or pattern binds its new name, generate(identifier), unless the
+    // binding already has one, and collects the binding's refusals.
     const declare = (name, generate) => {
       if (ts.isIdentifier(name)) {
         const symbol = this.resolve(name);
@@ -3147,15 +3244,16 @@ class Facts {
   }
 }
 
-// Whether a declaration is exported by an export modifier, other than as the default export: its name
-// is then the module's public name for it.
+// Whether a declaration has an export modifier and is not the default export. Its name is then also the
+// name the module exports it under.
 function exportedByModifier(declaration) {
   const holder = ts.isVariableDeclaration(declaration) ? declaration.parent?.parent : declaration;
   const modifiers = holder && ts.canHaveModifiers(holder) ? ts.getModifiers(holder) ?? [] : [];
   return modifiers.some((m) => m.kind === K.ExportKeyword) && !modifiers.some((m) => m.kind === K.DefaultKeyword);
 }
 
-// The roles of an identifier that refers to a binding, several at once.
+// The roles of an identifier that refers to a binding. An identifier can have several roles at once,
+// such as read, write and compound for the x of x += 1.
 function rolesOf(node) {
   const roles = [];
   const parent = node.parent;
@@ -3185,11 +3283,12 @@ function rolesOf(node) {
   return roles;
 }
 
-// Whether a declaration gives its name a value: "for-target" for the head of a for-in or for-of loop,
-// which assigns it on every iteration; true for a variable with an initializer, an element of a pattern
-// whose declaration has one, an element with a default, a catch clause's variable, and a function or
-// class, whose declaration is its value; false for a plain `var V`, a parameter, which a call gives its
-// value, and an import, which is bound to another module's export.
+// Whether a declaration gives its name a value. It is "for-target" for the head of a for-in or for-of
+// loop, which assigns the name on every iteration. It is true for a variable with an initializer, an
+// element of a pattern whose declaration has an initializer, an element with a default, a catch clause's
+// variable, and a function or class, whose declaration is its value. It is false for a plain `var V`,
+// for a parameter, which gets its value from a call, and for an import, which is bound to another
+// module's export.
 function declarationAssigns(declaration) {
   if (ts.isFunctionDeclaration(declaration) || ts.isClassDeclaration(declaration) ||
       ts.isFunctionExpression(declaration) || ts.isClassExpression(declaration)) return true;
@@ -3255,20 +3354,21 @@ function isDestructuringTarget(node) {
   }
 }
 
-// The facts of the module asked about last. Building a module's program is the slow part of a batch
-// (1.5 to 2 s for the largest 2.1.304 module), and an extraction asks about the same module in several
-// batches in a row; one program is kept, never more.
+// The Facts of the module asked about last. Building a module's program is the slow part of a batch
+// (1.5 to 2 s for the largest module of 2.1.304), and an extraction asks about the same module in
+// several batches in a row, so the helper keeps that module's program. It keeps only one program, and
+// drops it before building the next (factsBatch).
 let lastFacts = null;
 
 // The queries of a facts request, each answered in order:
-//   node {handle, depth}     the syntax tree at a handle, children below depth marked truncated
+//   node {handle, depth}     the syntax tree at a handle, depth levels deep; deeper nodes are truncated
 //   find {s, e, kind}        the handles of the nodes of that kind with exactly that span
-//   binding {handle}         the binding record of the identifier at a handle, or {free}/{role}
+//   binding {handle}         the binding record of the identifier at a handle, or {free}, {special} or {role}
 //   bindingAt {s, e}         the same for the one identifier with exactly that span
 //   record {id}              the record of a binding id
 //   scope {name}             the module-scope binding of a name, or {free}
 //   occurrences {id}         every occurrence of a binding, with roles and chain
-//   canonical {handle, roles}  the node's text with bindings renamed, and the ids behind ‹m0›, ...
+//   canonical {handle, roles}  the node's text with bindings renamed, and the binding ids of ‹m0›, ...
 //   text {s, e}              a slice of the module's text
 //   comments                 the comments before the module's first token
 //   premise {seeds}          the built-in scan with the module's bindings (Facts.premise)

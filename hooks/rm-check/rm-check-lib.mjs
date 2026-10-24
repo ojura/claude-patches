@@ -1,20 +1,22 @@
-// Loading and running the dangerous-removal check, shared by the hook and the
-// server. Importing a version's prepared chunks takes about 0.45 s because they
-// pull in a large part of the bundle; one check then takes 2 to 50 ms.
+// Loads and runs the dangerous-removal check for the hook and the server.
+// Importing a version's prepared modules takes about 0.45 s, because they import
+// a large part of the bundle. After that, one check takes 1 to 50 ms.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// The format of the prepared directory, which prepare.py writes and loadCheck
-// reads. The hook puts this number in the prepared directory's name and in the
-// server's socket name, so when it changes, new hooks prepare a new directory
-// and start new servers, while a server running the previous code gets no more
-// requests and exits when its idle time runs out.
+// The number of the format of the prepared directory that prepare.py writes and
+// loadCheck reads. The hook puts this number in the prepared directory's name
+// and in the server's socket name. So when it changes, new hooks prepare a new
+// directory and start new servers, and a server that runs the previous code
+// stops getting requests and exits when its idle time runs out.
 export const LAYOUT = 4;
 
-// The first result whose decisionReason is a safetyCheck with circuitBreaker
-// dangerousRemoval, or with dangerousRemoval in its also list, searching the
-// subcommandResults of compound commands first: its message, or the check's
-// reason when it has none. undefined otherwise.
+// Finds the first result whose decisionReason is a safetyCheck with
+// circuitBreaker dangerousRemoval, or with dangerousRemoval in its also list,
+// and returns its message, or the safetyCheck's reason when the result does not
+// have a message. For a compound command, it looks at the results of the
+// subcommands (subcommandResults) before the command's own result. Returns
+// undefined when it does not find such a result.
 export function dangerousRemovalMessage(result) {
   const isDanger = (r) => r?.type === "safetyCheck" &&
     (r.circuitBreaker === "dangerousRemoval" || (r.also ?? []).includes("dangerousRemoval"));
@@ -34,9 +36,9 @@ export function dangerousRemovalMessage(result) {
 
 // The parts of a tool-use context that the Bash tool's checkPermissions reads
 // for a command: the permission settings, options.isNonInteractiveSession
-// (2.1.309), the abort signal and the tool-use id, and session's
-// writePermissionStash, which 2.1.303 to 2.1.305 call when the command edits a
-// file with sed.
+// (which 2.1.309 reads), the abort controller, the tool-use id, and the
+// session's writePermissionStash, which 2.1.303 to 2.1.305 call when the
+// command edits a file with sed.
 function toolUseContext(mode) {
   const toolPermissionContext = {
     mode,
@@ -55,13 +57,13 @@ function toolUseContext(mode) {
 }
 
 // The self-test's directories. The check only compares and resolves these
-// paths; nothing creates them.
+// paths, so they do not have to exist.
 const PROBE_SESSION = "/nonexistent-rm-check-probe";
 const PROBE_CWD = `${PROBE_SESSION}/child`;
 const PROBE_COMMAND = `cd / && rm -rf ${PROBE_CWD}`;
-// The check removes its working directory after a cd that it follows only into
-// the session's working directories, which here are the session's original
-// directory alone.
+// PROBE_COMMAND removes PROBE_CWD after `cd /`. The check follows a cd only
+// into the session's working directories, which here are the session's original
+// directory alone, so each probe's verdict depends on both directories.
 const PROBES = [
   { originalCwd: PROBE_SESSION, cwd: PROBE_CWD, flagged: true,
     why: "the cd leaves the session's directories, so the check does not follow it and the rm " +
@@ -69,16 +71,17 @@ const PROBES = [
   { originalCwd: PROBE_SESSION, cwd: PROBE_SESSION, flagged: false,
     why: "the rm removes a subdirectory of the working directory" },
   { originalCwd: "/", cwd: PROBE_CWD, flagged: false,
-    why: "the check follows the cd to /, and the target is neither / nor a parent of /" },
+    why: "the check follows the cd to /, which becomes the working directory, and the rm removes a " +
+      "subdirectory of it" },
 ];
 const PROBE_TIMEOUT_MS = 5000;
 
-// Calls fn and returns {value} with its result, or {error} when it throws or
-// does not answer within PROBE_TIMEOUT_MS.
+// Calls fn and returns {value} with its result, or {error} when fn throws or
+// takes longer than PROBE_TIMEOUT_MS.
 async function attempt(fn) {
   let timer;
   const late = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`no answer within ${PROBE_TIMEOUT_MS} ms`)), PROBE_TIMEOUT_MS);
+    timer = setTimeout(() => reject(new Error(`timed out after ${PROBE_TIMEOUT_MS} ms`)), PROBE_TIMEOUT_MS);
   });
   try {
     return { value: await Promise.race([Promise.resolve().then(fn), late]) };
@@ -91,27 +94,28 @@ async function attempt(fn) {
 
 // Imports the check from a prepared directory and returns a function that runs
 // it for one command and permission mode, in the given working directory of a
-// session that started in originalCwd. It returns the check's text when the
-// command is flagged, and null otherwise.
+// session that started in originalCwd. That function returns the check's text
+// when the check flags the command, and null otherwise.
 //
 // The check reads two directories:
-//   - the working directory: from the AsyncLocalStorage store that Claude Code
-//     sets with runInCwd(dir, fn) around a session's or a subagent's work, and
-//     without the store, from the session state;
-//   - the session's original working directory (originalCwd), which counts as
-//     a working directory of the session together with the --add-dir
-//     directories: from the session state, where Claude Code changes it with
+//   - the working directory, from the AsyncLocalStorage store that Claude Code
+//     sets with runInCwd(dir, fn) around the work of a session or a subagent,
+//     or from the session state when the check runs outside runInCwd;
+//   - the session's original working directory (originalCwd), from the session
+//     state. Together with the --add-dir directories, it is one of the
+//     session's working directories, and Claude Code changes it with
 //     setOriginalCwd when it moves a session to another directory.
 // When the bundle loads, it sets both in the session state to the directory the
-// process started in, and process.chdir changes neither. So each check first
-// sets originalCwd, then runs inside runInCwd with the request's working
-// directory. originalCwd is process-wide, so calls must not overlap.
+// process started in, and process.chdir does not change them. So each check
+// first sets originalCwd and then runs inside runInCwd with the request's
+// working directory. originalCwd is process-wide, so calls must not overlap.
 //
-// prepare.py finds the Bash tool and the two directory functions with the
-// structural matcher, and lists what it found. Here the check is the one tool
-// whose checkPermissions flags `rm -rf /`, and exactly one pair of directory
-// functions must make it give PROBES' verdicts. Anything else throws with what
-// each candidate did, and the hook fails open with that text.
+// prepare.py finds the candidates for the Bash tool and the two directory
+// functions with pfg.bundle and lists them in manifest.json. The check is the
+// checkPermissions of the one candidate tool that flags `rm -rf /`, and exactly
+// one pair of directory functions must make it give the verdicts in PROBES. In
+// every other case loadCheck throws an error that says what each candidate did,
+// and the hook fails open with that message.
 export async function loadCheck(dir) {
   const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
   const candidates = async (role, usable) => {
@@ -170,9 +174,9 @@ export async function loadCheck(dir) {
     }
   }
   if (passing.length !== 1) {
-    throw new Error(`the ${manifest.version} check does not take its directories from exactly one pair of ` +
-      `prepare.py's runInCwd and setOriginalCwd candidates (${passing.length} pairs pass) for ` +
-      `"${PROBE_COMMAND}": ${pairReport.join(". ")}`);
+    throw new Error(`the ${manifest.version} directory functions could not be identified: exactly one pair ` +
+      `of prepare.py's runInCwd and setOriginalCwd candidates should make the check give the expected ` +
+      `verdicts for "${PROBE_COMMAND}", and ${passing.length} pairs pass: ${pairReport.join(". ")}`);
   }
   const [runInCwd, setOriginalCwd] = passing[0];
   const home = process.env.HOME ?? "/";

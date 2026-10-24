@@ -56,11 +56,12 @@ changed since extraction. `split_extracted_js()`, `changed_js_modules()` and
 
 `BunImage(data).source_modules()` lists the JavaScript module records, and
 `read_source(record)` gives a module's source as strict UTF-8. `pfg/bundle.py`
-reads Claude Code's modules this way to build the catalog of cc-env-overrides. A
-change to how this handler decodes module sources (the three storage encodings,
-single-module builds, module identity) changes what pfg extracts, so it must
-raise the number in `pfg/REVISION`; catalogs built before the change are then
-rebuilt.
+reads Claude Code's modules this way, and cc-env-overrides builds its catalog
+from what pfg reads. A change to how this handler decodes module sources (the
+three storage encodings, single-module builds, module identity) changes what pfg
+extracts, so the commit that makes it must also raise the number in
+`pfg/REVISION`. cc-env-overrides then rebuilds every catalog made before the
+change.
 
 ## Accepted executables
 

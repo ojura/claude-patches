@@ -1,40 +1,42 @@
 """
-bundle: the JavaScript modules of a Bun executable as syntax and bindings, for code that reads tables
-out of them without running them.
+bundle: the syntax trees and bindings of the JavaScript modules in a Bun executable, for code that reads
+tables out of those modules without running them.
 
 bun_handler reads the modules out of the binary. The node helper pfg/js/facts.mjs parses each module on
 its own with the TypeScript parser vendored in pfg/js/vendor/typescript and answers questions about its
-syntax and bindings. This module keeps the helper running for the life of a Bundle, links the modules
-through their imports and exports, and converts the helper's positions.
+syntax and bindings. This module keeps the helper running until the Bundle is closed, resolves each
+module's imports and exports to the modules and bindings they refer to, and converts positions between the
+helper's UTF-16 offsets and Python's code point indexes.
 
-Positions. The helper counts UTF-16 code units, as JavaScript does; Python strings count code points.
-They differ after a character above U+FFFF. Every position in this module's API is a UTF-16 offset, and
-Module.to_codepoints converts one where Python text is involved. An offset that falls between the two
-halves of a surrogate pair is refused.
+Positions. The helper's positions are UTF-16 offsets, because JavaScript strings are sequences of UTF-16
+code units. Python strings are sequences of code points, and the two counts differ after a character above
+U+FFFF. Every position in this module's API is a UTF-16 offset, and Module.to_codepoints converts one to
+an index into a Python string. An offset between the two halves of a surrogate pair raises BackendError.
 
-Handles. A handle names a node in one module. It is the list of child indices on the path from the
-module's root to the node, in ts.forEachChild order, joined with dots; "" is the module itself (facts.mjs,
-nodeAt). The same handle string exists in every module, so a handle means nothing without its module
-index: store and compare nodes as (module index, handle). A node's handle does not change between parses
-of the same text. A binding id is different. It is the module index and the UTF-16 offset of the
-declaration's name ("m199@57" is the binding whose name starts at offset 57 of module 199), so ids from
-different modules are never equal, and a binding id is a key on its own.
+Handles. A handle identifies a node within one module. It is the indices of the children on the path from
+the module's root to the node, joined with dots. Each index counts the children in the order
+ts.forEachChild visits them (facts.mjs, nodeAt). The module itself has the handle "". The same handle
+string exists in every module, so store and compare nodes as (module index, handle). A node's handle does
+not change between parses of the same text. A binding id is different. It is the module index and the
+UTF-16 offset of the declaration's name ("m199@57" is the binding whose name starts at offset 57 of module
+199), so ids from different modules are never equal, and a binding id is a key on its own.
 
 Failures:
-  BackendError  bun_handler cannot read the binary, or the helper or its protocol failed: node missing,
-                a crash, a malformed or mismatched reply, or a request the helper refused as malformed.
-                Extraction then fails.
-  AnchorError   a structural predicate matched other than exactly one entity.
-  Unresolved    a supported question whose answer the source does not establish, with the module, the
-                position and the reason.
+  BackendError  bun_handler cannot read the binary, or the helper or its protocol failed: node is not
+                found, the helper crashed, a reply is malformed or answers another request, or the helper
+                refused a request as malformed. The whole extraction then fails.
+  AnchorError   a structural predicate matched zero entities or more than one.
+  Unresolved    the source does not establish the answer to a question that pfg supports. The exception
+                gives the module, the position and the reason.
 
 REVISION is the number in pfg/REVISION as this process read it when it imported this module. The helper
-reads the same file when it starts and reports its number; a difference means pfg changed under a running
-process, which the client refuses. The number changes with every change that alters what pfg extracts:
-in this module, in pfg/values.py, in pfg/js/facts.mjs and what it imports, in the vendored TypeScript,
-and in bun_handler's decoding of module sources (UTF-8, Latin-1 and UTF-16 storage, single-module builds,
-module identity).
-Maintainers must raise this revision; a code change alone does not invalidate a cached catalog.
+reads the same file when it starts and reports the number it read. When the two numbers differ, pfg
+changed after this process imported it, and the client raises BackendError and asks for a restart. A
+maintainer must raise the number with every change that alters what pfg extracts: a change to this module,
+to pfg/values.py, to pfg/js/facts.mjs or what it imports, to the vendored TypeScript, or to how
+bun_handler decodes module sources (UTF-8, Latin-1 and UTF-16 storage, single-module builds, module
+identity). cc-env-overrides reuses a cached catalog built under the same number, so a change made without
+raising the number leaves catalogs from the old code in use.
 """
 import bisect
 import collections
@@ -57,18 +59,19 @@ with open(os.path.join(HERE, "REVISION"), encoding="ascii") as _file:
     REVISION = int(_file.read().strip())
 PROTOCOL = 1
 _ASTRAL = re.compile("[\U00010000-\U0010FFFF]")
-# How many bytes from the end of the helper's stderr a failure message quotes.
+# A failure message quotes at most this many bytes from the end of the helper's stderr.
 _STDERR_TAIL = 8192
 
 
 class BackendError(Exception):
-    """bun_handler cannot read the binary, or the helper or the protocol failed; the message says how, for
-    the helper with the end of its stderr."""
+    """bun_handler cannot read the binary, or the helper or the protocol failed. The message says what
+    failed, and for a failure of the helper it includes the last part of the helper's stderr."""
 
 
 class AnchorError(Exception):
-    """A predicate matched other than exactly one entity. candidates lists (module, offset, kind) of
-    each match. A predicate that matched zero entities has an empty list and cannot name a location."""
+    """A predicate matched zero entities or more than one. candidates lists each match as (module, offset,
+    kind). When the predicate matched zero entities, candidates is empty and the message gives only the
+    label and the count."""
 
     def __init__(self, label, candidates):
         self.label, self.candidates = label, list(candidates)
@@ -78,7 +81,8 @@ class AnchorError(Exception):
 
 
 class Unresolved(Exception):
-    """A question the source does not answer, at a UTF-16 offset of a module."""
+    """The source does not establish the answer to a question. module is the module's index, offset the
+    UTF-16 offset of the place, and reason says why."""
 
     def __init__(self, module, offset, reason):
         self.module, self.offset, self.reason = module, offset, reason
@@ -89,60 +93,63 @@ class NotExported(Unresolved):
     """A module does not export the name asked for."""
 
 
-# The catalog rests on an assumption: the program does not change the built-in operations its tables
-# depend on in a way the built-in scan does not identify. Juraj, to pfg-advisor: "we don't have to
-# overengineer if you say it's ok". The option he answered, labelled "State the assumption", was the
-# coordinator's text. pfg-advisor judged the assumption acceptable on three conditions: a write the scan
-# identifies refuses the tables that depend on what it writes; the statement of the assumption lists, for
-# each dependency of a table, the places where values escape the scan; and the finite-key proof and the
-# Symbol.for exception rest on the same assumption. A place where a value escapes refuses nothing,
-# because closing that gap would need an alias analysis of the whole program.
+# The catalog assumes that the program does not change a built-in operation its tables depend on in a way
+# the built-in scan does not identify. pfg relies on this assumption under three conditions: a write that
+# the scan identifies refuses the tables that depend on what it writes; the statement of the assumption
+# lists, for each dependency of a table, the places where values escape the scan; and the proofs that a
+# computed key comes from a finite set of names, or is a Symbol.for result and so is not a built-in's key,
+# rest on the same assumption. A place where a value escapes the scan does not refuse any table, because
+# following the value from there would need an alias analysis of the whole program.
 #
-# The forms of writes the scan does not identify. builtin_summary labels each entry that comes from one of
-# them with its key (the entry's limit) and states them under "limits".
+# The forms of write that the scan does not identify, by key. An entry of builtin_summary that comes from
+# one of these forms has the form's key in its limit field, and builtin_summary gives each key's text and
+# the number of entries labelled with it under "limits".
 BUILTIN_SCAN_LIMITS = {
     "instances": (
-        "A write through an object whose prototype the scan does not name: an object received as a parameter, "
-        "returned by a function, read from a member or held in a variable. The scan names the prototype of a "
-        "literal, of `new X()` with X a built-in constructor and of the iterator a built-in iterator method "
-        "returns only in the expression that creates the object; other writes into prototypes go to "
-        "prototypeWrites. On 2.1.304, zod's six prototype writes are of this form: they define members on "
-        "Object.getPrototypeOf of a parameter or of a parameter's _zod member. Four of them, the toString and "
-        "isEmpty definitions in modules 41 and 1520, skip the write when that prototype is in a WeakSet that "
-        "starts with Object.prototype and Error.prototype, created in module 41 at offsets 1087 and 78821 and "
-        "in module 1520 at 109263 and 593604; next to isEmpty, zod defines format, flatten, addIssue and "
-        "addIssues on the same prototype through a helper that receives it as a parameter, which the scan "
-        "counts as unidentified uses. The other two (module 40 at 9369, module 1520 at 104580) skip the write "
-        "when the prototype already has the member, unless zod is initializing the same object again. An "
-        "instance passed to a function, which may read its prototype and hand it on, is not listed either: on "
-        "2.1.304, get-intrinsic's table in module 119 stores %ArrayIteratorPrototype%, %IteratorPrototype%, "
-        "%MapIteratorPrototype%, %SetIteratorPrototype% and %StringIteratorPrototype% as the prototypes of "
-        "iterators it creates, through a getProto function from another module (offsets 13276, 14404, "
-        "14530, 14950 and 15122), and code that reads the table can write their members."),
+        "A write into an object reached by .constructor, .__proto__ or getPrototypeOf from an object that the scan "
+        "cannot identify: an object received as a parameter, returned by a function, read from a member or held in a "
+        "variable. The scan identifies the prototype of a literal, of `new X()` with X a built-in constructor, and "
+        "of the iterator that a built-in iterator method returns, but only in the expression that creates the "
+        "object. Every other write into a prototype goes to prototypeWrites. In 2.1.304, zod's six prototype writes "
+        "have this form: each defines a member on Object.getPrototypeOf(p), where p is a parameter or a parameter's "
+        "_zod member. Four of them, the toString and isEmpty definitions in modules 41 and 1520, skip the write when "
+        "the prototype is in a WeakSet initialized with Object.prototype and Error.prototype. These WeakSets are "
+        "created in module 41 at offsets 1087 and 78821 and in module 1520 at offsets 109263 and 593604. Next to "
+        "isEmpty, zod defines format, flatten, addIssue and addIssues on the same prototype through a helper that "
+        "receives the prototype as a parameter, and the scan counts those calls as unidentified uses. The other two "
+        "writes (module 40 at offset 9369, module 1520 at offset 104580) are skipped when the prototype already has "
+        "the member, unless zod is initializing the same object again. The scan also does not list an instance "
+        "passed to a function, which may read the instance's prototype and pass it on. In 2.1.304, get-intrinsic's "
+        "table in module 119 stores %ArrayIteratorPrototype%, %IteratorPrototype%, %MapIteratorPrototype%, "
+        "%SetIteratorPrototype% and %StringIteratorPrototype%, which it gets through a getProto function from "
+        "another module, starting from iterators it creates (offsets 13276, 14404, 14530, 14950 and 15122), and code "
+        "that reads the table can write their members."),
     "definer-calls": (
-        "A definer called other than directly or through one call or apply: through a chain of call or apply, "
-        "Reflect.apply or bind, or by a higher-order built-in it is passed to. The scan lists the definer where "
-        "it goes unfollowed. On 2.1.304: signal-exit binds Object.defineProperty in module 86 at offset 17362 "
-        "(`Object.defineProperty.bind(Object)`) and defines a member of globalThis under a Symbol.for key with it. "
-        "A mutating method of Array.prototype is modelled directly and through one call, apply, bind or "
-        "Reflect.apply; called from anywhere else, it writes only index members and the length of its this "
-        "value, none of which is a dependency slot, so the scan does not record a limit for it."),
+        "A definer such as Object.defineProperty, called through a chain of call or apply, through Reflect.apply or "
+        "bind, or by a higher-order built-in that receives it as an argument. The scan follows only a direct call "
+        "and a call through one call or apply, and lists the place where it stops following the definer. In 2.1.304, "
+        "signal-exit binds Object.defineProperty in module 86 at offset 17362 (`Object.defineProperty.bind(Object)`) "
+        "and uses the bound function to define a member of globalThis under a Symbol.for key. The scan follows a "
+        "mutating method of Array.prototype called directly or through one call, apply, bind or Reflect.apply. "
+        "Called any other way, such a method writes only index members and the length of its this value, which are "
+        "not operations a table can depend on, so the scan does not record a limit for these calls."),
     "with": (
-        "A built-in's name inside a with statement, which may name a member of the with's object instead. Both "
-        "passes follow it as the built-in and list the place. An ES module cannot contain a with statement, "
-        "and every module of 2.1.304 is an ES module."),
+        "A built-in's name inside a with statement, where the name may refer to a member of the with statement's "
+        "object instead. The index pass and the facts pass both follow the name as the built-in and list the place. "
+        "An ES module cannot contain a with statement, and every module of 2.1.304 is an ES module."),
     "bounds": (
-        "A variable that derives a value from its own value, as `t = t.prototype` does, or that holds many "
-        "built-in values: the scan lists and does not follow a value deeper than its bound on members "
-        "(facts.mjs, MAX_VALUE_PATH) or past its bound on values per variable (MAX_VALUES_PER_VARIABLE). A write "
-        "through such a value is not recorded, so the entry stands for possible writes to that value and its "
-        "members."),
+        "A variable that derives a value from its own value, such as `t = t.prototype`, or that holds many built-in "
+        "values. The scan lists, without following them, a value derived more than MAX_VALUE_PATH members deep and a "
+        "value that a variable receives when it already holds MAX_VALUES_PER_VARIABLE values (both in facts.mjs). "
+        "The scan does not record a write through such a value, so the entry means that the program may write that "
+        "value or its members."),
 }
 
 Needle = collections.namedtuple("Needle", "key type value")
-Needle.__doc__ = """A literal fact a predicate looks for, which the index pass finds in every module: a
-string literal's cooked value (type "string"), a template head's (type "template-head"), a property
-name in an object literal ("property") or a member name of a property access ("member")."""
+Needle.__doc__ = """A string that a predicate looks for in the modules' syntax, and that the index pass
+finds in every module: the cooked value of a string literal (type "string") or of a template head
+("template-head"), a property name in an object literal ("property"), or the member name of a property
+access ("member")."""
 NEEDLE_TYPES = ("string", "template-head", "property", "member")
 
 
@@ -151,9 +158,9 @@ def _is_index(value):
 
 
 def builtin_write_affects(target, dependency):
-    """Whether replacing target can replace a dependency the model uses. A write at an ancestor replaces
-    its descendants too; * names an unknown member. A computed member of the global object could name
-    any built-in."""
+    """Whether a write to target can replace dependency, an operation the model uses. A write to an
+    ancestor path replaces its descendants too. In a target, * is a member whose key the scan could not
+    read, and a write to a computed member of the global object (globalThis.*) could replace any built-in."""
     if target.startswith("globalThis.*"):
         return True
     written, needed = target.split("."), dependency.split(".")
@@ -166,22 +173,25 @@ def builtin_write_affects(target, dependency):
 
 
 def possible_writes(summary, dependency):
-    """The entries of a builtin_summary through which the program may change the slot dependency (a
-    path such as Set.prototype.has) without the scan identifying a write to it, as (category, entry)
-    pairs in the summary's order. They refuse nothing; the statement of the catalog's assumption lists
-    them for each dependency of a table and of a key proof.
-      unfollowed       a value whose path is a proper prefix of the slot's goes where the scan does not
-                       follow it, and the code there may write its members at any depth; the global
-                       object, an escaping definer (limit definer-calls) and a name inside a with
-                       statement (limit with) reach every slot;
-      dynamic          code the scan cannot see into reaches every slot;
-      prototypeWrites  a write into an object the scan cannot identify, under the slot's own key or an
-                       unknown one: the object may be the slot's;
+    """The entries of a builtin_summary through which the program may change the slot dependency (the
+    built-in at a path such as Set.prototype.has) without the scan identifying the write, as (category,
+    entry) pairs in the summary's order. These entries do not refuse a table. The catalog's statement of
+    its assumption lists them for each dependency of a table and of a key proof.
+      unfollowed       a value whose path is a proper prefix of the slot's path goes where the scan does
+                       not follow it, and the code there may write the value's members at any depth. An
+                       unfollowed global object, definer (limit definer-calls) or name inside a with
+                       statement (limit with) reaches every slot.
+      dynamic          code the scan cannot analyse, such as eval or the Function constructor, reaches
+                       every slot.
+      prototypeWrites  a write into an object the scan cannot identify, under the slot's last key or an
+                       unknown key. That object may be the slot's parent, such as Set.prototype for
+                       Set.prototype.has.
       unparsed         a module with parse diagnostics reaches every slot.
-    The convention for an escaped value follows its member paths only: code that receives Set.prototype
-    may write Set.prototype.has, and the scan does not count what it could reach through constructor,
-    __proto__ or the Function constructor, which would make every escape reach every slot. Uses of
-    values the scan cannot identify are counted in unidentified and not listed."""
+    Only member paths count from an escaped value: code that receives Set.prototype may write
+    Set.prototype.has. What that code could reach through constructor, __proto__ or the Function
+    constructor is not counted, because counting it would make every escape reach every slot. The summary
+    only counts uses of values the scan cannot identify (unidentified), so possible_writes cannot list
+    them."""
     needed = dependency.split(".")
     found = []
     for entry in summary["unfollowed"]:
@@ -198,8 +208,9 @@ def possible_writes(summary, dependency):
 
 
 class Module:
-    """A module of the bundle: its index in Bun's module table, its name, its length in UTF-16 units and
-    in code points, and where its characters above U+FFFF are, which convert positions between the two."""
+    """A module of the bundle: its index in Bun's module table, its name, its length in UTF-16 code units
+    (length) and in code points (codepoints), and the positions of its characters above U+FFFF, which it
+    uses to convert positions between the two."""
 
     def __init__(self, index, name, text):
         self.index, self.name = index, name
@@ -210,7 +221,7 @@ class Module:
         self.length = len(text) + len(self._astral)
 
     def check(self, offset):
-        """offset itself, after checking that it is a UTF-16 offset of this module outside a surrogate pair."""
+        """Return offset after checking that it is a UTF-16 offset of this module outside a surrogate pair."""
         if not _is_index(offset) or not 0 <= offset <= self.length:
             raise BackendError(f"offset {offset!r} lies outside module {self.index} ({self.length} UTF-16 units)")
         before = bisect.bisect_left(self._pairs, offset)
@@ -237,9 +248,11 @@ _helpers = weakref.WeakSet()
 
 
 def _after_fork_in_child():
-    # A forked child inherits the parent's pipes to the helper. It must not write to them, close the
-    # helper or wait for it, and it must not keep them open, or the helper would not see the end of its
-    # input when the parent closes it. _disown points the child's descriptors at /dev/null.
+    # A forked child inherits the parent's pipes to the helper. The child must not write to them, close
+    # the helper or wait for it. It must not keep the pipes open either: the helper sees the end of its
+    # input only when every copy of the pipe's write end is closed, so a copy left open in the child would
+    # keep the helper waiting after the parent closes its own. _disown points the child's descriptors at
+    # /dev/null.
     for helper in list(_helpers):
         helper._disown()
 
@@ -248,17 +261,18 @@ os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 class _Helper:
-    """The node process running facts.mjs, one request at a time over JSON lines on two pipes. Its stderr
-    goes to an unnamed temporary file, whose end a failure message quotes. Reading that file needs no
-    thread, so a process using the helper stays single-threaded: a thread blocked in a read would hold
-    its stream's lock across a fork, and the child would hang when it closed that stream."""
+    """The node process that runs facts.mjs. It answers one request at a time, as JSON lines over two
+    pipes. Its stderr goes to an unnamed temporary file, and a failure message quotes the end of that
+    file. Reading the file does not need a thread, so a process that uses the helper stays
+    single-threaded. With a reader thread, a fork while the thread is blocked in a read would copy the
+    stream's held lock into the child, and the child would hang when it closed that stream."""
 
     def __init__(self):
-        # Inside an npm script, use the Node executable npm runs on. This process then has the node
-        # snap's AppArmor label, and starting /snap/bin/node from it runs snap-confine, whose profile
-        # denies inheriting the unlinked stderr file (operation="file_inherit" in the kernel log); the
-        # helper's stderr becomes a read-only null file, where every write fails with EBADF. Outside
-        # npm, use the node that PATH selects.
+        # Inside an npm script, use the Node executable that npm runs on (npm_node_execpath). Under the
+        # node snap's npm, this process has the snap's AppArmor label, and starting /snap/bin/node from it
+        # would run snap-confine, whose profile denies inheriting the unlinked stderr file
+        # (operation="file_inherit" in the kernel log). The helper's stderr would then be a read-only null
+        # file, where every write fails with EBADF. Outside npm, use the node that PATH selects.
         node = os.environ.get("npm_node_execpath") or shutil.which("node")
         if node is None:
             raise BackendError("pfg's JavaScript helper needs node, which was not found on PATH")
@@ -282,8 +296,9 @@ class _Helper:
             if not isinstance(info, dict) or info.get("protocol") != PROTOCOL or info.get("helper") != "pfg-facts":
                 raise BackendError(f"the helper's first line is not pfg-facts protocol {PROTOCOL}: {hello!r}")
             if info.get("revision") != REVISION:
-                raise BackendError(f"pfg changed while this process ran: its helper is revision {info.get('revision')}, "
-                                   f"the pfg this process loaded is revision {REVISION}; restart the process")
+                raise BackendError(f"pfg changed while this process ran: the helper is revision "
+                                   f"{info.get('revision')}, but this process loaded revision {REVISION}; "
+                                   "restart the process")
             self.node, self.typescript = info.get("node"), info.get("typescript")
         except BaseException:
             self.close(kill=True)
@@ -304,8 +319,9 @@ class _Helper:
         return BackendError(f"{text}" + (f"; the helper's stderr ends:\n{tail}" if tail else ""))
 
     def _fatal(self, text):
-        """The protocol broke: the message, with the end of the helper's stderr, after the helper is gone.
-        Requests after this fail at once."""
+        """Kill the helper after the protocol broke, and return the BackendError for text, which quotes
+        the end of the helper's stderr as it was before the kill. Later requests fail at once, because the
+        helper is closed."""
         error = self._failure(text)
         self.close(kill=True)
         return error
@@ -313,7 +329,8 @@ class _Helper:
     def _read(self):
         line = self._process.stdout.readline()
         if not line:
-            # Closing stdout prevents every later reply, even if the process keeps running.
+            # A helper that has closed its stdout cannot send another reply, even if its process keeps
+            # running.
             status = self._process.poll()
             raise self._fatal("the helper closed its output before it answered"
                               + (f" and exited with status {status}" if status is not None else ""))
@@ -352,16 +369,17 @@ class _Helper:
         return (self._process.stdin, self._process.stdout)
 
     def _disown(self):
-        """In a forked child: let go of the helper. Each pipe descriptor the child inherited is pointed at
-        /dev/null with dup2, which closes the child's copy of the pipe while its stream object keeps owning
-        the descriptor number; closing that object later closes /dev/null, never a descriptor the child
-        opened since."""
+        """In a forked child, release the child's copies of the helper's pipes. dup2 points each pipe
+        descriptor the child inherited at /dev/null. That closes the child's copy of the pipe while the
+        stream object keeps owning the descriptor number, so closing the stream later closes /dev/null and
+        cannot close a file the child opened since."""
         self._owned = False
         null = os.open(os.devnull, os.O_RDWR | os.O_CLOEXEC)
         try:
             for stream in self._pipes():
                 try:
-                    # Not inheritable, as the pipe was: a program the child execs does not get it.
+                    # Like the pipe, the new descriptor is not inheritable, so a program the child execs
+                    # does not receive it.
                     os.dup2(null, stream.fileno(), inheritable=False)
                 except ValueError:
                     pass  # closed before the fork
@@ -369,10 +387,11 @@ class _Helper:
             os.close(null)
 
     def close(self, kill=False):
-        """End the helper and release its pipes and its stderr file. The owner closes the helper's input
-        and waits up to 5 s for it to exit, then kills its process group; kill=True kills at once. A forked
-        child only closes its own copies, which for the pipes _disown pointed at /dev/null. Closing twice
-        is idempotent."""
+        """End the helper and release its pipes and its stderr file. The process that owns the helper
+        closes the helper's input, waits up to 5 s for it to exit, and kills its process group if it is
+        still running. With kill=True, it kills the helper at once. In a forked child, close only closes
+        the child's copies of the streams, and _disown has already pointed the copies of the pipes at
+        /dev/null. A second call returns at once."""
         if self._closed:
             return
         self._closed = True
@@ -384,8 +403,8 @@ class _Helper:
                 except (subprocess.TimeoutExpired, OSError, ValueError):
                     pass
         finally:
-            # Also when the wait is interrupted, as by KeyboardInterrupt, which then goes on: the helper
-            # is killed and every stream closed first.
+            # This also runs when the wait is interrupted, for example by KeyboardInterrupt, which
+            # propagates after the helper is killed and every stream is closed.
             try:
                 if self._owned and self._process.poll() is None:
                     try:
@@ -402,15 +421,17 @@ class _Helper:
 
 
 class Bundle:
-    """The modules of one executable, with the helper that holds their texts, for use in a with block:
+    """The modules of one executable and the helper process that keeps their texts. Use a Bundle in a with
+    block:
 
         with Bundle.from_binary(open_file, needles) as bundle:
             ...
 
-    The constructor streams the modules to the helper and runs the index pass, which parses every
-    module once and keeps a detached record of each: its imports, exports and other loads in source
-    order, the needle hits, and its built-in scan (facts.mjs, "The built-in scan"). A failure while
-    starting, streaming or indexing ends the helper before the exception leaves the constructor."""
+    The constructor streams the modules to the helper and runs the index pass, which parses every module
+    once and keeps a record of each module in self.records that does not depend on the parse tree: its
+    imports, exports and other loads in source order, its needle hits, and its built-in scan (facts.mjs,
+    "The built-in scan"). If starting the helper, streaming the modules or the index pass fails, the
+    constructor kills the helper and raises the exception again."""
 
     def __init__(self, sources, needles=()):
         sources = list(sources)
@@ -422,7 +443,7 @@ class Bundle:
             if index in modules or name in names:
                 raise ValueError(f"module index {index} or name {name!r} occurs twice")
             if not isinstance(name, str) or not isinstance(text, str):
-                raise ValueError(f"module {index} needs a name and a text")
+                raise ValueError(f"module {index} needs a string name and a string text")
             modules[index] = Module(index, name, text)
             names.add(name)
         self.modules = modules
@@ -434,7 +455,8 @@ class Bundle:
         self.needles = {}
         for needle in needles:
             if not isinstance(needle.key, str) or needle.type not in NEEDLE_TYPES or not isinstance(needle.value, str):
-                raise ValueError(f"a needle is a key, one of the types {', '.join(NEEDLE_TYPES)} and a string value, not {needle!r}")
+                raise ValueError(f"a needle is (key, type, value): a string key, one of the types "
+                                 f"({', '.join(NEEDLE_TYPES)}) and a string value, not {needle!r}")
             if needle.key in self.needles:
                 raise ValueError(f"two needles have the key {needle.key!r}")
             self.needles[needle.key] = needle
@@ -454,7 +476,7 @@ class Bundle:
     @classmethod
     def from_binary(cls, source, needles=()):
         """The bundle of a Bun executable, read with bun_handler from bytes or from an open binary file.
-        The file is read from its start, through the descriptor it already has, so the bytes extracted are
+        An open file is read from its start through the caller's descriptor, so the bytes extracted are
         those of the file the caller opened and identified. Raises BackendError for a binary bun_handler
         cannot read: one that is not a well-formed Bun image (BunFormatError), or a format it does not
         support (NotImplementedError)."""
@@ -474,7 +496,7 @@ class Bundle:
 
     @classmethod
     def from_sources(cls, sources, needles=()):
-        """The bundle of (index, name, text) modules, as tests build them."""
+        """The bundle of a list of (index, name, text) modules, which is how the tests build bundles."""
         return cls(list(sources), needles)
 
     def close(self):
@@ -514,18 +536,19 @@ class Bundle:
         return self.records[index]["diagnostics"]
 
     def check_parsed(self, index):
-        """Raise Unresolved for a module with parse diagnostics, at its first one. Such a module gives no
-        needle hits, links or facts: its tree after a syntax error is TypeScript's recovery, not the
-        program, so a hit in it could decide an exactly-one count and a link could lead into it."""
+        """Raise Unresolved for a module with parse diagnostics, at the first one. Bundle leaves such a
+        module out of the needle hits, the links between modules and the facts. After a syntax error, the
+        tree comes from TypeScript's error recovery and may differ from the program: a hit in it could
+        change whether a predicate finds exactly one match, and a link could lead into it."""
         diagnostics = self.diagnostics(index)
         if diagnostics:
             more = f" (and {len(diagnostics) - 1} more)" if len(diagnostics) > 1 else ""
             raise Unresolved(index, diagnostics[0]["s"], f"TypeScript cannot parse this module: {diagnostics[0]['message']}{more}")
 
     def hits(self, key):
-        """The index pass's hits of a needle: (module index, hit) pairs, hit being the helper's record of
-        the node (handle h, to be used with the module index, kind k, start s, end e, chain). Modules
-        with parse diagnostics give none."""
+        """The index pass's hits of a needle, as (module index, hit) pairs. A hit is the helper's record
+        of the node: handle h (use it together with the module index), kind k, start s, end e and chain.
+        Hits in modules with parse diagnostics are left out."""
         if key not in self.needles:
             raise BackendError(f"needle {key!r} was not registered for the index pass")
         return [(index, hit) for index in sorted(self.records) if not self.records[index]["diagnostics"]
@@ -546,10 +569,10 @@ class Bundle:
         return self._helper.request("facts", module=index, queries=list(queries))
 
     def syntax(self, index, handle, depth=64):
-        """The syntax tree of the node at handle in module index, down to depth levels of children. Deeper
-        nodes are replaced by records with truncated set; ask for one with its own handle. The handle
-        belongs to the module (see Handles above). A handle that does not name a node of the module
-        raises BackendError."""
+        """The syntax tree of the node at handle in module index, down to depth levels of children. Each
+        node below that depth is replaced by a record with truncated set, and calling syntax with that
+        record's handle gives its subtree. The handle must come from module index (see Handles above). A
+        handle that does not identify a node of the module raises BackendError."""
         return self.facts(index, [{"q": "node", "handle": handle, "depth": depth}])[0]
 
     def binding_at(self, index, start, end):
@@ -568,8 +591,8 @@ class Bundle:
 
     @staticmethod
     def refusal(index, refused):
-        """The Unresolved for a binding or text the binding model refuses (facts.mjs, "The binding
-        model"), from the helper's list of {s, e, reason}, at the first place it names."""
+        """The Unresolved for a binding or text that the binding model refuses (facts.mjs, "The binding
+        model"), built from the helper's list of {s, e, reason} and placed at the list's first entry."""
         reasons = "; ".join(f"at {item['s']}: {item['reason']}" for item in refused)
         return Unresolved(index, refused[0]["s"], f"the binding model refuses it: {reasons}")
 
@@ -582,8 +605,11 @@ class Bundle:
         return result
 
     def canonical(self, index, handle, roles=None):
-        """{text, others} for the node at handle (facts.mjs, canonical). Raises Unresolved where the
-        binding model refuses a binding the text names, or the node holds a direct eval or a with."""
+        """{text, others} for the node at handle (facts.mjs, canonical): text is the node as TypeScript
+        prints it, with every binding renamed to a generated name, and others lists the binding ids behind
+        the generated names of the module's other bindings, in order. Raises Unresolved when the binding
+        model refuses a binding the text refers to, or when the node contains a direct eval or a with
+        statement."""
         result = self.facts(index, [{"q": "canonical", "handle": handle, "roles": dict(roles or {})}])[0]
         if "refused" in result:
             raise self.refusal(index, result["refused"])
@@ -601,9 +627,10 @@ class Bundle:
     # -- linking ---------------------------------------------------------------------------------------
 
     def imports(self, index):
-        """{local name: (target module index or None, imported name or "*" or "default", local position)}
-        for a module's static imports; a target of None is a module outside the bundle, such as a Node
-        builtin."""
+        """A module's static imports, as {local name: (target, imported name, position)}. target is the
+        index of the imported module, or None for a module outside the bundle, such as a Node built-in.
+        The imported name is "default" for a default import and "*" for a namespace import, and position
+        is the UTF-16 offset of the local name."""
         if index not in self._imports_cache:
             found = {}
             for load in self.loads(index):
@@ -620,8 +647,9 @@ class Bundle:
         return self._imports_cache[index].copy()
 
     def export(self, index, name, path=()):
-        """Resolve an exported name (see _export). Cache completed resolutions, whose answer does not
-        depend on a traversal path; recursive resolutions retain the path used to detect cycles."""
+        """Resolve an exported name (see _export). A call with an empty path is cached, because its answer
+        does not depend on how it was reached. A recursive call passes the (module, name) pairs it has
+        followed, to detect cycles, and is not cached."""
         if path:
             return self._export(index, name, path)
         key = (index, name)
@@ -631,18 +659,18 @@ class Bundle:
 
     def _export(self, index, name, path):
         """What a module's export name refers to:
-          ("binding", module index, local name)  a binding of that module's scope, which holds exactly one
+          ("binding", module index, local name)  a binding in that module's scope, which has exactly one
                                                  binding per name (scope_binding gives its record);
           ("namespace", module index)            a module namespace object;
           ("declaration", module index, s, e)    an `export default function(){}` or `class{}` without a
-                                                 name; its value is not held by a local binding;
+                                                 name, whose value is not held by a local binding;
           ("expression", module index, s, e)     the expression of an `export default` that is not a
                                                  declaration, evaluated once when the module runs.
-        Follows imports that are exported again, re-exports from another module and export *; an explicit
-        export wins over export *, export * never supplies default, and two export * paths that reach
-        different bindings make the name ambiguous. Raises NotExported for a name the module does not
-        export, and Unresolved for a cycle, an ambiguity, a module outside the bundle or a module with parse
-        diagnostics."""
+        It follows imports that are exported again, re-exports from another module, and export *. An
+        explicit export takes precedence over export *, export * never supplies default, and two export *
+        paths that reach different bindings make the name ambiguous. Raises NotExported for a name the
+        module does not export, and Unresolved for a cycle, an ambiguity, a module outside the bundle or a
+        module with parse diagnostics."""
         self.check_parsed(index)
         if (index, name) in path:
             raise Unresolved(index, 0, f"export {name} leads round a cycle of modules")
@@ -699,8 +727,8 @@ class Bundle:
         return found[0]
 
     def export_names(self, index, seen=frozenset()):
-        """Every name a module exports, through export * as well (which never supplies default). Raises
-        Unresolved where a module with parse diagnostics is involved."""
+        """Every name a module exports, also through export *, which never supplies default. Raises
+        Unresolved when the module, or a module it reaches through export *, has parse diagnostics."""
         if index in seen:
             return set()
         names = set()
@@ -723,16 +751,18 @@ class Bundle:
     def builtin_scan(self):
         """The built-in scan of every module (facts.mjs, "The built-in scan"), as {module index: scan}.
 
-        The index pass scanned each module on its own. The facts pass scans a module again with its
-        bindings where the index pass cannot decide: a variable receives a built-in value, the module
-        declares a built-in's name, a computed key may be a Symbol.for result, or an import receives a
-        value another module exports. The values a module exports are followed into every module that
-        imports them by name, through re-exports and export *, until no import gains a value; an export
-        of a variable that may also hold a value the scan does not identify makes its importers' bindings
-        uncertain too. Where a namespace of such a module is taken, by `import * as`, `export * as`,
-        import() or import.meta.require, the values go where the scan does not follow them, and that place
-        is recorded as unfollowed in the module that takes it. A module with parse diagnostics keeps its
-        index-pass scan and gets no facts pass (builtin_summary lists it as unparsed)."""
+        The index pass scanned each module on its own. The facts pass scans a module again, with its
+        bindings, when the index pass cannot decide without them: a variable receives a built-in value,
+        the module declares a binding with a built-in's name, a computed key may be a Symbol.for result,
+        or an import receives a value that another module exports. The values a module exports are
+        followed into every module that imports them by name, also through re-exports and export *, until
+        the set of values of every import stops growing. When the exported variable may also hold a value
+        the scan cannot identify, the importers' bindings may hold such a value too: the scan still
+        follows their known values and marks their references unclassified. Where a module takes the
+        namespace of a module that exports built-in values, by `import * as`, `export * as`, import() or
+        import.meta.require, the scan stops following those values and records the place as unfollowed in
+        the module that takes the namespace. A module with parse diagnostics keeps the scan of the index
+        pass and is not scanned again (builtin_summary lists it as unparsed)."""
         scans = {index: record["premise"] for index, record in self.records.items()}
         # {importer: {position of the import's local name: (values, unknown)}}
         seeds = collections.defaultdict(dict)
@@ -769,10 +799,10 @@ class Bundle:
         return scans
 
     def importers(self, target):
-        """(module, position, local name) of every import by name or default that reaches target, an
-        export() result: the import binding is the identifier at position. Modules with parse diagnostics
-        have no links and import nothing. The reverse index is built once, instead of resolving every
-        import again for each target."""
+        """Every import by name or default that resolves to target, an export() result, as (module,
+        position, local name), where the import binding is the identifier at position. Imports in modules
+        with parse diagnostics are left out, because their links cannot be read. The first call builds a
+        reverse index of every import, so later calls do not resolve every import again."""
         if self._importers_by_target is None:
             reverse = collections.defaultdict(list)
             for index in sorted(self.records):
@@ -794,9 +824,10 @@ class Bundle:
         return list(self._importers_by_target.get(target, ()))
 
     def _namespace_sites(self, exported):
-        """(module, unfollowed entry) for every place a namespace is taken of a module that exports one of
-        the values in exported ({export() result: (values, unknown)}). A module with parse diagnostics that
-        takes such a namespace is listed too: the values go there."""
+        """Yields (module, unfollowed entry) for every place where a module takes the namespace of a
+        module that exports one of the values in exported, a dict {export() result: (values, unknown)}. A
+        module with parse diagnostics that takes such a namespace is listed too, because the values reach
+        it."""
         if not exported:
             return
         holders = {}
@@ -822,25 +853,31 @@ class Bundle:
                                   "reason": f"a namespace of module {target}, which exports built-in values: {names}"}
 
     def builtin_summary(self, scans):
-        """The bundle's built-in scan as one record, for the catalog's statement of its assumption:
-          writes          visible writes to a built-in or one of its members (module, s, target, how); the
-                          tables that depend on a written target are refused;
+        """The built-in scans of all modules merged into one record, from which the catalog builds the
+        statement of its assumption:
+          writes          the writes the scan identifies to a built-in or one of its members (module, s,
+                          target, how). The catalog refuses the tables that depend on a written target;
           globalWrites    writes to the global object under keys that are not built-ins' names;
-          registryWrites  writes under a key proven to be a Symbol.for result, which is never a built-in's
-                          key; when the program writes Symbol, Symbol.for or the global object under a key
-                          the scan cannot read, they count as writes under an unknown key instead;
+          registryWrites  writes under a key that the scan proved to be a Symbol.for result, which is
+                          never a built-in's key. When the program writes Symbol, Symbol.for or the global
+                          object under a key the scan cannot read, these entries move to writes, as writes
+                          under an unknown key;
           prototypeWrites writes into an object reached by .constructor, .__proto__ or getPrototypeOf from
                           an object the scan cannot identify;
-          unfollowed      the places a built-in value goes that the scan does not follow;
-          dynamic         code the scan cannot see into;
-          passed          how many occurrences of each built-in value matched modelled use forms;
-          references      every place a variable received a built-in value, its binding, and whether the
-                          scan followed it or left it unclassified, with the reason;
-          unidentified    how many other uses of values the scan cannot identify it counted;
-          unparsed        the modules with parse diagnostics (module, s, message, count): the scan keeps
-                          what the index pass found in them, without their bindings;
-          limits          {limit: {form, entries}} for each form in BUILTIN_SCAN_LIMITS, entries counting the
-                          summary's entries labelled with it, by category.
+          unfollowed      the places where a built-in value goes and the scan stops following it;
+          dynamic         code the scan cannot analyse, such as eval and the Function constructor;
+          passed          for each built-in value, how many of its occurrences matched a use form the scan
+                          models;
+          references      every place where a variable receives a built-in value, with the variable's
+                          binding and whether the scan followed the variable or left it unclassified (with
+                          the reason);
+          unidentified    the number of other uses of values the scan cannot identify;
+          unparsed        the modules with parse diagnostics (module, s, message, count). For these the
+                          summary has what the index pass found, without the facts pass that uses their
+                          bindings;
+          limits          {limit: {form, entries}} for each key of BUILTIN_SCAN_LIMITS: form is the key's
+                          text, and entries counts the summary's entries labelled with the key, by
+                          category.
         An entry that comes from a stated limit has that limit's key in its limit field."""
         lists = collections.defaultdict(list)
         passed = collections.Counter()
@@ -852,9 +889,10 @@ class Bundle:
             lists["writes"].extend({"module": index, **{k: v for k, v in entry.items() if k != "h"}} for entry in scan["unknownKeys"])
             passed.update(scan["passed"])
             unidentified += scan["unidentified"]
-        # A key proof uses the standard operations it lists. Invalidating one can make its write an
-        # unknown global key, which can invalidate another proof, so repeat until every remaining proof
-        # has dependencies the scan did not find written.
+        # A key proof relies on the built-in operations in its keyRequires. When the scan found one of
+        # them written, the proof is invalid and the entry's target becomes its keyFallback, such as a
+        # write to the global object under an unknown key, which can invalidate another proof. The loop
+        # therefore repeats until a pass leaves every remaining proof valid.
         categories = ("writes", "globalWrites", "registryWrites", "prototypeWrites")
         while True:
             written = {entry["target"] for entry in lists["writes"]}
@@ -885,7 +923,8 @@ class Bundle:
                 break
         ordered = {}
         for key in (*categories, "unfollowed", "dynamic", "references"):
-            # Several proved keys at one call can become the same unknown key after invalidation.
+            # After invalidation, several proved keys of one call can become the same entry with an
+            # unknown key, so keep one copy of each.
             unique = {json.dumps(entry, sort_keys=True): entry for entry in lists[key]}
             ordered[key] = sorted(unique.values(), key=lambda entry: (entry["module"], entry["s"]))
         unparsed = []

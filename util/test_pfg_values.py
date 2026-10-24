@@ -1,26 +1,29 @@
 """
-Tests for pfg.values: the evaluator, the facts and their constancy checks across modules, and the
-initialization order.
+Tests for pfg.values: the evaluator, the facts and the checks across modules that a value never changes,
+and the initialization order.
 
-The cases named "behaviour" are the 13 value-level behaviours of plugin-fixes' retired draft of
-pfg.bundle (its util/test_pfg_bundle.py of 2026-10-20, which read the bundle with regular expressions).
-Its other seven are covered elsewhere:
+The tests named test_behaviour_... come from an earlier draft of pfg.bundle that read the bundle with
+regular expressions (plugin-fixes' util/test_pfg_bundle.py of 2026-10-20). That draft had 13 value-level
+tests, which are test_behaviour_... tests here, and seven others, covered as follows:
   find_one_returns_the_module_and_match_of_the_only_site, find_one_counts_every_match_in_every_module:
     pfg gives every needle hit in every module (test_pfg_bundle.py, test_needles_hit_syntax_only and
-    test_needle_hits_come_from_every_module_in_order); deciding that exactly one site matches is the
-    catalog predicate's job, which raises AnchorError otherwise (test_an_anchor_error_counts_candidates_
-    given_as_a_generator).
-  contains_limits_the_search_to_modules_that_hold_the_text: the index pass parses every module once
-    and records every hit in that pass, so there is no search to limit; that only code hits is tested
-    by test_needles_hit_syntax_only.
-  an_import_from_a_module_outside_the_build_is_refused, an_import_cycle_is_refused: also value-level
-    here, and test_pfg_bundle.py, test_cycles_missing_names_and_outside_modules_are_refused.
+    test_needle_hits_come_from_every_module_in_order). The catalog's predicate decides whether exactly one
+    site matches, and raises AnchorError otherwise
+    (test_an_anchor_error_counts_candidates_given_as_a_generator).
+  contains_limits_the_search_to_modules_that_hold_the_text:
+    the index pass parses every module once and records every hit in that pass, so pfg does not search the
+    modules again. test_needles_hit_syntax_only checks that only code gives hits.
+  an_import_from_a_module_outside_the_build_is_refused, an_import_cycle_is_refused:
+    test_behaviour_an_import_from_a_module_outside_the_build_is_refused and
+    test_behaviour_an_import_cycle_is_refused here, for values, and test_pfg_bundle.py,
+    test_cycles_missing_names_and_outside_modules_are_refused, for export().
   function_span_within_a_module: test_behaviour_the_function_a_binding_holds_spans_its_declaration.
-  modules_of_a_binary_in_every_encoding_bun_stores: test_pfg_bundle.py,
-    test_modules_of_a_binary_in_every_encoding_bun_stores, and test_behaviour_values_of_a_binary_in_
-    every_encoding_bun_stores here.
-The cases named "counterexample" are pfg-advisor's 13 counterexamples to classifying uses by a list
-of method names; each changes the value in Node through a use such a list accepts.
+  modules_of_a_binary_in_every_encoding_bun_stores:
+    test_pfg_bundle.py, test_modules_of_a_binary_in_every_encoding_bun_stores, and
+    test_behaviour_values_of_a_binary_in_every_encoding_bun_stores here.
+The tests named test_counterexample_... are 13 programs that each change the value in Node through a use
+that a list of accepted method names would let through. They are the reason the model classifies each use
+by what the parent expression does with the value.
 """
 import os
 import sys
@@ -121,8 +124,9 @@ def test_behaviour_a_text_that_looks_like_an_assignment_inside_a_string_is_not_o
 
 
 def test_behaviour_literals_of_every_kind_evaluate():
-    # The draft's fixture, with m and q declared before the declarators that read them: JavaScript runs
-    # a var's initializer in order, so the draft's l=[s,...m] before m=[...] spreads undefined.
+    # The draft's fixture, with m and q declared before the declarators that read them. JavaScript runs
+    # the declarators of a var statement in order, so the draft's l=[s,...m] before m=[...] would spread
+    # undefined, which throws a TypeError.
     text = ('var s="a\\u00e9",n=1e5,f=0.5,h=0x10,t=!0,u=!1,z=null,m=["x","y"],l=[s,...m],e=new Set(["a","a","b"]),'
             'p=new Map([["k","v"],["j",n]]),q={r:3},o={a:1,"b c":s,[s]:2,...q,m};'
             'e.has("a");p.get("k");l.includes("x");m.includes("x");o.a;')
@@ -135,9 +139,9 @@ def test_behaviour_literals_of_every_kind_evaluate():
         declared = b.value(0, "o", "declared").value
         assert declared == pv.JSObject((("a", num("1")), ("b c", "a\xe9"), ("a\xe9", num("2")), ("r", num("3")),
                                         ("m", pv.JSArray(("x", "y")))))
-        # The fixture stores m in o's shorthand member, where code that reads o can change it, so m's
-        # elements, and l's, which spread m, are not established; o holds an array, so it is not an
-        # object of primitive entries.
+        # The fixture stores m in o's shorthand member, where code that reads o can change it. So the
+        # elements fact is refused for m, and for l, which spreads m. A member of o is an array, so the
+        # entries fact is refused for o.
         assert "stored in an object literal" in b.refused(0, "m", "elements").reason
         assert "stored in an object literal" in b.refused(0, "l", "elements").reason
         assert "not a primitive" in b.refused(0, "o", "entries").reason
@@ -150,7 +154,7 @@ def test_behaviour_a_value_two_items_need_is_evaluated_for_each():
 
 
 def test_behaviour_a_value_that_needs_itself_is_refused():
-    # In executable order a self-reference reads a binding that is not initialized yet.
+    # In execution order, a self-reference reads a binding that is not initialized yet.
     with Build("var a=[...b],b=[...a],self={[self]:1}") as b:
         for name in ("a", "self"):
             assert "initialized after" in b.refused(0, name, "declared").reason
@@ -186,8 +190,8 @@ def test_behaviour_the_function_a_binding_holds_spans_its_declaration():
 
 
 def test_an_array_of_records_with_methods_is_unchanged_when_every_use_only_reads_it():
-    # As 2.1.309's idle compaction kinds: objects with string members and functions, read with find and
-    # some, also from a module that imports the array.
+    # Like the idle compaction kinds of Claude Code 2.1.309: objects with string members and functions,
+    # read with find and some, also from a module that imports the array.
     kinds = 'export var K=[{name:"a",flag:"f",isInUse:()=>x(),due(e){return e}},{name:"b",flag:"g",isInUse:()=>!0}];'
     with Build(kinds + 'function pick(){return K.find((S)=>S.isInUse())}',
                'import{K}from"/m0.js";K.some((e)=>e.flag==="g");') as b:
@@ -233,8 +237,9 @@ def test_behaviour_values_of_a_binary_in_every_encoding_bun_stores(tmp_path):
 # Counterexamples
 
 
-# pfg-advisor's constancy counterexamples, each in one module: the fact asked, and either a part of the
-# refusal's reason or the built-in operation the program writes, which the value's requires name.
+# The counterexamples to classifying uses by method name: each is a program of one module, with the fact
+# asked for and the expected result, which is a part of the refusal's reason, or ("written", operation) for
+# a program that replaces a built-in operation, which the value's requires must then list.
 CONSTANCY_COUNTEREXAMPLES = [
     ("const V=[1];V.forEach((...args)=>args[2].push(2));", "elements", "a rest parameter of the callback receives the value"),
     ("const V=[1];Array.from(V,function(x){this.pop();return x},V);", "elements", "Array.from only with the value as its only argument"),
@@ -259,8 +264,8 @@ CONSTANCY_COUNTEREXAMPLES = [
 def test_counterexample_a_use_that_runs_code_is_refused_or_its_written_operation_is_required(text, fact, expected):
     with Build(text) as b:
         if isinstance(expected, tuple):
-            # The value's own uses only read it, but the program replaces the method they call: the scan
-            # finds the write, and the value's requires names the method.
+            # The value's own uses only read it, but the program replaces the method they call. The scan
+            # finds that write, and the value's requires lists the method.
             value = b.value(0, "V", fact)
             assert expected[1] in value.requires
             writes = {entry["target"] for entry in b.bundle.builtin_summary(b.bundle.builtin_scan())["writes"]}
@@ -277,7 +282,7 @@ def test_counterexample_a_namespace_callback_default_parameter_reaches_the_value
 
 
 def test_every_operation_a_value_can_require_is_a_write_the_scan_can_produce():
-    import test_pfg_bundle  # its writing programs for a dependency key
+    import test_pfg_bundle  # for assert_writes_produced
     with Build("") as b:
         vocabulary = set(b.bundle.operation_vocabulary())
     assert {"Set.prototype.has", "Array.prototype.includes", "%ArrayIteratorPrototype%.next"} <= vocabulary
@@ -387,7 +392,8 @@ def test_a_use_in_an_importing_module_is_classified_there():
 
 
 def test_a_value_passed_to_an_imported_function_is_classified_where_the_function_is_declared():
-    # The 2.1.305 form of the rate-limit words: function t1e(e){return fo(cae,e)||e}, with fo imported.
+    # How Claude Code 2.1.305 reads its table of rate-limit words: function t1e(e){return fo(cae,e)||e},
+    # with fo imported.
     declaring = 'export function fo(e,n){return Object.hasOwn(e,n)?e[n]:void 0}export function put(e){e.a="y"}'
     with Build('import{fo}from"/m1.js";var V={a:"x"};function t(e){return fo(V,e)||e}', declaring) as b:
         value = b.value(0, "V", "entries")
@@ -401,7 +407,8 @@ def test_a_value_passed_to_an_imported_function_is_classified_where_the_function
         value = b.value(0, "V", "elements")
         assert pv.strings(value.value) == ["x"]
         assert {"Array.prototype.includes", "Array.prototype.at"} <= value.requires
-    # A function from outside the bundle, or an anonymous default export, refuses at the call.
+    # Passing the value to a function from outside the bundle, or to an anonymous default export, is
+    # refused at the call.
     with Build('import{z}from"zlib";import f from"/m1.js";var V=["x"];z(V);f(V);', 'export default function(a){}') as b:
         assert sorted(site[2] for site in b.refused(0, "V", "elements").sites) == [
             "the value is passed to f: f is imported from an export that is not a binding",

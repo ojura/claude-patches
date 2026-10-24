@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Measure the pfg module reader and built-in scan, including the actual JSON replies.
+"""Measure the time and memory of pfg's module reader and built-in scan, with the helper's real JSON replies.
 
 Usage: python3 -I -B util/measure_pfg_bundle.py /path/to/claude
 
-Samples Python's and its helper's VmRSS every 10 ms. The combined peak is the largest sum in one
-sampling iteration; the individual peaks may occur at different times. This measures module extraction,
-the index pass, and the built-in scan, not a catalog consumer's table predicates or value queries.
+The script samples the VmRSS of this Python process and of the node helper every 10 ms. The combined peak
+is the largest sum of the two in one sample. The two individual peaks may occur at different times. The
+script measures module extraction, the index pass and the built-in scan. It does not measure the table
+predicates or value queries that a catalog runs afterwards.
 """
 import argparse
 import json

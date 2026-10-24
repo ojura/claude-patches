@@ -1,41 +1,44 @@
 """
-values: the constant values of a native build's bindings, for tables read out of its code.
+values: the constant values of a native build's bindings, for code that reads tables out of the build.
 
-Values(bundle).value(module, binding, fact) evaluates the initializer of a module-scope binding from
-its syntax, without running any code, and checks the claim the fact makes:
+Values(bundle).value(module, binding, fact) evaluates the initializer of a module-scope binding from its
+syntax, without running any code, and checks what the fact claims:
 
   primitive  a string, number, boolean, null or undefined; the binding is never written.
   elements   an Array or a Set of primitives, with its members in order; neither the binding nor the
              container ever changes.
-  entries    an object whose members are primitive data members, or a Map with primitive keys and
-             values, with its entries in order; neither the binding nor the container ever changes.
-  keys       the own keys of an object literal, in order, without evaluating its values; the binding
-             is never written, and the object's own keys never change.
-  declared   the value as the declarations write it, with the bindings it names evaluated the same
-             way. This fact makes no claim about later changes, and never stands in for another.
+  entries    an object whose members are data members with primitive values, or a Map with primitive keys
+             and values, with its entries in order; neither the binding nor the container ever changes.
+  keys       the own keys of an object literal, in order, without evaluating its values; the binding is
+             never written, and the object's own keys never change.
+  declared   the value as the declarations write it, with the bindings it refers to evaluated the same
+             way. This fact does not check whether the value changes later, and an evaluation under
+             another fact never uses a declared value.
 
-For elements, entries and keys, every use of the value must be one that the operation model in
-pfg/js/facts.mjs lists: the uses in the binding's module, in every module that imports it, through
-re-exports, wherever a namespace that holds it is taken (import * as, import() and
-import.meta.require), and those of the parameters that receive it, also of a function another module
-declares. An import() or import.meta.require whose specifier is not a literal could load
-any module, so it refuses every such fact, except for a template whose fixed head names a package
-outside the build: code loaded at run time from outside the binary is not part of the analysed
-program. Each Value lists in requires the built-in operations its evaluation and its uses rely on,
-which the caller checks against the built-in scan (Bundle.builtin_summary, builtin_write_affects).
+For elements, entries and keys, every use of the value must have a form that the operation model in
+pfg/js/facts.mjs lists. The uses checked are those in the binding's module, in every module that imports
+the binding directly or through re-exports, at every place where a module takes a namespace that contains
+it (import * as, import() and import.meta.require), and in every parameter that receives the value, also
+of functions that other modules declare. An import() or import.meta.require whose specifier is not a
+literal could load any module, so it refuses these three facts for every value. The exception is a
+template whose fixed head is a bare specifier (it does not start with . or /) and so refers to a package
+outside the build, because code loaded at run time from outside the binary is not part of the analysed
+program. The requires field of each Value lists the built-in operations that its evaluation and its uses
+rely on, and the caller checks them against the built-in scan (Bundle.builtin_summary,
+builtin_write_affects).
 
 The evaluator reads literal syntax only: strings and templates without substitutions (their cooked
 values), finite numbers (keeping -0), true, false, null, !0, !1, void 0, unary minus on a number,
-undefined, names of bindings (evaluated under the fact their position needs), array literals with
-spreads of arrays and Sets, new Set(iterable), new Map(array of pairs or Map), object literals with
-literal or computed keys and spreads of objects, and flatMap, map or filter on an empty array whose
-callback is therefore never called. Anything else, holes, a literal __proto__ member, methods,
-accessors, a template with a substitution or any operator, refuses. An initializer that reads a
-module binding must read one initialized before it: an earlier statement or declarator, a function
-declaration, or an import from a module that is a static dependency of this one and not in a cycle
+undefined, names of bindings (evaluated under the fact their position needs), array literals with spreads
+of arrays and Sets, new Set(iterable), new Map(array of pairs or Map), object literals with literal or
+computed keys and spreads of objects, and flatMap, map or filter on an empty array, whose callback is
+therefore never called. The evaluator refuses anything else, such as holes, a literal __proto__ member,
+methods, accessors, a template with a substitution, or any operator. An initializer may read only a module
+binding that is initialized before it: one declared in an earlier statement or declarator, a function
+declaration, or an import from a module that this one statically depends on and that is not in a cycle
 with it.
 
-A refusal raises Unresolved for the first site; its sites attribute lists every refused site as
+A refusal raises Unresolved at the first refused site, and its sites attribute lists every refused site as
 (module, offset, reason).
 """
 from collections import deque
@@ -48,8 +51,8 @@ import re
 from .bundle import BackendError, Unresolved, builtin_write_affects  # noqa: F401 (re-exported for callers)
 
 FACTS = ("primitive", "elements", "entries", "keys", "declared")
-# Every built-in operation the evaluator itself can require (_require refuses any other name), for the
-# test that the built-in scan can name a write to each.
+# Every built-in operation the evaluator itself can require; _Frame.require raises AssertionError for any
+# other name. util/test_pfg_values.py checks that the built-in scan can record a write to each.
 EVALUATION_REQUIRES = frozenset((
     "Array.prototype.@@iterator", "%ArrayIteratorPrototype%.next", "Set.prototype.@@iterator", "%SetIteratorPrototype%.next",
     "Map.prototype.@@iterator", "%MapIteratorPrototype%.next", "Set", "Set.prototype.add", "Map", "Map.prototype.set",
@@ -103,8 +106,8 @@ class JSObject:
 
 @dataclass(frozen=True)
 class JSKeys:
-    """The own keys of an object literal in JavaScript's order, which of them are accessors, and
-    which hold methods; the values are not evaluated."""
+    """The own keys of an object literal in JavaScript's own-key order, and which of them are accessors
+    and which are methods. The values are not evaluated."""
     keys: tuple
     accessors: frozenset
     methods: frozenset
@@ -123,8 +126,8 @@ class Value:
 
 @dataclass(frozen=True)
 class Function:
-    """The function a binding holds, for a table read from its code: the declaration's handle and
-    syntax tree in its module."""
+    """The function a binding holds, for reading a table out of its code: module, binding, the handle of
+    the function declaration or expression, and its syntax tree."""
     module: int
     binding: str
     handle: str
@@ -133,8 +136,9 @@ class Function:
 
 @dataclass
 class _Frame:
-    """The evaluation of one initializer: where its declaration stands in its module, whether it
-    evaluates declared values, the facts being evaluated on the way here, and what it relies on."""
+    """The evaluation of one initializer: its module, the indexes of its declaration's statement and
+    declarator, whether it evaluates declared values, the evaluations in progress that led to it as
+    (module, binding, fact) keys (path), and the built-in operations it relies on (requires)."""
     module: int
     statement: int
     declarator: object
@@ -198,7 +202,7 @@ def _child(node, name):
     return value
 
 
-# Readers for tables: each refuses a value of another type with ValueError.
+# Readers for tables: each raises ValueError for a value of another type.
 
 def strings(value):
     """The members of an Array or a Set of strings."""
@@ -208,7 +212,7 @@ def strings(value):
 
 
 def string_map(value):
-    """The members of an object of strings."""
+    """The members of an object whose member values are strings, as a dict."""
     if isinstance(value, JSObject) and all(isinstance(item, str) for _, item in value.entries):
         return dict(value.entries)
     raise ValueError(f"not an object of strings: {value!r}")
@@ -270,7 +274,7 @@ class Values:
         return self.bundle.syntax(module, handle, _EXPAND_DEPTH)
 
     def _full(self, module, node):
-        """node, with its children if the helper left them out of a depth-limited reply."""
+        """Return node with its children, asking the helper for them when a depth-limited reply left them out."""
         return self._tree(module, node["h"]) if node.get("truncated") else node
 
     def _unparenthesized(self, module, node):
@@ -288,11 +292,11 @@ class Values:
         return record
 
     def declaring(self, module, binding):
-        """(module, binding id) of the declaration a binding stands for: itself, or for an import the
-        binding its exporting module declares, through re-exports. The answers are kept, and so are the
-        lookups in the declaring module: the helper keeps one module's program at a time, so a client that
-        follows the imports of one function from many modules would otherwise have it build the declaring
-        module's program again for each importer."""
+        """The (module, binding id) of the binding that a binding resolves to: the binding itself, or, for
+        an import, the binding that its exporting module declares, also through re-exports. Values caches
+        these answers and the scope lookups in the declaring modules. The helper keeps the program of only
+        one module at a time, so without the cache, a client that follows the imports of one function from
+        many modules would make the helper build the declaring module's program again for each importer."""
         key = (module, binding)
         if key not in self._declarations:
             self._declarations[key] = self._declaring(module, binding)
@@ -325,8 +329,8 @@ class Values:
     # -- initialization order ----------------------------------------------------------------------
 
     def _reachable(self, module):
-        """The modules module statically depends on, itself included. A module with parse diagnostics on
-        the way refuses: its links cannot be read."""
+        """The modules that module statically depends on, including module itself. A module with parse
+        diagnostics on the way raises Unresolved, because its links cannot be read."""
         if module not in self._reach:
             seen, queue = {module}, deque([module])
             while queue:
@@ -344,8 +348,8 @@ class Values:
         return self._reach[module]
 
     def _check_order(self, frame, module, binding, reference):
-        """reference, a name in the initializer frame evaluates, reads the binding (module, binding):
-        it must be initialized before that initializer runs."""
+        """Check that the binding (module, binding) is initialized before frame's initializer runs.
+        reference is the name in that initializer that reads the binding."""
         if module == frame.module:
             record = self._record(module, binding)
             declaration = record["declarations"][0]
@@ -361,8 +365,9 @@ class Values:
             return
         if module not in self._reachable(frame.module) or frame.module in self._reachable(module):
             raise self._refuse(frame.module, reference["s"],
-                               f"{reference['text']} comes from module {module}, which is not a static dependency of "
-                               f"module {frame.module} outside a cycle, so it may be initialized later")
+                               f"{reference['text']} comes from module {module}, which either "
+                               f"is not a static dependency of module {frame.module} or is in a cycle with it, "
+                               "so it may be initialized later")
 
     # -- evaluation --------------------------------------------------------------------------------
 
@@ -395,7 +400,8 @@ class Values:
             value = node["value"]
         elif kind == "NoSubstitutionTemplateLiteral":
             if node.get("invalid"):
-                raise self._refuse(module, node["s"], "a template with an invalid escape has no cooked value")
+                raise self._refuse(module, node["s"],
+                                   "the cooked value of a template with an invalid escape is undefined")
             value = node["value"]
         elif kind == "NumericLiteral":
             value = self._number(module, node)
@@ -448,7 +454,8 @@ class Values:
                 return JSNumber(-number_.value, "0" if number_.value == 0 else f"-{number_.js}")
             if node["op"] == "!" and number_.value in (0, 1):
                 return number_.value == 0
-        raise self._refuse(module, node["s"], f"{node['op']} of an expression that is not !0, !1 or a negated number literal")
+        raise self._refuse(module, node["s"],
+                           f"the {node['op']} expression is not !0, !1 or a minus before a number literal")
 
     def _items(self, module, node, frame, role):
         """The members an iterable expression gives, for a spread or a constructor argument."""
@@ -508,7 +515,8 @@ class Values:
                 continue
             if kind == "ShorthandPropertyAssignment":
                 if member.get("objectAssignmentInitializer"):
-                    raise self._refuse(module, member["s"], "a shorthand member with a default is not an object literal")
+                    raise self._refuse(module, member["s"],
+                                       "a shorthand member with a default is valid only in a destructuring pattern")
                 members[self._key(module, member, frame)] = self._evaluate(module, _child(member, "name"), frame, member_role)
                 continue
             raise self._refuse(module, member["s"], f"a {kind} defines a member that is not a data member")
@@ -521,7 +529,7 @@ class Values:
         if name not in ("Set", "Map"):
             raise self._refuse(module, node["s"], "only new Set and new Map with the free names Set and Map are evaluated")
         if any(argument["k"] == "SpreadElement" for argument in arguments) or len(arguments) > 1:
-            raise self._refuse(module, node["s"], f"new {name} with other than one argument or none")
+            raise self._refuse(module, node["s"], f"new {name} has a spread argument or more than one argument")
         if name == "Set":
             frame.require("Set", "Set.prototype.add")
             members = {}
@@ -550,7 +558,8 @@ class Values:
             return JSMap(tuple(entries.values()))
         copied = self._evaluate(module, source, frame, "any" if frame.declared else "entries")
         if not isinstance(copied, JSMap):
-            raise self._refuse(module, source["s"], "new Map of something other than pairs or a Map")
+            raise self._refuse(module, source["s"],
+                               "the argument of new Map is neither an array literal of pairs nor a Map")
         frame.require("Map.prototype.@@iterator", "%MapIteratorPrototype%.next")
         return JSMap(copied.entries)
 
@@ -610,7 +619,7 @@ class Values:
             self._values[key] = result
             return result
         if key in _path:
-            raise self._refuse(module, int(binding.split("@")[1]), "the value needs itself")
+            raise self._refuse(module, int(binding.split("@")[1]), "the value depends on itself")
         record = self._record(module, binding)
         initialized = [declaration for declaration in record["declarations"] if "init" in declaration]
         if record["kind"] not in ("var", "let", "const") or len(initialized) != 1:
@@ -657,10 +666,10 @@ class Values:
         return {"kind": "primitive"}
 
     def expression(self, module, handle, statement, declarator=None):
-        """The value of the literal expression at handle under the declared fact, as part of the
-        module-scope statement at index statement (and its declarator, for a variable declaration): the
-        names it reads must be initialized before that statement or declarator. Like the declared fact,
-        it makes no claim about later changes."""
+        """The value of the literal expression at handle under the declared fact, evaluated as part of the
+        module-scope statement whose index is statement (and of its declarator, for a variable
+        declaration): the names it reads must be initialized before that statement or declarator. Like the
+        declared fact, it does not check whether the value changes later."""
         frame = _Frame(module, statement, declarator, True, ())
         value = self._evaluate(module, self._tree(module, handle), frame, "any")
         return Value(value, "declared", module, handle, frozenset(frame.requires))
@@ -673,7 +682,8 @@ class Values:
             return self._functions[key]
         declaring_module, declaring = self.declaring(module, binding)
         if (declaring_module, declaring) != key:
-            # Kept under the declaring binding too, so each importer does not ask its module again.
+            # The recursive call caches the result under the declaring binding as well, so the next module
+            # that imports the function does not make the helper read the declaring module again.
             result = self.function(declaring_module, declaring)
             self._functions[key] = result
             return result
@@ -697,12 +707,12 @@ class Values:
         return result
 
     def unchanged_array(self, module, binding):
-        """The built-in operations that the uses of an array rely on, after checking that the binding is a
-        module-scope variable initialized with an array literal and that every use of it in the program
-        keeps the array, as value() checks for the elements fact: the binding is never written, and the
-        array is only read. The elements are not evaluated, so they may be values the evaluator does not
-        read, such as objects with methods, and a write to a member of an element is not a change of the
-        array. Raises Unresolved listing every use that may change it."""
+        """The built-in operations that the uses of an array rely on. It first checks that the binding is
+        a module-scope variable initialized with an array literal, and that every use of it in the program
+        leaves the array unchanged, as value() checks for the elements fact: the binding is never written,
+        and the array is only read. The elements are not evaluated, so they may be values the evaluator
+        does not read, such as objects with methods, and a write to a member of an element changes the
+        element, not the array. Raises Unresolved listing every use that may change the array."""
         declaring_module, declaring = self.declaring(module, binding)
         record = self._record(declaring_module, declaring)
         declarations = record["declarations"]
@@ -720,9 +730,10 @@ class Values:
     # -- constancy ---------------------------------------------------------------------------------
 
     def unfollowed_loads(self):
-        """(module, offset, reason) of every import() or import.meta.require whose specifier could name
-        a module of the build: not a literal, and not a template whose fixed head names a package. A
-        module with parse diagnostics counts as one such place, since its loads cannot be read."""
+        """(module, offset, reason) of every import() or import.meta.require whose specifier could refer
+        to a module of the build: a specifier that is neither a literal nor a template whose fixed head is
+        a bare specifier (one that does not start with . or /), which refers to a package. A module with
+        parse diagnostics counts as one such place, because its loads cannot be read."""
         if self._unfollowed_loads is None:
             sites = []
             for module in sorted(self.bundle.records):
@@ -742,8 +753,9 @@ class Values:
         return self._unfollowed_loads
 
     def _names(self, module):
-        """The names a module exports; none where a module with parse diagnostics is involved, whose
-        loads unfollowed_loads already lists as refusing every container fact."""
+        """The names a module exports, or an empty list when the module or a module it reaches through
+        export * has parse diagnostics. unfollowed_loads already lists such a module, which refuses every
+        container fact (elements, entries and keys)."""
         if module not in self._export_names:
             try:
                 self._export_names[module] = sorted(self.bundle.export_names(module))
@@ -752,8 +764,8 @@ class Values:
         return self._export_names[module]
 
     def _holders(self, targets):
-        """{module: export names under which its namespace holds the value} and the modules whose
-        namespace holds such a namespace."""
+        """{module: the export names under which the module's namespace contains one of targets}, and the
+        set of modules whose namespace contains such a namespace, at any depth."""
         holders, nested = {}, set()
         for module in sorted(self.bundle.records):
             for name in self._names(module):
@@ -782,20 +794,21 @@ class Values:
 
     @staticmethod
     def _query_key(module, query):
-        """What makes two use queries the same: for a parameter, the function and the position, since the
-        first query (the one with the fewest calls) classifies the same uses as any later one."""
+        """The key under which a use query counts as done. For a parameter query it is the function and
+        the parameter's position, because the first such query, the one with the fewest calls, classifies
+        the same uses as any later one."""
         if query.get("mode") == "parameter":
             return module, "parameter", query["id"], query["position"]
         return module, json.dumps(query, sort_keys=True)
 
     def _constancy(self, module, binding, model):
         """The built-in operations the uses of the value rely on, after classifying every use; raises
-        Unresolved listing every refused use. The uses are classified in the binding's module, then in
-        every module that imports one of the names the value is exported under, in the module that
-        declares each imported function the value is passed to, and at every place a namespace holding
-        the value is taken, until no new place is found. Queries run in order of the number of calls
-        between the value's binding and the place, so that a parameter is classified at the depth of the
-        route with the fewest calls."""
+        Unresolved listing every refused use. The uses are classified first in the binding's module, then
+        in every module that imports one of the names the value is exported under, in the module that
+        declares each imported function the value is passed to, and at every place where a module takes a
+        namespace that contains the value. This repeats until the set of places stops growing. Queries run
+        in order of the number of calls between the value's binding and the place, so that a parameter is
+        classified at the call depth of the route with the fewest calls."""
         sites, requires = set(), set()
         if model["kind"] != "primitive":
             sites.update(self.unfollowed_loads())
@@ -851,8 +864,9 @@ class Values:
         return requires
 
     def _namespace_queries(self, targets, model, sites):
-        """The queries for every place a namespace holding the value is taken; adds a refusal to sites
-        where the value is inside a namespace that another namespace holds."""
+        """The use queries for every place where a module takes a namespace that contains the value. Where
+        the value is inside a namespace that another namespace contains, it adds a refusal to sites
+        instead of a query."""
         holders, nested = self._holders(targets)
         queries = []
         for holder in sorted(set(holders) | nested):
@@ -868,7 +882,8 @@ class Values:
                             load["k"] in ("export*as", "import()", "import.meta.require")):
                         continue
                     if holder in nested or load["k"] == "export*as":
-                        sites.add((importer, load["s"], f"the namespace of module {holder} holds the value inside another namespace"))
+                        sites.add((importer, load["s"],
+                                   f"the namespace of module {holder} contains the value inside another namespace"))
                     elif load["k"] == "import":
                         name, position = load["namespace"]
                         found = self.bundle.binding_at(importer, position, position + len(name.encode("utf-16-le")) // 2)

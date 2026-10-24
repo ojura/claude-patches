@@ -4,40 +4,44 @@
 Usage: prepare.py <claude-executable> <version> <modules directory>
        prepare.py --discover-only <extracted.js>
 
-The hook names the modules directory: ~/.cache/rm-check/<version>/modules-v<N>
-(under $XDG_CACHE_HOME when it is set), where N is LAYOUT in rm-check-lib.mjs.
-prepare.py extracts the bundle to claude.js next to that directory with
-bun_handler/bun_handler.py, unless that file already exists, finds three things
-in it with pfg.bundle, the structural matcher, writes the bundle's modules into
-the directory, and exports what it found from the chunks that hold it:
+The hook passes the modules directory as the third argument:
+~/.cache/rm-check/<version>/modules-v<N> (under $XDG_CACHE_HOME when it is set),
+where N is LAYOUT in rm-check-lib.mjs.
+prepare.py extracts the bundle with bun_handler/bun_handler.py to claude.js
+next to that directory, unless that file already exists. It finds three things
+in the bundle with pfg.bundle, writes the bundle's modules into the directory,
+and appends an export statement to each module that declares one of the names
+it found. Error messages refer to each anchor by the label in parentheses:
 
-  - tool (TOOL_HINT, TOOL_NAME): the Bash tool, a module-level
+  - tool (TOOL_HINT): the Bash tool, a module-level
     `var T = F({name: N, ..., searchHint: "execute shell commands", ...})`
-    whose N is the string "Bash", read through an import where there is one.
-    The hook calls T.checkPermissions, the method Claude Code calls for the
-    tool's permission verdict, with every wrapper Claude Code puts around the
-    check;
+    where N is the string "Bash" (TOOL_NAME), or a variable initialized with
+    it, either in the same module or in the module that N is imported from.
+    The hook calls T.checkPermissions, the method that Claude Code calls for
+    the tool's permission verdict, so the steps that Claude Code wraps around
+    the check run too;
   - runInCwd (CWD): a module-level `function F(dir, fn) {return S.run({cwd:
-    dir}, fn)}`, with or without a call around dir, which runs fn with
-    {cwd: dir} in an AsyncLocalStorage store. Claude Code runs a session's and
-    a subagent's work inside it, and the check reads its working directory
-    from that store;
+    dir}, fn)}`, also with dir passed through a call, as in {cwd: G(dir)}. It
+    runs fn with {cwd: dir} as the store of the AsyncLocalStorage S. Claude
+    Code runs the work of the session and of each subagent inside this
+    function, and the check reads its working directory from that store;
   - setOriginalCwd (ORIGINAL_CWD): a module-level
     `function F(dir) {U({originalCwd: dir})}`, which sets the session's
-    original working directory. With the --add-dir directories it makes up
-    the session's working directories, and the check follows a cd only into
-    those.
+    original working directory. Together with the --add-dir directories, that
+    directory forms the session's working directories, and the check follows
+    a cd only into them.
 
-The text in NOMINATE picks the modules to parse, and the matcher decides from
-their syntax and bindings. On 2.1.309 that parses 5 modules in about 4 s; the
-whole bundle takes 11 s. rm-check-lib.mjs then verifies by behaviour, on
-synthetic directories, that the three work together, so a match that only
-looks right is refused there.
+prepare.py parses only the modules that contain one of the texts in NOMINATE,
+and the anchors test the syntax and bindings that pfg.bundle reports for them.
+On 2.1.309 these are 5 modules, which take about 4 s to parse, where the whole
+bundle takes 11 s. rm-check-lib.mjs then calls the three on made-up
+directories and checks the verdicts, so it refuses a match that looks right
+but gives the wrong verdicts.
 
-Every anchor is tried, and each one that finds nothing, or more than
-MAX_CANDIDATES, is reported by name. pfg.bundle runs its helper on the node
-that npm runs under, or else the first node on PATH. The anchors found their
-matches on 2.1.303, 2.1.304, 2.1.305 and 2.1.309.
+prepare.py tries every anchor, and when one fails, the error names each anchor
+that found 0 matches or more than MAX_CANDIDATES. pfg.bundle runs its helper on
+the node that npm runs under, or else the first node on PATH. The anchors found
+their matches on 2.1.303, 2.1.304, 2.1.305 and 2.1.309.
 """
 import json
 import os
@@ -55,7 +59,7 @@ from pfg import bundle as pb  # noqa: E402
 
 TOOL_HINT = "execute shell commands"
 TOOL_NAME = "Bash"
-# The text that picks the modules to parse for each role.
+# For each role, the text that a module must contain for prepare.py to parse it.
 NOMINATE = {"tool": f'"{TOOL_HINT}"', "runInCwd": ".run({cwd:", "setOriginalCwd": "({originalCwd:"}
 NEEDLES = [pb.Needle("tool", "string", TOOL_HINT), pb.Needle("runInCwd", "property", "cwd"),
            pb.Needle("setOriginalCwd", "property", "originalCwd")]
@@ -65,13 +69,14 @@ ANCHORS = {
     "runInCwd": "CWD: a module-level `function F(dir, fn) {return S.run({cwd: dir}, fn)}`",
     "setOriginalCwd": "ORIGINAL_CWD: a module-level `function F(dir) {U({originalCwd: dir})}`",
 }
-# More matches than this for one role means an anchor matches more than it is
-# meant for. rm-check-lib.mjs calls every tool once and runs every pair of
-# directory functions through its self-test, so the number also bounds that.
+# More matches than this for one role means that its anchor also matches code
+# it is not meant for. rm-check-lib.mjs calls every tool once and runs its
+# self-test on every pair of directory functions, so this number also limits
+# the self-test to 8 tools and 64 pairs.
 MAX_CANDIDATES = 8
 EXPORT = "__ccRmCheck"
-# Every layout's modules directory: "modules" before layouts were numbered,
-# then "modules-v<LAYOUT>".
+# The name of the modules directory in every layout: "modules" from before the
+# layouts had numbers, and "modules-v<LAYOUT>" since.
 MODULES_DIR = re.compile(r"modules(?:-v\d+)?")
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 BUNFS = b"/$bunfs/root/"
@@ -82,7 +87,7 @@ def module_name(name):
 
 
 def up(handle, steps):
-    """The handle of the node steps levels above the node at handle."""
+    """The handle of the ancestor that is steps levels above the node at handle."""
     return ".".join(handle.split(".")[:-steps])
 
 
@@ -96,7 +101,8 @@ def is_module_statement(handle):
 
 def module_function(b, index, handle, params):
     """The syntax of the function declaration at handle when it is a statement
-    of its module, takes params parameters and has one statement; else None."""
+    of its module, has params parameters and a body of one statement, and None
+    otherwise."""
     if not is_module_statement(handle):
         return None
     fn = b.syntax(index, handle, 4)
@@ -111,8 +117,10 @@ def parameter_bindings(fn):
 
 
 def tool_matches(b, modules):
-    """(module index, variable, syntax of the name property's value) of each
-    `var T = F({..., searchHint: TOOL_HINT, ...})` statement in modules."""
+    """(module index, variable name, syntax of the name property's value) of
+    each module-level `var T = F({..., searchHint: TOOL_HINT, ...})` statement
+    in modules. The third element is None unless the object has exactly one
+    name property."""
     found = []
     for index, hit in b.hits("tool"):
         chain = hit["chain"]
@@ -132,8 +140,8 @@ def tool_matches(b, modules):
 
 def run_matches(b, modules):
     """(module index, name) of each module-level
-    `function F(dir, fn) {return S.run({cwd: dir}, fn)}` in modules; dir may
-    sit in a call."""
+    `function F(dir, fn) {return S.run({cwd: dir}, fn)}` in modules. The value
+    of cwd may also be dir passed to a one-argument call, as in {cwd: G(dir)}."""
     found = []
     for index, hit in b.hits("runInCwd"):
         chain = hit["chain"]
@@ -152,8 +160,9 @@ def run_matches(b, modules):
         call = b.syntax(index, up(hit["h"], 3), 3)
         if call["expression"]["k"] != "PropertyAccessExpression" or call["expression"]["name"]["text"] != "run":
             continue
-        # A parameter that is a destructuring pattern has no binding id, and a
-        # free name has a null one, so each id must be present to compare.
+        # A parameter that is a destructuring pattern does not have a binding
+        # id, and a free name has a null one. Both read as None here and would
+        # compare equal, so a match also requires the parameter to have an id.
         second = call["arguments"][1]
         if second["k"] != "Identifier" or not callback or second.get("b") != callback:
             continue
@@ -190,8 +199,10 @@ def origin_matches(b, modules):
 
 
 def string_value(b, index, node):
-    """The string a module-level name's initializer holds: ("value", text), or
-    ("import", module name, exported name) when the name is imported, or None."""
+    """The string that node resolves to: ("value", text) for a string literal,
+    or for a module-level name declared once with an initializer that resolves
+    to a string; ("import", module name, exported name) for a module-level name
+    that is imported; None otherwise."""
     if node is None:
         return None
     if node["k"] == "StringLiteral":
@@ -211,46 +222,49 @@ def string_value(b, index, node):
 
 
 def exported_string(texts, spec, exported):
-    """("value", the string the module named spec exports as exported, when
-    that module declares it with a string), or ("refused", why)."""
+    """("value", text) when the module named spec exports the name exported and
+    declares it itself with a string as its initializer, and ("refused", the
+    reason) otherwise."""
     index = next((i for i, (name, _) in texts.items() if name == spec), None)
     if index is None:
-        return ("refused", f"there is no module {spec}")
+        return ("refused", f"the bundle does not contain a module {spec}")
     with pb.Bundle.from_sources([(index, spec, texts[index][1].decode("utf-8"))]) as b:
         try:
             target = b.export(index, exported)
         except pb.Unresolved as e:
-            return ("refused", f"its name is reached through an import that prepare.py follows only into "
-                               f"the module that declares it: {e}")
+            return ("refused", f"prepare.py follows an imported name only into the module it is imported "
+                               f"from, and {exported} cannot be resolved within {module_name(spec)} alone: {e}")
         if target[0] != "binding":
-            return ("refused", f"{module_name(spec)} exports {exported} as a {target[0]}")
+            return ("refused", f"the export {exported} of {module_name(spec)} is of kind {target[0]}, and "
+                               "prepare.py reads only variables")
         declarations = b.scope_binding(target[1], target[2]).get("declarations", [])
         if len(declarations) != 1 or declarations[0].get("init") is None:
-            return ("refused", f"{module_name(spec)} does not initialize {exported} where it declares it")
+            return ("refused", f"{module_name(spec)} declares {exported} more than once, or without an initializer")
         value = string_value(b, target[1], b.syntax(target[1], declarations[0]["init"]["h"], 0))
         if value and value[0] == "value":
             return value
-        return ("refused", f"{module_name(spec)}'s {exported} is not a string")
+        return ("refused", f"{exported} in {module_name(spec)} is not initialized with a string")
 
 
 def discover(data):
     """Find the tool, runInCwd and setOriginalCwd in an extracted bundle.
 
     Returns ({"tool", "runInCwd", "setOriginalCwd"} -> [{"chunk": module,
-    "name": local name}], the bundle's module records). Exits naming every
-    anchor that found nothing, or too many."""
+    "name": local name}], the bundle's module records). Raises SystemExit with
+    a message that names every anchor that found 0 matches or more than
+    MAX_CANDIDATES, and EXPORT when a module already contains that name."""
     records = bun_handler.split_extracted_js(data)
     texts = {index: (name.decode(), contents) for index, name, contents in records}
     failures = []
     taken = [module_name(name) for name, contents in texts.values() if EXPORT.encode() in contents]
     if taken:
-        failures.append(f"EXPORT: the name {EXPORT}, which prepare.py adds to chunks, already occurs "
-                        f"in {', '.join(taken)}")
+        failures.append(f"EXPORT: prepare.py exports the names it finds as {EXPORT}_<name>, and the text "
+                        f"{EXPORT} already occurs in {', '.join(taken)}")
     picked = {role: sorted(i for i, (_, contents) in texts.items() if text.encode() in contents)
               for role, text in NOMINATE.items()}
     for role, indexes in picked.items():
         if not indexes:
-            failures.append(f"{ANCHORS[role]}: no module holds the text {NOMINATE[role]}")
+            failures.append(f"{ANCHORS[role]}: the text {NOMINATE[role]} does not occur in any module")
     roles = {role: [] for role in NOMINATE}
     if all(picked.values()):
         sources = [(i, texts[i][0], texts[i][1].decode("utf-8")) for i in sorted(set().union(*picked.values()))]
@@ -267,20 +281,20 @@ def discover(data):
                 if name == ("value", TOOL_NAME):
                     roles["tool"].append((index, variable))
                 else:
-                    why = name[1] if name and name[0] == "refused" else f"name {name[1]!r}" if name else "no name"
+                    why = name[1] if name and name[0] == "refused" else f"name {name[1]!r}" if name else "name unknown"
                     notes.append(f"{variable} in {module_name(texts[index][0])}: {why}")
         except pb.BackendError as e:
-            raise SystemExit(f"[rmcheck prepare] pfg.bundle could not parse the bundle: {e}") from None
+            raise SystemExit(f"[rmcheck prepare] pfg.bundle's node helper failed: {e}") from None
         for role, matches in roles.items():
             if not matches or len(matches) > MAX_CANDIDATES:
                 places = ", ".join(f"{name} in {module_name(texts[index][0])}" for index, name in matches)
                 if role == "tool" and notes:
                     places = ", ".join(([places] if places else []) + [f"refused {n}" for n in notes])
                 modules = ", ".join(module_name(texts[i][0]) for i in picked[role])
-                failures.append(f"{ANCHORS[role]}: found {len(matches)} in {modules}; expected 1 to "
-                                f"{MAX_CANDIDATES}" + (f" ({places})" if places else ""))
+                failures.append(f"{ANCHORS[role]}: found {len(matches)} in {modules}, where it should find 1 "
+                                f"to {MAX_CANDIDATES}" + (f" ({places})" if places else ""))
     if failures:
-        raise SystemExit("[rmcheck prepare] these anchors did not find what they look for:\n  "
+        raise SystemExit("[rmcheck prepare] these anchors failed:\n  "
                          + "\n  ".join(failures)
                          + f"\n(the anchors are in {os.path.abspath(__file__)})")
     return ({role: [{"chunk": module_name(texts[index][0]), "name": name} for index, name in matches]
@@ -310,12 +324,12 @@ def prune(final):
 
       - ~/.cache/rm-check/<version> for each version that is not final's, not
         installed under ~/.local/share/claude/versions/, and not the executable
-        of a running process (an update deletes the binary of sessions that
-        keep running it);
-      - in the versions that stay, the modules directories of other layouts
+        of a running process (a session keeps running its version after an
+        update deletes that version's binary);
+      - in the versions that stay, the modules directories of layouts other
         than final's;
       - the /tmp/claude-<version>-rmcheck directories that earlier revisions
-        wrote."""
+        of the hook wrote."""
     vdir = os.path.dirname(final)
     base = os.path.dirname(vdir)
     needed = {os.path.basename(vdir)}
@@ -373,14 +387,16 @@ def export_name(name):
 
 
 def export_statement(names):
-    """The export appended to a chunk for its module-level names."""
+    """The export statement that prepare.py appends to a module to export the
+    module-level names in names."""
     return ("\nexport{" + ",".join(f"{n} as {export_name(n)}" for n in names) + "};\n").encode()
 
 
 def write_modules(records, exports, write_dir, final_dir):
-    """Write every module into write_dir, with bundle paths pointing at final_dir.
+    """Write every module into write_dir, with each /$bunfs/root/ path in it
+    pointing at final_dir instead.
 
-    exports maps a module name to the module-level names it exports."""
+    exports maps a module name to the module-level names to export from it."""
     absdir = final_dir.encode() + b"/"
     for _idx, name, contents in records:
         base = module_name(name.decode())
@@ -391,8 +407,9 @@ def write_modules(records, exports, write_dir, final_dir):
             body += export_statement(exports[base])
         with open(path, "wb") as f:
             f.write(body)
-    # Assets the bundle keeps outside its source modules (text, docs, wasm) are
-    # referenced by path; empty files let the module graph load.
+    # The modules refer by path to assets that the bundle keeps outside its
+    # source modules (text, docs, wasm). An empty file at each such path is
+    # enough for the modules to load.
     ref = re.compile(re.escape(absdir) + rb"([A-Za-z0-9_./@+-]+)")
     for root, _dirs, files in os.walk(write_dir):
         for f in files:
@@ -438,8 +455,9 @@ def main(argv):
                    for role, found in roles.items()}}
     work = tempfile.mkdtemp(prefix="modules.", dir=vdir)
     try:
-        # Import paths point at the final directory, so the tree only loads once
-        # renamed there; the rename also makes a half-written tree invisible.
+        # The import paths in the modules point at final, so the tree only loads
+        # once it is renamed there. Because the rename is atomic, other hooks see
+        # the tree at final only when it is complete.
         write_modules(records, exports, work, final)
         with open(os.path.join(work, "manifest.json"), "w") as f:
             json.dump(manifest, f)
@@ -453,7 +471,8 @@ def main(argv):
         if os.path.exists(work):
             shutil.rmtree(work)
         raise
-    # A new version or layout is when older caches become unused.
+    # A cache becomes unused when a new version or layout replaces it, so prune
+    # runs after each preparation.
     prune(final)
 
 

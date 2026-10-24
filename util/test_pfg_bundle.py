@@ -54,7 +54,8 @@ def test_an_anchor_error_counts_candidates_given_as_a_generator():
 
 
 def test_needles_from_a_generator_are_registered_and_sent():
-    # Both the registry and the index must receive the needles from a one-pass iterable.
+    # Both the needle registry and the index pass must receive the needles, and a generator can be
+    # iterated only once.
     with build('const x="flag";', needles=(n for n in [pb.Needle("flag", "string", "flag")])) as bundle:
         assert list(bundle.needles) == ["flag"]
         assert len(bundle.hits("flag")) == 1
@@ -207,17 +208,16 @@ def _streams(bundle):
 
 
 def test_close_releases_both_pipes_and_the_stderr_file():
-    # Closing the helper releases both pipes and its stderr file.
     for kill in (False, True):
         bundle = build("const x=1;")
         streams = _streams(bundle)
         bundle._helper.close(kill=kill)
         assert [stream.closed for stream in streams] == [True, True, True]
         assert bundle._helper._process.returncode is not None
-        bundle._helper.close()  # closing twice is idempotent
+        bundle._helper.close()  # a second close returns at once
 
 
-def test_the_helper_adds_no_thread_and_a_failure_quotes_its_stderr():
+def test_the_helper_does_not_start_a_thread_and_a_failure_quotes_its_stderr():
     # A background stderr reader would hold its buffered stream's lock while blocked in read. That lock
     # would remain locked in a forked child, where closing the stream could hang.
     threads = threading.active_count()
@@ -231,7 +231,7 @@ def test_the_helper_adds_no_thread_and_a_failure_quotes_its_stderr():
 
 
 def test_close_cleans_up_when_its_wait_is_interrupted(monkeypatch):
-    # Cancellation propagates after the owned process has ended and its streams have closed.
+    # The KeyboardInterrupt propagates only after the owned process has ended and its streams are closed.
     bundle = build("const x=1;")
     process = bundle._helper._process
     real_wait = process.wait
@@ -273,7 +273,7 @@ def test_a_helper_of_another_revision_is_refused(monkeypatch):
 
 
 def test_a_helper_that_cannot_start_is_a_backend_error(monkeypatch):
-    # Startup errors use BackendError and release the file opened for stderr.
+    # A failed start raises BackendError and closes the file opened for stderr.
     files = []
     real = pb.tempfile.TemporaryFile
 
@@ -357,7 +357,7 @@ def test_a_non_json_output_line_is_a_protocol_failure(monkeypatch, tmp_path):
     assert all(stream.closed for stream in (helpers[0]._process.stdin, helpers[0]._process.stdout, helpers[0]._stderr))
 
 
-def test_a_forked_child_lets_go_of_the_helper_without_closing_descriptors_it_reuses():
+def test_a_forked_child_releases_the_helper_without_closing_a_file_that_reuses_a_descriptor_number():
     # Each inherited stream must retain ownership of its descriptor number until it closes. Releasing
     # the number first could let a stale stream close an unrelated file that reused it.
     bundle = build("const x=1;")
@@ -370,8 +370,8 @@ def test_a_forked_child_lets_go_of_the_helper_without_closing_descriptors_it_reu
             try:
                 process = bundle._helper._process
                 fds = [stream.fileno() for stream in (process.stdin, process.stdout)]
-                # Each inherited pipe descriptor now refers to /dev/null, and like the pipe is not inherited
-                # by a program the child execs.
+                # Each inherited pipe descriptor now refers to /dev/null and, like the pipe, is not
+                # inherited by a program the child execs.
                 same = all((os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (null.st_dev, null.st_ino) for fd in fds)
                 same = same and not any(os.get_inheritable(fd) for fd in fds)
                 # The child closes its streams, opens files until one reuses the stdin number, then closes
@@ -475,7 +475,7 @@ def test_a_registry_key_loses_its_exemption_when_the_program_writes_symbol_for()
         assert [w["target"] for w in summary["registryWrites"]] == ["globalThis.@registry"]
 
 
-def test_a_needle_key_can_name_an_inherited_object_property():
+def test_a_needle_key_may_be_the_name_of_an_inherited_object_property():
     needles = [pb.Needle(key, "string", "flag") for key in ("constructor", "__proto__", "toString")]
     with build('const x="flag";', needles=needles) as bundle:
         for needle in needles:
@@ -483,7 +483,7 @@ def test_a_needle_key_can_name_an_inherited_object_property():
             assert bundle.hits(needle.key)[0][1]["s"] == 8
 
 
-def test_finite_global_keys_are_invalidated_by_writes_to_their_operation_dependencies():
+def test_a_proof_of_finite_global_keys_is_invalidated_by_a_write_to_an_operation_it_depends_on():
     loop = 'for(let[n,r]of Object.entries({h:f,Fragment:g}))Object.defineProperty(globalThis,n,{value:r});'
     with build(loop) as bundle:
         summary = bundle.builtin_summary(bundle.builtin_scan())
@@ -524,7 +524,7 @@ def test_an_export_seeds_its_importers_with_every_value_and_with_its_other_sourc
         assert {(0, "u", "unclassified"), (1, "u", "unclassified"), (1, "t", "followed"), (3, "v", "followed")} <= statuses
 
 
-def test_a_module_with_parse_diagnostics_gives_no_hits_links_or_facts():
+def test_a_module_with_parse_diagnostics_is_left_out_of_hits_links_and_facts():
     broken = 'export const x="flag";Set.prototype.has=f;var p=Set.prototype;p.add=g;const ='
     with build(broken, 'import{x}from"/m0.js";x;', 'export{x}from"/m0.js";', 'const y="flag";',
                needles=[pb.Needle("flag", "string", "flag")]) as bundle:
@@ -539,14 +539,17 @@ def test_a_module_with_parse_diagnostics_gives_no_hits_links_or_facts():
             bundle.export(target, imported)
         assert refusal.value.module == 0
         summary = bundle.builtin_summary(bundle.builtin_scan())
-        # The index pass's write in the broken module stays; it gets no facts pass, so p is not followed.
+        # The write the index pass found in the broken module stays. The facts pass skips that module, so
+        # p is not followed.
         assert [(w["module"], w["target"]) for w in summary["writes"]] == [(0, "Set.prototype.has")]
         assert [(u["module"], u["count"]) for u in summary["unparsed"]] == [(0, 1)]
         assert all(r["module"] != 0 or "status" not in r for r in summary["references"])
 
 
-# The keys a proof depends on, from its own write records, and programs that write each one in three
-# ways: an assignment, a definer, and an assignment through a variable that holds the object.
+# PROOFS is a program whose write records include key proofs, and the tests read the keys those proofs
+# depend on from these records. writing_programs gives programs that write a key in three ways: an
+# assignment, a definer call, and an assignment through a variable that holds the object.
+# INTRINSIC_OBJECTS gives the expressions that reach each intrinsic prototype.
 PROOFS = ('for(let[n,r]of Object.entries({h:f}))globalThis[n]=r;const k=Symbol.for("x");globalThis[k]=1;'
           'globalThis[Symbol.iterator]=1;')
 INTRINSIC_OBJECTS = {
@@ -559,7 +562,7 @@ INTRINSIC_OBJECTS = {
 
 
 def writing_programs(key):
-    """Programs whose scan should record a write to exactly the slot key names."""
+    """Programs whose scan should record a write to exactly the slot at the path key."""
     root, *path = key.split(".")
     member = lambda name: f"[Symbol.{name[2:]}]" if name.startswith("@@") else f".{name}"  # noqa: E731
     literal = lambda name: f"Symbol.{name[2:]}" if name.startswith("@@") else f'"{name}"'  # noqa: E731
@@ -575,7 +578,8 @@ def writing_programs(key):
 
 
 def assert_writes_produced(keys):
-    """Every program of writing_programs(key), each in a module of its own, gives a write to key."""
+    """Assert that every program of writing_programs(key), for each key in keys and each in a module of
+    its own, gives a write to key."""
     programs = [(key, program) for key in keys for program in writing_programs(key)]
     with build(*(program for _, program in programs)) as bundle:
         scans = bundle.builtin_scan()

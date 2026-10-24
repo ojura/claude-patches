@@ -4,12 +4,13 @@
 Usage: check_versions.py <version> [<version> ...]
 
 Each version must be installed under ~/.local/share/claude/versions/. The hook
-prepares it on first use. Every command runs with a new temporary directory as
-both the request's working directory and the session's original directory
-(CLAUDE_PROJECT_DIR); {cwd} in a command stands for that directory. Prints DENY
-or pass per command with the time the hook took and the start of the check's
-text, then whether every version gave the same verdicts. Use it after
-re-anchoring prepare.py for a new version.
+prepares it on first use. Every command runs with one new temporary directory,
+which contains a subdirectory sub, as both the request's working directory and
+the session's original directory (CLAUDE_PROJECT_DIR). {cwd} in a command is
+replaced with that directory. For each command the script prints DENY, pass or
+ERROR, the time the hook took and the start of the check's text, and at the end
+whether every version gave the same verdicts. Run it after changing the anchors
+in prepare.py for a new version.
 """
 import json
 import os
@@ -41,7 +42,8 @@ COMMANDS = [
     'echo rm',
     'ls -la',
     # Removes the request's working directory after a cd that the check does
-    # not follow: DENY whichever directory the hook's server started in.
+    # not follow. The verdict should be DENY whatever directory the hook's
+    # server started in.
     'cd / && rm -rf {cwd}',
 ]
 

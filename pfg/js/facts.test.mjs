@@ -51,7 +51,7 @@ async function withHelper(modules, body) {
 function spanOf(text, name, n = 0) {
   const pattern = new RegExp(`(?<![\\w$])${name.replace(/[$]/g, '\\$&')}(?![\\w$])`, 'g');
   const matches = [...text.matchAll(pattern)];
-  assert.ok(matches.length > n, `${name} occurs ${n + 1} times`);
+  assert.ok(matches.length > n, `${name} should occur at least ${n + 1} times`);
   return { s: matches[n].index, e: matches[n].index + name.length };
 }
 
@@ -59,7 +59,7 @@ function spanOf(text, name, n = 0) {
 function spanOfText(text, piece, n = 0) {
   let at = -1;
   for (let i = 0; i <= n; i += 1) at = text.indexOf(piece, at + 1);
-  assert.ok(at >= 0, `${piece} occurs ${n + 1} times`);
+  assert.ok(at >= 0, `${piece} should occur at least ${n + 1} times`);
   return { s: at, e: at + piece.length };
 }
 
@@ -69,7 +69,7 @@ async function bindingOf(h, module, text, needle, n = 0) {
   return record;
 }
 
-test('the hello line names the protocol, the helper and the revision in pfg/REVISION', async () => {
+test('the hello line gives the protocol, helper name, TypeScript version and the number in pfg/REVISION', async () => {
   await withHelper([], async (h) => {
     assert.equal(h.hello.hello.protocol, 1);
     assert.equal(h.hello.hello.helper, 'pfg-facts');
@@ -83,7 +83,7 @@ test('the vendored TypeScript is the version its own package.json declares', asy
   await withHelper([], async (h) => assert.equal(h.hello.hello.typescript, declared));
 });
 
-test('the index keeps every load in source order, with its target and its lexical context', async () => {
+test('the index lists every load in source order, with its target and the function that contains it', async () => {
   const text = 'import"/c.js";import d,{a as b}from"/b.js";import*as ns from"path";export{b as c};' +
     'var f=()=>import("/b.js");(()=>import.meta.require("/c.js"))();import(`@x/${f}.js`);export*from"/c.js";';
   await withHelper([[0, '/a.js', text], [1, '/b.js', 'export var a=1;'], [2, '/c.js', '']], async (h) => {
@@ -98,7 +98,7 @@ test('the index keeps every load in source order, with its target and its lexica
     assert.deepEqual(loads[3].named.map((n) => n.slice(0, 2)), [['b', 'c']]);
     assert.equal(loads[4].t, 1);
     assert.equal(loads[4].inside.k, 'ArrowFunction');
-    // A load inside a function is recorded as lexically inside it, even when the function runs at once.
+    // A load inside a function counts as lexically inside it, even when the function is called immediately.
     assert.equal(loads[5].inside.k, 'ArrowFunction');
     assert.equal(loads[5].t, 2);
     assert.equal(loads[6].form, 'template-head');
@@ -109,7 +109,7 @@ test('the index keeps every load in source order, with its target and its lexica
   });
 });
 
-test('needles hit code only: a quoted or commented copy is not a hit', async () => {
+test('a needle matches only code: a copy inside a string or a comment is not a hit', async () => {
   const text = 'var x=k("flag",{list:[]});// k("flag")\nvar s=\'k("flag",{list:[]})\';var t=`flag ${x}`;o.list;';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const needles = [{ key: 's', type: 'string', value: 'flag' }, { key: 'p', type: 'property', value: 'list' },
@@ -124,7 +124,7 @@ test('needles hit code only: a quoted or commented copy is not a hit', async () 
   });
 });
 
-test('a syntax error is a diagnostic of its module, not a failure of the index', async () => {
+test('a syntax error becomes a diagnostic of its module, and the index request still succeeds', async () => {
   await withHelper([[0, '/a.js', 'var x=[1;'], [1, '/b.js', 'var y=1;']], async (h) => {
     const { modules } = await h.ok('index', { needles: [], builtins: [] });
     assert.ok(modules[0].diagnostics.length > 0);
@@ -170,7 +170,7 @@ test('an occurrence has every role it plays', async () => {
   });
 });
 
-test('a local of the same spelling never counts as an occurrence of the module binding', async () => {
+test('a local binding with the same name is never an occurrence of the module binding', async () => {
   const text = 'var x="outer";function f(x){return x}function g(){let x=1;return x}' +
     'try{}catch(x){x}for(let x of[]){x}var h=function x(){return x};var c=class x{m(){return x}};' +
     'var k=(x)=>x;function d({x}){return x}x:for(;;){break x}export{x};';
@@ -181,8 +181,8 @@ test('a local of the same spelling never counts as an occurrence of the module b
   });
 });
 
-test('import and export aliases keep their own bindings; the outside names are not bindings', async () => {
-  // The frozen suite's import-export-alpha case.
+test('the local name of an import alias is a binding, and the imported and exported names are not', async () => {
+  // The import-export-alpha case of tests/frozen-suite in the ast-correspondence matcher, v4.7.0.
   const text = 'import { sourceName as localName } from "pkg";\nexport { localName as publicName };';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const local = await bindingOf(h, 0, text, 'localName');
@@ -195,8 +195,9 @@ test('import and export aliases keep their own bindings; the outside names are n
   });
 });
 
-test('labels and private names that share a spelling are not bindings', async () => {
-  // The frozen suite's labeled-statement identity and private-alpha cases.
+test('labels and private names spelled like a binding are not its occurrences', async () => {
+  // The labeled-statement identity and private-alpha cases of tests/frozen-suite in the
+  // ast-correspondence matcher, v4.7.0.
   const text = 'var a=1;a:for(;;){break a}a:for(;;){continue a}class S{#a=1;r(){return this.#a+a}}';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const { id } = await bindingOf(h, 0, text, 'a');
@@ -205,8 +206,8 @@ test('labels and private names that share a spelling are not bindings', async ()
   });
 });
 
-test('contextual words as property names stay names while their bindings are bindings', async () => {
-  // The frozen suite's contextual-alpha case.
+test('contextual keywords as property keys are names, and the destructured variables are bindings', async () => {
+  // The contextual-alpha case of tests/frozen-suite in the ast-correspondence matcher, v4.7.0.
   const text = 'const authorize = value => value;\nfunction contextual(record) { const { get: reader, set: writer, async: mode, from: origin } = record; return authorize({ get: reader, set: writer, async: mode, from: origin }); }';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const reader = await bindingOf(h, 0, text, 'reader');
@@ -216,7 +217,7 @@ test('contextual words as property names stay names while their bindings are bin
   });
 });
 
-test('literals carry the values JavaScript gives them', async () => {
+test('the syntax record of a literal has the value JavaScript gives it', async () => {
   const text = 'var n=[0x10,1_000,1e2,1e21,1e-7,1e999,-0],t=`a\\x41`,r=/ab+c/gi,o={1e2:1,0x10:2,[-0]:3,["k"]:4,[Sx]:5},s="\u{1F600}x";';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const [tree] = await h.facts(0, [{ q: 'node', handle: '0', depth: 12 }]);
@@ -237,7 +238,8 @@ test('positions are UTF-16 offsets, also after a character above U+FFFF', async 
   const text = 'var e="\u{1F600}";var after=1;';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const record = await bindingOf(h, 0, text, 'after');
-    // The emoji takes two UTF-16 units, so `after` starts at 15 although it is the 14th code point.
+    // The emoji takes two UTF-16 code units, so `after` starts at UTF-16 offset 15, although its code
+    // point offset is 14.
     assert.equal(record.declarations[0].name.s, 15);
     assert.equal(text.indexOf('after'), 15);
   });
@@ -262,7 +264,7 @@ test('a depth-limited syntax tree marks what it leaves out', async () => {
   });
 });
 
-test('canonical text keeps bindings apart and cannot collide with a source name', async () => {
+test('canonical text gives different bindings different names that cannot equal a source name', async () => {
   const text = 'function f(a){return a}function g(a){return $p0}function h(a){return function(b){return [a,b]}}' +
     'function k(x){return{x}}var m=1;function r(a){return m+a}';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -272,7 +274,7 @@ test('canonical text keeps bindings apart and cannot collide with a source name'
     assert.match(g.text, /return \$p0/);
     assert.match(nested.text, /return \[‹p0›, ‹p1›\]/);
     assert.match(shorthand.text, /x: ‹p0›/);
-    // r itself is a module binding too, first used in its own declaration: ‹m0›, then m is ‹m1›.
+    // r is also a module binding, and its first use is its own declaration, so r is ‹m0› and m is ‹m1›.
     assert.equal(withModule.text, 'function ‹m0›(‹p0›) { return ‹m1› + ‹p0›; }');
     const mId = (await bindingOf(h, 0, text, 'm')).id;
     const rId = (await bindingOf(h, 0, text, 'r')).id;
@@ -283,8 +285,9 @@ test('canonical text keeps bindings apart and cannot collide with a source name'
   });
 });
 
-test('canonical text keeps destructuring defaults and renames array elements without inventing keys', async () => {
-  // Assignment defaults must remain distinct, and an array element does not introduce an object key.
+test('canonical text keeps destructuring defaults and renames array elements without adding object keys', async () => {
+  // Patterns with different assignment defaults must give different texts, and an array element must not
+  // gain an object key.
   const text = 'function f(x,o){({x=1}=o);return x}function g(x,o){({x=2}=o);return x}' +
     'function a([x]){return x}function b([y]){return y}function c({x=3}){return x}';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -297,7 +300,7 @@ test('canonical text keeps destructuring defaults and renames array elements wit
   });
 });
 
-test('a canonical role must be an upper-case name, so it cannot spell a generated one', async () => {
+test('a canonical role must be an upper-case name, so that it cannot equal a generated name', async () => {
   const text = 'var source=1;function f(a){return a}function g(a){return source}';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const { id } = await bindingOf(h, 0, text, 'source');
@@ -308,7 +311,7 @@ test('a canonical role must be an upper-case name, so it cannot spell a generate
   });
 });
 
-test('a syntax record names every child field and keeps operators and declaration keywords', async () => {
+test('a syntax record puts every child under its field name and includes operators and keywords', async () => {
   const text = 'var a=!0,b=-0,c=+0,d=~0,e=void 0,f=x++,g=--x;let h=a?.b();const i=import.meta;' +
     'class K extends Object{}async function m(){for await(const x of y){}({x=1}=y)}';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -339,7 +342,7 @@ test('a syntax record names every child field and keeps operators and declaratio
   });
 });
 
-test('a declaration that assigns its name is a write: for-in/of heads, initialized patterns, functions', async () => {
+test('for-in/of heads are writes; initialized patterns and catch variables are initialized declarations', async () => {
   // A for-in/of head assigns its variable on every iteration.
   const cases = [
     ['var V=1;for(var V of[2]){}', ['write', 'for-target']],
@@ -365,20 +368,21 @@ test('a declaration that assigns its name is a write: for-in/of heads, initializ
   });
 });
 
-// Cases covered or refused by the binding model documented in facts.mjs.
+// Cases that the binding model in facts.mjs covers or refuses.
 
 async function refusedReasons(h, module, text, name, n = 0) {
   const record = await bindingOf(h, module, text, name, n);
   return (record.refused ?? []).map((r) => r.reason).join('; ');
 }
 
-test('declarations TypeScript keeps apart but JavaScript merges refuse both bindings, in either order', async () => {
+test('bindings that JavaScript merges and TypeScript keeps apart are refused, in either order', async () => {
   // JavaScript has one V in outer, which the function declaration and the var initializer both write;
   // TypeScript's binder gives each declaration a symbol and reports a duplicate at both names.
   for (const text of ['function outer(){var V=1;function V(){}return V}', 'function outer(){function V(){}var V=1;return V}',
     'function outer(){var {V}={V:1};function V(){}return V}']) {
     await withHelper([[0, '/a.js', text]], async (h) => {
-      // Every V that is a binding (not the key of {V:1}) belongs to a refused binding, and there are two.
+      // Every V that refers to a binding (the key of {V:1} does not) belongs to a refused binding, and
+      // there are two such bindings.
       const ids = new Set();
       const count = [...text.matchAll(/(?<![\w$])V(?![\w$])/g)].length;
       for (let n = 0; n < count; n += 1) {
@@ -414,7 +418,7 @@ test('declarations TypeScript keeps apart but JavaScript merges refuse both bind
   });
 });
 
-test('a catch variable and a var of its name in the catch block refuse both bindings', async () => {
+test('both bindings are refused when a var in a catch block has the name of the catch variable', async () => {
   // The var initializer assigns the catch variable, so x.push changes V.
   const text = 'const V=[1];function f(){try{throw []}catch(x){var x=V;x.push(2)}}f();';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -433,7 +437,8 @@ test('a named default export function or class is a binding under its local name
       const [occurrences] = await h.facts(0, [{ q: 'occurrences', id: record.id }]);
       const list = occurrences.refused ? [] : occurrences;
       if (text.includes('class')) {
-        // A written class name is refused: the class body would keep an inner binding to the class.
+        // A class name that is written is refused, because the class body has an inner binding that
+        // still refers to the class.
         assert.match(record.refused.map((r) => r.reason).join(), /class name is written/);
       } else {
         assert.deepEqual(list.map((o) => o.roles[0]), ['declaration', 'write', 'read']);
@@ -470,12 +475,13 @@ test('a parameter and a body var of its name are refused when the parameter list
   const text = 'function outer(V=1,g=()=>V){var V=2;return g()}function plain(W){var W=2;return W}';
   await withHelper([[0, '/a.js', text]], async (h) => {
     assert.match(await refusedReasons(h, 0, text, 'V'), /two bindings in JavaScript/);
-    // Without parameter expressions, the parameter and the var are one binding, as TypeScript has them.
+    // Without parameter expressions, the parameter and the var are one binding, and TypeScript also
+    // gives them one symbol.
     assert.equal(await refusedReasons(h, 0, text, 'W'), '');
   });
 });
 
-test('direct eval and with statements refuse the bindings in their scope; indirect eval does not', async () => {
+test('bindings in the scope of a direct eval or with statement are refused; indirect eval does not count', async () => {
   const cases = [
     ['let V=1;eval("V=2");', true],
     ['let V=1;(eval)("V=2");', true],
@@ -494,7 +500,7 @@ test('direct eval and with statements refuse the bindings in their scope; indire
   }
 });
 
-test('a written class declaration and a deleted name are refused', async () => {
+test('a class declaration whose name is written is refused, and a var that is only read is not', async () => {
   const text = 'class C{m(){return C}};C=null;var d=1;function g(){return d}';
   await withHelper([[0, '/a.js', text]], async (h) => {
     assert.match(await refusedReasons(h, 0, text, 'C'), /inner binding/);
@@ -511,7 +517,7 @@ test('an exported declaration is one binding whatever order the queries come in'
     for (const order of [['bindingAt', 'scope'], ['scope', 'bindingAt']]) {
       await withHelper([[0, '/a.js', text], [1, '/b.js', 'var q=1;']], async (h) => {
         const queries = order.map((q) => (q === 'scope' ? { q, name } : { q, ...at }));
-        // In one batch, in one program.
+        // Both queries in one batch, so both run in one program.
         const [first, second] = await h.facts(0, queries);
         assert.equal(first.id, second.id, text);
         const [occurrences, record] = await h.facts(0, [{ q: 'occurrences', id: first.id }, { q: 'record', id: first.id }]);
@@ -531,7 +537,7 @@ test('an exported declaration is one binding whatever order the queries come in'
   }
 });
 
-test('re-export names and export * as names are public names, not references', async () => {
+test('re-export names and export * as names are names, not references to bindings', async () => {
   // Re-exports name another module's exports; a namespace export does not introduce a local variable.
   const text = 'export{Set}from"/x.js";export{Map as M}from"/x.js";export*as Promise from"/x.js";';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -539,7 +545,7 @@ test('re-export names and export * as names are public names, not references', a
   });
 });
 
-test('canonical text keeps a module public names', async () => {
+test('canonical text keeps the import and export names of a module', async () => {
   // Import and export names remain distinct when local bindings are renamed.
   const sources = ['const a=1;export{a};', 'const b=1;export{b};', 'import{a}from"/x.js";a();', 'import{b}from"/x.js";b();',
     'export*as Set from"/x.js";', 'export var a=1;', 'export var b=1;'];
@@ -556,7 +562,7 @@ test('canonical text keeps a module public names', async () => {
   });
 });
 
-test('canonical text is refused where it would rename a refused binding or holds a direct eval', async () => {
+test('canonical text is refused for a node that refers to a refused binding or contains a direct eval', async () => {
   // In the second module the direct eval can also reach k, a binding of the module's scope, by name.
   const text = 'function f(){try{}catch(x){var x=1}return x}function k(a){return a}';
   const withEval = 'function g(s){return eval(s)}function k(a){return a}';
@@ -570,7 +576,7 @@ test('canonical text is refused where it would rename a refused binding or holds
   });
 });
 
-test('arguments read in a nested method name, class heritage or decorator belongs to the enclosing function', async () => {
+test('a nested computed name, extends clause or decorator reads the arguments of the enclosing function', async () => {
   // f(V) can change V through arguments[0] in a computed method name.
   const cases = [
     ['function f(x){const o={[arguments[0].push(2)](){}}}', true],
@@ -590,7 +596,7 @@ test('arguments read in a nested method name, class heritage or decorator belong
   }
 });
 
-test('a tagged template with an invalid escape has no cooked value and makes no needle hit', async () => {
+test('a tagged template with an invalid escape has an undefined cooked value and does not match a needle', async () => {
   const text = 'const x=tag`\\u{ZZ}`,y=`\\u{41}`;';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const { modules } = await h.ok('index', { needles: [{ key: 'raw', type: 'string', value: '\\u{ZZ}' }, { key: 'a', type: 'string', value: 'A' }], builtins: [] });
@@ -612,9 +618,11 @@ test('a module without imports or exports is parsed as a module', async () => {
   });
 });
 
-// The built-in scan (facts.mjs, "The built-in scan"), in the index pass and with the module's bindings.
+// The built-in scan (facts.mjs, "The built-in scan"), in the index pass and in the facts pass, which
+// uses the module's bindings.
 
-// A one-line summary of a scan result per category, for compact assertions.
+// Turns each entry of a scan result into a one-line string, grouped by category, so that the assertions
+// compare short strings.
 function scanSummary(premise) {
   const entries = (key, field = 'target') => (premise[key] ?? []).map((w) => `${w[field]} ${w.how ?? w.reason ?? w.kind ?? ''}`.trim());
   return {
@@ -634,7 +642,7 @@ async function scans(text) {
   });
 }
 
-test('the scan passes calls, constructions, reads, comparisons and tests, without recording a write', async () => {
+test('the scan counts calls, constructions, reads, comparisons and tests as passed, not as writes', async () => {
   const { index, facts } = await scans('Array.isArray(x);new Set([1]);Object.keys(o);typeof window;x instanceof Map;' +
     'Array.prototype.slice.call(x);if(Symbol.iterator in o);`${String}`;o[Symbol.iterator];class C extends Map{}');
   for (const result of [index, facts]) {
@@ -659,28 +667,29 @@ test('the scan records writes through assignments, patterns, prototype setters a
   ]);
 });
 
-test('global writes under other keys, registry symbols and unknown keys are told apart', async () => {
+test('global writes under other keys, under registry symbols and under unknown keys go to separate lists', async () => {
   const text = 'const ag=Symbol.for("x");function lj(e){globalThis[ag]=e}globalThis[Symbol.for("y")]=1;' +
     'globalThis.awslambda=1;globalThis.awslambda.InvokeStore=2;Object.assign(globalThis,{setTimeout:n});globalThis[k]=2;' +
     'let s=Symbol.for("q");s=Symbol.iterator;globalThis[s]=3;';
   const { index, facts } = await scans(text);
   assert.deepEqual(index.globalWrites, ['awslambda =', 'awslambda =', 'setTimeout Object.assign']);
   assert.deepEqual(index.registryWrites, ['globalThis.@registry =']);
-  // The index pass cannot see what ag holds; the facts pass proves it a Symbol.for result, never written.
+  // The index pass cannot tell what ag holds. The facts pass proves that ag holds a Symbol.for result
+  // and is never written.
   assert.equal(index.unknownKeys.length, 3);
   assert.deepEqual(facts.registryWrites, ['globalThis.@registry =', 'globalThis.@registry =']);
   // s is written after its Symbol.for initializer, so its key stays unknown.
   assert.deepEqual(facts.unknownKeys, ['globalThis.* =', 'globalThis.* =']);
 });
 
-test('a Symbol.for key counts only from the free, unshadowed Symbol', async () => {
+test('a key counts as a Symbol.for result only when Symbol is the free global name', async () => {
   const { facts } = await scans('function f(Symbol){globalThis[Symbol.for("z")]=1;Array.prototype[Symbol.iterator]=1}');
   assert.deepEqual(facts.registryWrites, []);
   assert.deepEqual(facts.unknownKeys, ['globalThis.* =']);
   assert.deepEqual(facts.writes, ['Array.prototype.* =']);
 });
 
-test('dynamic code: direct eval in parentheses, indirect eval, the Function constructor in every form', async () => {
+test('direct eval, also parenthesized, indirect eval and any form of the Function constructor are dynamic', async () => {
   const { index, facts } = await scans('let V=1;eval("1");(eval)("V=2");(0,eval)("V=3");eval?.("1");globalThis.eval("2");' +
     'eval.call(null,"3");Function("return this")();(Function)("x")();new Function("");Function.apply(null,l);' +
     'Reflect.construct(Function,[]);(async()=>{}).constructor("x");new (class extends Function{})("x");' +
@@ -693,7 +702,7 @@ test('dynamic code: direct eval in parentheses, indirect eval, the Function cons
   assert.deepEqual(facts.dynamic, expected);
 });
 
-test('a built-in value that escapes is unfollowed, and a prototype reached from an unknown object is counted', async () => {
+test('escaping built-ins are unfollowed, and writes into prototypes of unknown objects are prototypeWrites', async () => {
   const { index, raw } = await scans('f(Array);x.map(String);var o={t:Object};return1(Set);[Map];' +
     'o.constructor.prototype.x=1;Object.getPrototypeOf(o).y=2;q(o.constructor);');
   assert.deepEqual(index.unfollowed, ['Array: passed to a function', 'String: passed to a function',
@@ -713,13 +722,13 @@ test('the facts pass follows variables, also into a definer call and out through
   assert.deepEqual(facts.exports, ['T=Set', 'P=Promise']);
 });
 
-test('a variable the binding model refuses is unfollowed rather than followed', async () => {
+test('a value stored in a variable that the binding model refuses is unfollowed', async () => {
   const { facts } = await scans('function f(){try{}catch(x){var x=Set.prototype;x.has=1}}');
   assert.equal(facts.writes.length, 0);
   assert.match(facts.unfollowed.join(), /binding model refuses/);
 });
 
-test('a name the module declares is resolved by the facts pass, and public names are not occurrences', async () => {
+test('the facts pass resolves a declared built-in name, and re-exported names are not occurrences', async () => {
   const { index, facts } = await scans('function f(Set){Set.prototype.x=1}Set.prototype.y=2;' +
     'export{Map}from"/x.js";export*as Promise from"/x.js";');
   assert.deepEqual(index.writes, []);
@@ -758,18 +767,18 @@ test('a mutating method of Array.prototype writes its this value through call, a
   for (const result of [index, facts]) {
     assert.deepEqual(result.writes, ['Array.prototype.* push through call', 'Set.prototype.* splice through apply',
       'Map.prototype.* push through Reflect.apply', 'Array.prototype.* pop through bind']);
-    // The receivers are recorded as written, not as passed on. A method passed on may run on any receiver
-    // later, where it writes only index members and the length, which are not dependency slots.
+    // The receivers are recorded as written. A method that is passed on may later run on any receiver,
+    // but there it writes only index members and length, and the tables and key proofs do not use those.
     assert.deepEqual(result.unfollowed, ['Array.prototype.fill: passed to a function']);
   }
   assert.deepEqual(raw.unfollowed.map((u) => u.limit), [undefined]);
 });
 
-test('|| and ?? pass on the right operand only when the left one can decide otherwise', async () => {
+test('the right operand of || and ?? does not count when the left one is a built-in named directly', async () => {
   const { index, facts } = await scans('var a=Set||Map;a.prototype.x=1;var b=Set??Map;b.y=1;var c=maybe||WeakMap;c.z=1;' +
     'f(Promise||Proxy);g(maybe??Symbol);');
-  // The facts pass follows the variables: Map, after Set|| and after Set??, never runs; after maybe||,
-  // WeakMap may. The index pass does not follow variables.
+  // The facts pass follows the variables. Map, after Set|| and after Set??, is never evaluated, while
+  // WeakMap, after maybe||, may be. The index pass does not follow variables.
   assert.deepEqual([index.writes, facts.writes], [[], ['Set.prototype.x =', 'Set.y =', 'WeakMap.z =']]);
   for (const result of [index, facts]) {
     assert.ok(result.unfollowed.includes('Promise: passed to a function'));
@@ -779,8 +788,8 @@ test('|| and ?? pass on the right operand only when the left one can decide othe
 });
 
 test('a variable on the left of || or ?? may be undefined, so the right operand still counts', async () => {
-  // pfg-advisor's inputs: in each, Node with c false writes Map.prototype.has. The abstract values have
-  // no element for undefined or null, so only a built-in named directly decides the result.
+  // Run in Node with c false, each input writes Map.prototype.has. The values abstract computes do not
+  // include undefined or null, so only a built-in named directly decides the result.
   for (const text of ['var w;if(c)w=Set;var v=w||Map;v.prototype.has=f;', 'var w=Set;if(c)w=void 0;var v=w||Map;v.prototype.has=f;',
     'var w=c?Set:void 0;var v=w||Map;v.prototype.has=f;', 'var w=c?Set:null;var v=w??Map;v.prototype.has=f;',
     'let w;if(c)w=Set;var v=w??Map;v.prototype.has=f;']) {
@@ -795,7 +804,7 @@ test('Reflect.apply with a first argument that may also be another function pass
   assert.ok(facts.unfollowed.includes('Array.prototype: passed to a function'));
 });
 
-test('template tags receive their template object and unchanged substitution arguments', async () => {
+test('a template tag receives the template object and then each substitution unchanged as its arguments', async () => {
   // call takes the implicit template object as its this argument, leaving
   // Set.prototype, "has" and the descriptor as Object.defineProperty's three arguments.
   const { index, facts } = await scans('Object.defineProperty.call`${Set.prototype}${"has"}${{value:function(){this.add("b");return true}}}`;' +
@@ -808,9 +817,9 @@ test('template tags receive their template object and unchanged substitution arg
   }
 });
 
-test('a built-in called as a template tag gets its arguments: String.raw, as Claude Code builds regular expressions with it', async () => {
-  // String.raw is a built-in value the scan follows; calling it as a tag used to stop the index pass
-  // with "call.arguments is not iterable", since a tagged template has no arguments list.
+test('String.raw called as a template tag, which Claude Code uses for regular expressions, counts as passed', async () => {
+  // String.raw is a built-in value the scan follows. A tagged template does not have an arguments list,
+  // so reading call.arguments of it would stop the index pass with "call.arguments is not iterable".
   const { index, facts } = await scans('var r=String.raw`a${1}b`,s=String.raw`c`;');
   for (const result of [index, facts]) {
     assert.deepEqual([result.writes, result.unfollowed, result.dynamic], [[], [], []]);
@@ -818,7 +827,7 @@ test('a built-in called as a template tag gets its arguments: String.raw, as Cla
   }
 });
 
-test('the facts pass repeats until no variable gains a value, so a later value reaches earlier uses', async () => {
+test('the facts pass repeats until variables stop gaining values, so a late value reaches earlier uses', async () => {
   // q's value comes from p's, which the first pass has not found yet when it classifies q's uses.
   const { facts } = await scans('var p=Set.prototype;var q=Object.getPrototypeOf(p);Object.defineProperty(q,"has",{value:f});' +
     'var r=Object.getPrototypeOf(q);var s=Object.getPrototypeOf(Map.prototype);s.get=g;');
@@ -827,11 +836,11 @@ test('the facts pass repeats until no variable gains a value, so a later value r
   assert.deepEqual(facts.unfollowed, []);
 });
 
-test('a variable holds every value assigned to it; a self-derived value stops at the bounds', { timeout: 20000 }, async () => {
+test('a variable holds every value assigned to it, and t = t.prototype stops at the bounds', { timeout: 20000 }, async () => {
   await withHelper([[0, '/a.js', 'var t=Set;t=t.prototype;t.has=f;']], async (h) => {
     const [scan] = await h.facts(0, [{ q: 'premise' }]);
     const writes = scan.writes.map((entry) => entry.target);
-    // Without the order of statements, t may be Set, Set.prototype and each value derived from them again.
+    // The scan ignores statement order: t may be Set, Set.prototype, Set.prototype.prototype and so on.
     assert.ok(writes.includes('Set.prototype.has') && writes.includes('Set.has'));
     assert.ok(writes.every((target) => /^Set(\.prototype)*\.has$/.test(target)));
     assert.ok(scan.references.filter((entry) => entry.status === 'followed').length >= 2);
@@ -846,7 +855,7 @@ test('a variable holds every value assigned to it; a self-derived value stops at
   });
 });
 
-test('a variable with an unidentified source keeps its known values and is unclassified', async () => {
+test('a variable with a source the scan cannot identify keeps its known values and is unclassified', async () => {
   const text = 'var t=Set;t=t.prototype;t.has=f;var u=flag?Map:other();u.prototype.get=g;' +
     'function h(w){w=WeakMap;w.prototype.set=g}var v=[];v=Promise;v.x=1;';
   await withHelper([[0, '/a.js', text]], async (h) => {
@@ -860,14 +869,14 @@ test('a variable with an unidentified source keeps its known values and is uncla
   });
 });
 
-test('&& passes on its left operand only when that operand can be false', async () => {
+test('a && b can evaluate to a only when a can be falsy', async () => {
   const { facts } = await scans('var m=Symbol.iterator,t=o;t=m&&t[m]||t["@@iterator"];var x=Set&&Set.prototype;x.has=f;' +
     'var y=Array.prototype.length&&z;');
   assert.deepEqual(facts.references, ['m=Symbol.iterator', 'x=Set.prototype', 'y=Array.prototype.length']);
   assert.deepEqual(facts.writes, ['Set.prototype.has =']);
 });
 
-test('instances: literals, new X() and the iterators of built-in methods name their prototypes', async () => {
+test('the scan knows the prototypes of literals, of new X() and of iterators from built-in methods', async () => {
   const { index, facts } = await scans('Object.getPrototypeOf(new Set).has=f;new Map().__proto__.get=f;' +
     '(new WeakMap).constructor.prototype.set=f;Object.defineProperty(Object.getPrototypeOf(new Set),"add",{value:f});' +
     'Object.getPrototypeOf([].values()).next=f;[][Symbol.iterator]().__proto__.next=f;' +
@@ -882,7 +891,7 @@ test('instances: literals, new X() and the iterators of built-in methods name th
   assert.deepEqual(facts.prototypeWrites, []);
 });
 
-test('a write through an instance the scan does not see created stays a prototype write under the instances limit', async () => {
+test('a write through an object the scan cannot identify is a prototype write under the instances limit', async () => {
   await withHelper([[0, '/a.js', 'function f(e){let r=Object.getPrototypeOf(e);Object.defineProperty(r,"toString",{get(){}})}' +
     'var s=new Set();Object.getPrototypeOf(s).has=g;']], async (h) => {
     const [scan] = await h.facts(0, [{ q: 'premise' }]);
@@ -892,7 +901,7 @@ test('a write through an instance the scan does not see created stays a prototyp
   });
 });
 
-test('definers called through chains, bound or handed to other functions are listed under the definer-calls limit', async () => {
+test('definers called through chains, bound or passed to other functions are listed under the definer-calls limit', async () => {
   const text = 'Reflect.apply(Object.defineProperty,null,[Set.prototype,"has",{value:f}]);' +
     'Function.prototype.call.call(Object.defineProperty,null,Map.prototype,"get",{value:f});' +
     'var d=Object.defineProperty.bind(Object);d(globalThis,Symbol.for("k"),{value:1});' +
@@ -905,7 +914,7 @@ test('definers called through chains, bound or handed to other functions are lis
   });
 });
 
-test('with: a built-in name inside it is followed as the built-in and noted, and an object of one is listed', async () => {
+test('a built-in name inside a with statement is followed and noted, and a built-in as its object is listed', async () => {
   for (const text of ['with(o){Set.prototype.has=f}', 'with(o){Set.prototype.has=f}var z=Map;']) {
     const { index, facts } = await scans(text);
     for (const result of [index, facts]) {
@@ -923,7 +932,7 @@ test('with: a built-in name inside it is followed as the built-in and noted, and
   });
 });
 
-test('a key from Object.entries of a static object has its finite names and operation dependencies', async () => {
+test('a loop key over Object.entries of a literal is one of its keys, and its proof lists the operations', async () => {
   const text = 'for(let[n,r]of Object.entries({h:f,Fragment:g}))Object.defineProperty(globalThis,n,{value:r});';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const [scan] = await h.facts(0, [{ q: 'premise' }]);
@@ -937,7 +946,7 @@ test('a key from Object.entries of a static object has its finite names and oper
   });
 });
 
-test('finite keys are refused when the loop binding or iterable is outside the key model', async () => {
+test('a loop key is unknown for a written or defaulted variable, shadowed Object, spread or computed key', async () => {
   const cases = [
     'for(let[n,r]of Object.entries({h:f})){n=getKey();Object.defineProperty(globalThis,n,{value:r})}',
     'function f(Object){for(let[n,r]of Object.entries({h:g}))globalThis[n]=r}',
@@ -953,7 +962,7 @@ test('finite keys are refused when the loop binding or iterable is outside the k
   }
 });
 
-test('constructor and prototype reads are identified only where their object type is established', async () => {
+test('a constructor or __proto__ read is identified only when the scan knows the type of its object', async () => {
   const { facts } = await scans('({constructor:Set}).constructor.prototype.has=f;' +
     '({__proto__:Map}).__proto__.prototype.get=f;' +
     'Math.PI.constructor.prototype.x=1;Object.getPrototypeOf(Math.PI).y=1;' +
@@ -980,11 +989,12 @@ test('a definer writes every built-in target of a conditional or a variable with
   assert.deepEqual(facts.unfollowed, []);
 });
 
-test('an alias with other unmodelled values cannot hide an argument escape as a certain definer call', async () => {
+test('a call of a variable that may be a definer or another function records the write and the escape', async () => {
   const text = 'var q=custom;q=Object.defineProperty;q(Set.prototype,"unrelated",{});';
   const { facts } = await scans(text);
   assert.ok(facts.writes.includes('Set.prototype.unrelated Object.defineProperty'));
-  // The definer is still followed through q, so q's record says it is unclassified, and it is not an escape.
+  // The scan still follows Object.defineProperty through q, so q's record is unclassified and the
+  // definer is not listed as unfollowed.
   assert.deepEqual(facts.unfollowed, ['Set.prototype: passed to a function']);
   await withHelper([[0, '/a.js', text]], async (h) => {
     const [scan] = await h.facts(0, [{ q: 'premise' }]);
@@ -993,7 +1003,7 @@ test('an alias with other unmodelled values cannot hide an argument escape as a 
   });
 });
 
-test('a parse diagnostic refuses binding facts even for a declaration that parsed separately', async () => {
+test('every binding of a module with a parse diagnostic is refused, even one whose declaration parses', async () => {
   const text = 'var V=[1];broken(';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const record = await bindingOf(h, 0, text, 'V');
@@ -1015,9 +1025,8 @@ async function usesOf(text, name, model, n = 0) {
 
 const reasonsOf = (result) => result.refused.map((r) => r.reason).join('; ');
 
-test('the counterexamples to a list of method names are refused at the operation that runs code', async () => {
-  // pfg-advisor's constancy counterexamples: each mutates V in Node through a use that a list of
-  // method or function names would accept.
+test('a use that a list of method names would accept is refused at the operation that runs code', async () => {
+  // Each case changes V in Node through a use that a list of method or function names would accept.
   const cases = [
     ['const V=[1];V.forEach((...args)=>args[2].push(2));', 'array', /rest parameter of the callback/],
     ['const V=[1];Array.from(V,function(x){this.pop();return x},V);', 'array', /Array\.from only with the value as its only argument/],
@@ -1036,7 +1045,7 @@ test('the counterexamples to a list of method names are refused at the operation
   }
 });
 
-test('reads, read methods with safe callbacks, iteration, aliases and parameters are accepted', async () => {
+test('reads, iteration, aliases, parameters and read methods whose callback does not get V are accepted', async () => {
   const text = 'const V=new Set(["a"]);const W=V;function has(n){return V.has(n)||W.has(n)}' +
     'const A=["x"];function some(e,n){return n.some((r)=>e.startsWith(r))}some("x",A);const C=[...A];for(const a of A);' +
     'if(A.length&&typeof A==="object"&&A!==null)A.includes("x");Object.keys(A);Array.isArray(A);String(A);`${A}`;';
@@ -1072,7 +1081,7 @@ test('stores, writes, other methods and unknown callees are refused with their r
   }
 });
 
-test('an object with accessors refuses reads that would call them', async () => {
+test('reads that would call an accessor of an object are refused', async () => {
   const model = { kind: 'object', keys: ['a', 'b'], accessors: ['b'] };
   assert.deepEqual((await usesOf('const V={a:1,get b(){return 2}};V.a;Object.keys(V);', 'V', model)).refused, []);
   for (const text of ['const V={a:1,get b(){return 2}};V.b;', 'const V={a:1,get b(){return 2}};V[k];',
@@ -1087,7 +1096,7 @@ test('exports are reported under every name, also through an exported alias', as
   assert.deepEqual(result.exports.map((e) => e.name).sort(), ['T', 'V', 'W', 'default']);
 });
 
-test('a namespace is followed through member reads and static destructuring only', async () => {
+test('a namespace is followed only through member reads and destructuring with literal keys', async () => {
   const text = 'import*as ns from"/m.js";ns.V.includes(1);ns.other();const{V:a}=ns;a.at(0);';
   await withHelper([[0, '/a.js', text]], async (h) => {
     const { id } = await bindingOf(h, 0, text, 'ns');
@@ -1107,8 +1116,8 @@ test('a namespace is followed through member reads and static destructuring only
 });
 
 test('the promise of import() is followed through await, then and Promise.all', async () => {
-  // The 2.1.304 forms of the dynamic importers of the module that re-exports the blocked Set, and the
-  // counterexample that hides the whole namespace in a default parameter.
+  // The cases include the forms in which the dynamic importers of 2.1.304 load the module that
+  // re-exports the blocked Set, and one that hides the whole namespace in a default parameter.
   const cases = [
     ['let{V:a,f}=await import("/m.js");a.includes(1);', []],
     ['let[{f:e},x]=await Promise.all([import("/m.js"),g()]);', []],
@@ -1162,16 +1171,16 @@ test('a call of an imported function is listed, and a parameter query classifies
     assert.equal(missing.error.kind, 'request');
     assert.match(missing.error.message, /a parameter use needs position/);
   });
-  // At the call, an import four calls from the value is refused there.
+  // A call of an import that is four calls away from the value is refused at that call.
   const text = 'import{fo}from"/m.js";function a(x){b(x)}function b(y){c(y)}function c(z){d(z)}function d(w){fo(w)}const V=[1];a(V);fo(V);';
   const result = await usesOf(text, 'V', { kind: 'array' });
   assert.deepEqual(result.calls.map((c) => c.depth), [0]);
   assert.match(reasonsOf(result), /more than four calls deep/);
 });
 
-test('a binding the value reaches on several routes is classified at the depth of the route with the fewest calls', async () => {
+test('a binding reached through several call chains is classified at the depth of the shortest one', async () => {
   // In source order, V reaches q first through f (two calls) and then through the alias W (one call).
-  // Classified at two calls, j(s) would be a fifth call; at one call, it is the fourth.
+  // If q is classified at two calls, j(s) is the fifth call; at one call, it is the fourth.
   const text = 'function g(q){h(q)}function h(r){i(r)}function i(s){j(s)}function j(t){t.includes(1)}' +
     'function f(p){g(p)}const V=[1];f(V);const W=V;g(W);';
   const result = await usesOf(text, 'V', { kind: 'array' });
