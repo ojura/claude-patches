@@ -12,14 +12,13 @@ They differ after a character above U+FFFF. Every position in this module's API 
 Module.to_codepoints converts one where Python text is involved. An offset that falls between the two
 halves of a surrogate pair is refused.
 
-Handles. The helper names a node by its handle, the indices of the children on the path from its module's
-root, each counting the children in the order ts.forEachChild visits them, joined with dots ("" is the
-module itself; facts.mjs, nodeAt). A handle names a node only together with its module's index: the same
-handle names a node in every module that has one at that path, so handles of different modules are never
-comparable. A handle is the same in every parse of the same text. A binding id is its module's index and
-the offset of its declaration's name ("m199@57" is the binding whose name starts at offset 57 of module
-199), so two ids are equal only when they name the same binding of the same module. A key of bindings
-across modules is the id alone, and a key of nodes is (module index, handle).
+Handles. A handle names a node in one module. It is the list of child indices on the path from the
+module's root to the node, in ts.forEachChild order, joined with dots; "" is the module itself (facts.mjs,
+nodeAt). The same handle string exists in every module, so a handle means nothing without its module
+index: store and compare nodes as (module index, handle). A node's handle does not change between parses
+of the same text. A binding id is different. It is the module index and the UTF-16 offset of the
+declaration's name ("m199@57" is the binding whose name starts at offset 57 of module 199), so ids from
+different modules are never equal, and a binding id is a key on its own.
 
 Failures:
   BackendError  bun_handler cannot read the binary, or the helper or its protocol failed: node missing,
@@ -525,8 +524,8 @@ class Bundle:
 
     def hits(self, key):
         """The index pass's hits of a needle: (module index, hit) pairs, hit being the helper's record of
-        the node (handle h, which names the node only with the module index, kind k, start s, end e,
-        chain). Modules with parse diagnostics give none."""
+        the node (handle h, to be used with the module index, kind k, start s, end e, chain). Modules
+        with parse diagnostics give none."""
         if key not in self.needles:
             raise BackendError(f"needle {key!r} was not registered for the index pass")
         return [(index, hit) for index in sorted(self.records) if not self.records[index]["diagnostics"]
@@ -547,10 +546,10 @@ class Bundle:
         return self._helper.request("facts", module=index, queries=list(queries))
 
     def syntax(self, index, handle, depth=64):
-        """The syntax tree of the node at handle in module index, depth levels of children deep; a node
-        below that depth comes as a record with truncated set, whose own handle asks for it. The handle
-        names the node only with the module index (see Handles above). A handle that names no node of
-        the module raises BackendError, since the helper refuses the request."""
+        """The syntax tree of the node at handle in module index, down to depth levels of children. Deeper
+        nodes are replaced by records with truncated set; ask for one with its own handle. The handle
+        belongs to the module (see Handles above). A handle that does not name a node of the module
+        raises BackendError."""
         return self.facts(index, [{"q": "node", "handle": handle, "depth": depth}])[0]
 
     def binding_at(self, index, start, end):
