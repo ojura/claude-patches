@@ -12,6 +12,15 @@ They differ after a character above U+FFFF. Every position in this module's API 
 Module.to_codepoints converts one where Python text is involved. An offset that falls between the two
 halves of a surrogate pair is refused.
 
+Handles. The helper names a node by its handle, the indices of the children on the path from its module's
+root, each counting the children in the order ts.forEachChild visits them, joined with dots ("" is the
+module itself; facts.mjs, nodeAt). A handle names a node only together with its module's index: the same
+handle names a node in every module that has one at that path, so handles of different modules are never
+comparable. A handle is the same in every parse of the same text. A binding id is its module's index and
+the offset of its declaration's name ("m199@57" is the binding whose name starts at offset 57 of module
+199), so two ids are equal only when they name the same binding of the same module. A key of bindings
+across modules is the id alone, and a key of nodes is (module index, handle).
+
 Failures:
   BackendError  bun_handler cannot read the binary, or the helper or its protocol failed: node missing,
                 a crash, a malformed or mismatched reply, or a request the helper refused as malformed.
@@ -118,7 +127,7 @@ BUILTIN_SCAN_LIMITS = {
         "(`Object.defineProperty.bind(Object)`) and defines a member of globalThis under a Symbol.for key with it. "
         "A mutating method of Array.prototype is modelled directly and through one call, apply, bind or "
         "Reflect.apply; called from anywhere else, it writes only index members and the length of its this "
-        "value, none of which is a dependency slot, so it carries no limit."),
+        "value, none of which is a dependency slot, so the scan does not record a limit for it."),
     "with": (
         "A built-in's name inside a with statement, which may name a member of the with's object instead. Both "
         "passes follow it as the built-in and list the place. An ES module cannot contain a with statement, "
@@ -516,7 +525,8 @@ class Bundle:
 
     def hits(self, key):
         """The index pass's hits of a needle: (module index, hit) pairs, hit being the helper's record of
-        the node (handle h, kind k, start s, end e, chain). Modules with parse diagnostics give none."""
+        the node (handle h, which names the node only with the module index, kind k, start s, end e,
+        chain). Modules with parse diagnostics give none."""
         if key not in self.needles:
             raise BackendError(f"needle {key!r} was not registered for the index pass")
         return [(index, hit) for index in sorted(self.records) if not self.records[index]["diagnostics"]
@@ -537,6 +547,10 @@ class Bundle:
         return self._helper.request("facts", module=index, queries=list(queries))
 
     def syntax(self, index, handle, depth=64):
+        """The syntax tree of the node at handle in module index, depth levels of children deep; a node
+        below that depth comes as a record with truncated set, whose own handle asks for it. The handle
+        names the node only with the module index (see Handles above). A handle that names no node of
+        the module raises BackendError, since the helper refuses the request."""
         return self.facts(index, [{"q": "node", "handle": handle, "depth": depth}])[0]
 
     def binding_at(self, index, start, end):
@@ -828,7 +842,7 @@ class Bundle:
                           what the index pass found in them, without their bindings;
           limits          {limit: {form, entries}} for each form in BUILTIN_SCAN_LIMITS, entries counting the
                           summary's entries labelled with it, by category.
-        An entry that comes from a stated limit carries that limit's key as limit."""
+        An entry that comes from a stated limit has that limit's key in its limit field."""
         lists = collections.defaultdict(list)
         passed = collections.Counter()
         unidentified = 0

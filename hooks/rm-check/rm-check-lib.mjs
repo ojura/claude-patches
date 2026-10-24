@@ -11,9 +11,10 @@ import { join } from "node:path";
 // requests and exits when its idle time runs out.
 export const LAYOUT = 4;
 
-// The result carries a dangerousRemoval safety check somewhere in its decision
-// reason (compound commands nest them under subcommandResults). Returns the
-// message of the innermost result that carries it.
+// The first result whose decisionReason is a safetyCheck with circuitBreaker
+// dangerousRemoval, or with dangerousRemoval in its also list, searching the
+// subcommandResults of compound commands first: its message, or the check's
+// reason when it has none. undefined otherwise.
 export function dangerousRemovalMessage(result) {
   const isDanger = (r) => r?.type === "safetyCheck" &&
     (r.circuitBreaker === "dangerousRemoval" || (r.also ?? []).includes("dangerousRemoval"));

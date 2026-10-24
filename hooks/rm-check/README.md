@@ -95,9 +95,11 @@ waits for it, and when no server can be started it imports the chunks itself
 time, because each check sets the session's original working directory, which
 the bundle keeps in process-wide state. It exits after `RMCHECK_IDLE_SECONDS`
 (default 600) without a request, removing its socket. The hook denies when the
-result carries the `dangerousRemoval` safety check. A new version with the same
-structure needs no edit. If the vendor changes it, `prepare.py` fails naming
-the anchors, or the self-test fails naming what each candidate did.
+result's decisionReason, or that of one of its subcommands, is a safetyCheck
+whose circuitBreaker is `dangerousRemoval` or whose `also` list holds it. A
+new version with the same structure needs no edit. If the vendor changes it,
+`prepare.py` fails naming the anchors, or the self-test fails naming what each
+candidate did.
 
 The check's verdict depends on two directories. The working directory is where
 it resolves relative targets and the directory that an `rm` must not remove,

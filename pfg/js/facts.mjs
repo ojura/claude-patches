@@ -351,8 +351,8 @@ const BINARY_ASSIGNMENTS = new Set([
 // A variable with a source outside the model (Facts.hasUnknownOrigins) may also hold a value the scan
 // does not identify; its known values are still followed.
 //
-// The forms the scan does not identify are stated limits; an entry that comes from one carries its name
-// as limit, and pfg/bundle.py states them (BUILTIN_SCAN_LIMITS):
+// The forms the scan does not identify are stated limits; an entry that comes from one has the limit's
+// name in its limit field, and pfg/bundle.py states them (BUILTIN_SCAN_LIMITS):
 //   instances      a write through an object whose prototype the scan does not name, such as an object a
 //                  parameter or a variable holds;
 //   definer-calls  a definer bound, passed or stored where the scan does not follow it, which may be called
@@ -1140,7 +1140,7 @@ class BuiltinScan {
     // A definer that goes where the scan does not follow may be called from there: through call,
     // apply, Reflect.apply or bind, or by a higher-order built-in. A mutating method of Array.prototype
     // called from there writes only index members and the length of its this value, none of which is a
-    // dependency slot, so it carries no limit.
+    // dependency slot, so the scan does not record a limit for it.
     const definer = STATIC_DEFINERS.has(valueName(value)) || RECEIVER_DEFINERS.has(value.path.at(-1));
     const stated = limit ?? (definer ? 'definer-calls' : undefined);
     this.result.unfollowed.push({ ...this.where(node), value: valueName(value), reason, ...(stated ? { limit: stated } : {}) });
@@ -1445,7 +1445,7 @@ function programFor(module) {
 //
 // The facts about a binding (its record, its occurrences, and the names canonical text gives it) are
 // given only for a binding whose every declaration and every reference has a form listed here. Every
-// other binding is refused: its record carries `refused`, a list of {s, e, reason}, and the queries that
+// other binding is refused: its record has a `refused` list of {s, e, reason}, and the queries that
 // would give its occurrences or rename it give that list instead. TypeScript's binder supplies the
 // symbols, and this model accepts a symbol as one JavaScript binding, with exactly the references
 // TypeScript resolves to it, only where the two agree.
@@ -2998,7 +2998,7 @@ class Facts {
     else if (ts.isHeritageClause(node)) result.token = ts.tokenToString(node.token);
     else if (ts.isExportAssignment(node)) result.exportEquals = Boolean(node.isExportEquals);
     // A call, member access or non-null assertion inside an optional chain: a?.b() short-circuits the
-    // call although only the access carries the ?. token.
+    // call although only the access has the ?. token.
     if (node.flags & ts.NodeFlags.OptionalChain) result.optionalChain = true;
     if (ts.isComputedPropertyName(node) || ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node) ||
         ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) {
