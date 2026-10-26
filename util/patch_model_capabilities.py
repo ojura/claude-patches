@@ -12,7 +12,7 @@ Usage::
     util/patch_model_capabilities.py <input-binary> [-o <output>]
 
 Output defaults to ``<input>.model-capabilities``. Targets the Bun ``.bun``-
-section ELF form via ``util/bun_handler`` (Linux x64).
+section ELF form via ``bun-handler/bun_handler.py`` (Linux x64).
 """
 import os
 import re
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun-handler"))
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
 
 

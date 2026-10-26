@@ -7,7 +7,7 @@ Usage: prepare.py <claude-executable> <version> <modules directory>
 The hook passes the modules directory as the third argument:
 ~/.cache/rm-check/<version>/modules-v<N> (under $XDG_CACHE_HOME when it is set),
 where N is LAYOUT in rm-check-lib.mjs.
-prepare.py extracts the bundle with bun_handler/bun_handler.py to claude.js
+prepare.py extracts the bundle with bun-handler/bun_handler.py to claude.js
 next to that directory, unless that file already exists. It finds three things
 in the bundle with pfg.bundle, writes the bundle's modules into the directory,
 and appends an export statement to each module that declares one of the names
@@ -52,7 +52,7 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.join(REPO, "bun_handler"))
+sys.path.insert(0, os.path.join(REPO, "bun-handler"))
 
 import bun_handler  # noqa: E402
 from pfg import bundle as pb  # noqa: E402

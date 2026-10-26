@@ -52,7 +52,7 @@ import weakref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(HERE, "js", "facts.mjs")
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun-handler"))
 import bun_handler  # noqa: E402
 
 with open(os.path.join(HERE, "REVISION"), encoding="ascii") as _file:

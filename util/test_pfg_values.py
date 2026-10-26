@@ -32,7 +32,7 @@ import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)  # for `pfg`
-sys.path.insert(0, os.path.join(REPO, "bun_handler"))
+sys.path.insert(0, os.path.join(REPO, "bun-handler"))
 from pfg import bundle as pb  # noqa: E402
 from pfg import values as pv  # noqa: E402
 import test_bun_handler as tb  # noqa: E402  (its synthetic ELF builders)

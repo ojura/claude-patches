@@ -82,7 +82,7 @@ claude-patches/
 One-time setup (~30 seconds):
 
 ```sh
-git clone https://github.com/ojura/claude-patches ~/claude-patches
+git clone --recurse-submodules https://github.com/ojura/claude-patches ~/claude-patches
 mkdir -p ~/.claude/skills
 ln -s ~/claude-patches/skill ~/.claude/skills/patch-claude
 ```
@@ -91,8 +91,9 @@ Then in any Claude Code session: `/patch-claude`. One slash-command
 applies the patches, end to end. The skill:
 
 - **Self-updates** on each invocation (fast-forwards your local clone
-  from `origin/main`; aborts cleanly if you have uncommitted local
-  changes or non-FF state, instead of silently merging).
+  from `origin/main` and checks out the `bun-handler/` submodule commit
+  it records; aborts cleanly if you have uncommitted local changes or
+  non-FF state, instead of silently merging).
 - **Auto-detects which extension install to patch**: when invoked
   from inside an IDE-hosted Claude Code session, `CLAUDE_CODE_EXECPATH`
   points directly at the running install (works regardless of which
@@ -111,6 +112,15 @@ and you're done.
 The symlink layout means `git pull` in `~/claude-patches` updates the
 skill in-place. Multi-machine: clone the repo on each box and symlink
 identically. The self-update step keeps them all in sync.
+
+`bun-handler/` is a git submodule of
+[ojura/bun-handler](https://github.com/ojura/bun-handler), which reads
+and repacks Claude Code's native executables. `pfg`, the rm-check hook
+and the scripts in `util/` that patch a native executable import it.
+In a clone made without `--recurse-submodules`, run
+`git submodule update --init` to check it out.
+`git pull --recurse-submodules` updates it together with the rest of
+the repo.
 
 ### Manual application (no Claude Code installed)
 

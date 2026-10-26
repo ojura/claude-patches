@@ -42,7 +42,7 @@ stays readable while the process runs.
 The first time the hook sees a version, `prepare.py`:
 
 1. extracts the bundle to `~/.cache/rm-check/<version>/claude.js` (under
-   `$XDG_CACHE_HOME` when it is set) with `bun_handler/bun_handler.py`, unless
+   `$XDG_CACHE_HOME` when it is set) with `bun-handler/bun_handler.py`, unless
    that file exists;
 2. finds three things with `pfg.bundle`, which parses the modules with the
    TypeScript parser and answers questions about their syntax and bindings:

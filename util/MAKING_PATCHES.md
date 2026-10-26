@@ -16,11 +16,11 @@ These layers are complementary, not interchangeable. A standalone `patch_*.py` f
 
 ### Path and purpose
 
-`bun_handler/bun_handler.py` is the stdlib-only handler for Claude Code's Bun-compiled native executables (Linux x64 ELF and Windows x64 PE). `bun_handler/README.md` lists the layouts it accepts, its command line and its tests. A script in `util/` imports it after adding `../bun_handler` to `sys.path`:
+`bun-handler/bun_handler.py` is the stdlib-only handler for Claude Code's Bun-compiled native executables (Linux x64 ELF and Windows x64 PE). `bun-handler/README.md` lists the layouts it accepts, its command line and its tests. `bun-handler/` is a git submodule of https://github.com/ojura/bun-handler: changes to the handler and its tests are committed there, and a commit here then records the new submodule commit. A script in `util/` imports it after adding `../bun-handler` to `sys.path`:
 
 ```python
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun-handler"))
 import bun_handler
 ```
 
@@ -402,7 +402,7 @@ This proves the patch changed semantics as intended rather than merely producing
 
 ### Bun repack gates
 
-Follow `bun_handler/test_bun_handler.py`:
+Follow `bun-handler/test_bun_handler.py`:
 
 - Re-extracted JavaScript equals the patched JavaScript.
 - The binary grows or shrinks by the source size delta plus any alignment padding.

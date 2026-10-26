@@ -57,7 +57,7 @@ patched live extension dir          maintainer tool             new prebuilt
 2. **Synthesize the prebuilt.**
 
    ```sh
-   git clone https://github.com/ojura/claude-patches
+   git clone --recurse-submodules https://github.com/ojura/claude-patches
    cd claude-patches
    python3 util/build-prebuilt.py \
      ~/.<ide>/extensions/anthropic.claude-code-<VER>-linux-x64 \

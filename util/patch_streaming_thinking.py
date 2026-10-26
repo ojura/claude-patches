@@ -152,7 +152,7 @@ Input
 =====
 
 A pristine bun-packed Claude Code CLI binary (Linux ELF with a `.bun`
-section as parsed by `util/bun_handler`). Get it from npm:
+section as parsed by `bun-handler/bun_handler.py`). Get it from npm:
 
 ::
 
@@ -219,7 +219,7 @@ CONNOISSEUR_TS = os.path.join(
 )
 sys.path.insert(0, HERE)
 sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun-handler"))
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
 from pfg import jslex  # noqa: E402  (lexer-aware brace matching for callsite spans)
 

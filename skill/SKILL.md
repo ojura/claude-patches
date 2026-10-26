@@ -96,9 +96,20 @@ if [ -n "$REPO_ROOT" ]; then
   ORIGIN_SHA="$(git -C "$REPO_ROOT" rev-parse origin/main)"
   if [ "$HEAD_SHA" != "$ORIGIN_SHA" ]; then
     if git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main; then
-      if git -C "$REPO_ROOT" diff --quiet HEAD && git -C "$REPO_ROOT" diff --cached --quiet; then
+      # A bun-handler/ checkout that is clean but at another commit than the
+      # one recorded (after a plain `git pull`, or a failed submodule update)
+      # does not stop the update: the submodule update below moves it to the
+      # commit origin/main records. Edited, staged or untracked files inside it
+      # do stop the update, as they do in the rest of the clone.
+      if git -C "$REPO_ROOT" diff --quiet --ignore-submodules HEAD \
+          && git -C "$REPO_ROOT" diff --cached --quiet \
+          && git -C "$REPO_ROOT" submodule foreach --quiet \
+               'git diff --quiet HEAD && git diff --cached --quiet && test -z "$(git ls-files --others --exclude-standard)"'; then
         git -C "$REPO_ROOT" merge --ff-only --quiet origin/main
         echo "  fast-forwarded to $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+        if ! git -C "$REPO_ROOT" submodule update --init --quiet; then
+          echo "  WARNING: bun-handler/ could not be checked out. The skill does not use it; pfg, the rm-check hook and the native-binary scripts in util/ do."
+        fi
         echo "RESTART_SKILL: re-read SKILL.md from disk to pick up changes."
         exit 0
       else
@@ -115,7 +126,7 @@ if [ -n "$REPO_ROOT" ]; then
   fi
 else
   echo "Self-update skipped: no symlink under ~/.claude/skills/ resolves to a clone of ojura/claude-patches."
-  echo "  (Optional) install via: git clone https://github.com/ojura/claude-patches ~/claude-patches;"
+  echo "  (Optional) install via: git clone --recurse-submodules https://github.com/ojura/claude-patches ~/claude-patches;"
   echo "  ln -s ~/claude-patches/skill ~/.claude/skills/<any-name>"
 fi
 

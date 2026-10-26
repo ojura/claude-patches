@@ -81,7 +81,7 @@ Usage
     util/patch_statusline_auth_org.py <input-binary> [-o <output>]
 
 Output defaults to ``<input>.aoi``. Targets the bun ``.bun``-section ELF form via
-``util/bun_handler`` (Linux x64).
+``bun-handler/bun_handler.py`` (Linux x64).
 """
 import os
 import re
@@ -89,7 +89,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun-handler"))
 import bun_handler  # noqa: E402  (sys.path insert must precede this)
 
 

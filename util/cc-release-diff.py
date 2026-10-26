@@ -28,7 +28,7 @@ matching trap:
   fs-ops     filesystem-call census of a region (mkdir/rmdir/open/...), the
              cheap check that a lock or writer region did not change behaviour
 
-It fetches and unpacks builds itself (via bun_handler in this directory), or
+It fetches and unpacks builds itself (via bun-handler/bun_handler.py), or
 takes already-extracted .js bundles. Downloads and extractions are cached under
 /tmp so re-runs are fast.
 
@@ -49,7 +49,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun_handler"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bun-handler"))
 
 RELEASES = "https://downloads.claude.ai/claude-code-releases"
 PLATFORM = "linux-x64"
