@@ -72,7 +72,8 @@ PE_SECURITY_DIRECTORY_INDEX = 4
 # Current standalone-module-graph flags. Bits 0-4 affect runtime policy but add
 # no records. Bits 5-9 append records immediately after the module table, in
 # bit order. Bit 10 is descriptive only; bits 11-12 add a prelinked graph/map
-# and an eight-byte runtime-options record. Unknown higher bits remain refused.
+# and an eight-byte runtime-options record. Bit 13 adds a linked bytecode
+# payload descriptor and six region ends. Unknown higher bits remain refused.
 # Schema reference: Bun StandaloneModuleGraph.rs Flags/from_bytes/to_bytes.
 BUN_FLAG_SOURCE_TEXT_CONTIGUOUS = 1 << 4
 BUN_FLAG_HAS_SOURCE_HASHES = 1 << 5
@@ -83,7 +84,10 @@ BUN_FLAG_HAS_MODULE_INFO_STRING_TABLE = 1 << 9
 BUN_FLAG_CROSS_COMPILED_BYTECODE = 1 << 10
 BUN_FLAG_HAS_PRELINKED_MODULE_GRAPH = 1 << 11
 BUN_FLAG_HAS_RUNTIME_OPTIONS = 1 << 12
-BUN_KNOWN_FLAGS = (1 << 13) - 1
+BUN_FLAG_HAS_LINKED_BYTECODE_PAYLOAD = 1 << 13
+BUN_LINKED_BYTECODE_REGION_COUNT = 6
+BUN_LINKED_BYTECODE_RECORD_SIZE = 8 + 4 * BUN_LINKED_BYTECODE_REGION_COUNT
+BUN_KNOWN_FLAGS = (1 << 14) - 1
 
 # Bun's Loader enum is append-only and currently occupies discriminants 0..21.
 # Invalid Rust enum discriminants are not merely unsupported values; reading
@@ -1032,6 +1036,26 @@ class BunImage:
             # the exact bytes, including options this editor need not interpret.
             at += 8
 
+        self.linked_bytecode_record_off = None
+        self.linked_bytecode_payload = (0, 0)
+        self.linked_bytecode_region_ends = ()
+        if self.flags & BUN_FLAG_HAS_LINKED_BYTECODE_PAYLOAD:
+            self._need_optional_bytes(at, BUN_LINKED_BYTECODE_RECORD_SIZE,
+                                      "linked-bytecode payload")
+            self.linked_bytecode_record_off = at
+            off, length = struct.unpack_from("<II", self.blob, at)
+            self._require_range("linked-bytecode payload", off, length)
+            ends = struct.unpack_from(
+                "<" + "I" * BUN_LINKED_BYTECODE_REGION_COUNT, self.blob, at + 8)
+            if not length:
+                raise BunFormatError("linked-bytecode payload is empty")
+            if any(a > b for a, b in zip(ends, ends[1:])) or ends[-1] != length:
+                raise BunFormatError("linked-bytecode region ends are not sorted or "
+                                     "do not end at the payload length")
+            self.linked_bytecode_payload = (off, length)
+            self.linked_bytecode_region_ends = ends
+            at += BUN_LINKED_BYTECODE_RECORD_SIZE
+
         self.optional_tail_off = self.modules_off + self.modules_len
         self.optional_tail_end = at
 
@@ -1086,6 +1110,24 @@ class BunImage:
                     f"{label} runtime address is not {alignment}-byte aligned")
             regions.append((off, owned_end, label))
 
+        def add_bytecode(label, off, length, *, allow_empty=False):
+            if self.linked_bytecode_record_off is None:
+                add_region(label, off, length, alignment=BUN_BYTECODE_ALIGNMENT)
+                return
+            # Bun checks module lengths before using their entries, but selects
+            # builtin entries by offset even when their recorded length is zero.
+            if not length and allow_empty:
+                return
+            start, size = self.linked_bytecode_payload
+            if not (start <= off < start + size and off + length == start + size):
+                raise BunFormatError(
+                    f"{label} must start inside the linked-bytecode payload "
+                    "and end at its end")
+            # These are overlapping views into one payload, not separately
+            # allocated regions. Only the payload's start needs alignment.
+
+        add_region("linked-bytecode payload", *self.linked_bytecode_payload,
+                   alignment=BUN_BYTECODE_ALIGNMENT)
         for m in self.modules:
             i = m["index"]
             if not 0 <= m["encoding"] <= 2:
@@ -1119,9 +1161,7 @@ class BunImage:
                 allow_after_table=(m["loader"] in _JS_LOADERS
                                    and m["module_format"] in (1, 2)))
             add_region(f"module[{i}].sourcemap", *m["sourcemap"])
-            add_region(
-                f"module[{i}].bytecode", *m["bytecode"],
-                alignment=BUN_BYTECODE_ALIGNMENT)
+            add_bytecode(f"module[{i}].bytecode", *m["bytecode"], allow_empty=True)
             add_region(f"module[{i}].moduleInfo", *m["moduleInfo"])
             add_region(
                 f"module[{i}].bytecodeOriginPath", *m["bytecodeOriginPath"],
@@ -1132,9 +1172,7 @@ class BunImage:
                     f"module[{i}].bytecodeOriginPath contains an interior NUL")
 
         for entry in self.builtin_bytecode:
-            add_region(
-                f"builtin-bytecode[{entry['index']}].bytes", *entry["bytes"],
-                alignment=BUN_BYTECODE_ALIGNMENT)
+            add_bytecode(f"builtin-bytecode[{entry['index']}].bytes", *entry["bytes"])
         add_region(
             "bytecode-string-table", *self.bytecode_string_table,
             alignment=BUN_BYTECODE_ALIGNMENT)
@@ -1414,6 +1452,8 @@ def _apply_blob_edits(img, edits):
             changed_source_modules.add(mi)
         elif blob[off:off + length] == new_bytes:
             continue
+        if field == "bytecode" and img.linked_bytecode_record_off is not None:
+            raise BunFormatError("cannot edit an individual linked-bytecode entry")
         edited_values[(mi, field)] = new_bytes
         if length == 0 and new_bytes:
             if field != "contents":
@@ -1482,7 +1522,8 @@ def _apply_blob_edits(img, edits):
             alignment_targets.append(
                 (m["contents"][0], 2, f"module[{m['index']}].contents"))
     for m in img.modules:
-        if m["index"] not in changed_source_modules:
+        if (img.linked_bytecode_record_off is None
+                and m["index"] not in changed_source_modules):
             off, length = m["bytecode"]
             if length:
                 alignment_targets.append(
@@ -1490,10 +1531,14 @@ def _apply_blob_edits(img, edits):
                      f"module[{m['index']}].bytecode"))
     for entry in img.builtin_bytecode:
         off, length = entry["bytes"]
-        if length:
+        if length and img.linked_bytecode_record_off is None:
             alignment_targets.append(
                 (off, BUN_BYTECODE_ALIGNMENT,
                  f"builtin-bytecode[{entry['index']}].bytes"))
+    if img.linked_bytecode_payload[1]:
+        alignment_targets.append(
+            (img.linked_bytecode_payload[0], BUN_BYTECODE_ALIGNMENT,
+             "linked-bytecode payload"))
     if img.bytecode_string_table[1]:
         alignment_targets.append(
             (img.bytecode_string_table[0], BUN_BYTECODE_ALIGNMENT,
@@ -1634,6 +1679,17 @@ def _apply_blob_edits(img, edits):
             off, length = img.prelinked_module_graph
             struct.pack_into("<II", out, record_off,
                              remap(off) if length else off, length)
+
+    if img.linked_bytecode_record_off is not None:
+        record_off = remap(img.linked_bytecode_record_off)
+        if disable_prelinked:
+            record_off = remap(img.prelinked_module_graph_record_off) + 12
+            if img.runtime_options_record_off is not None:
+                record_off += 8
+        off, length = img.linked_bytecode_payload
+        struct.pack_into("<II", out, record_off, remap(off), length)
+        struct.pack_into("<" + "I" * BUN_LINKED_BYTECODE_REGION_COUNT,
+                         out, record_off + 8, *img.linked_bytecode_region_ends)
 
     # Rewrite the fixed trailer struct. byte_count is exactly the offset of this
     # struct in the serialized graph.
@@ -2250,6 +2306,17 @@ def compact_with_reference(data, reference_data, *, expected_sha256=None,
                 raise BunFormatError("reference runtime-options placement differs")
             expected_optional_end += 8
             masks.append((at + 12, at + 20))  # exact same scalar bytes, checked above
+    if current.linked_bytecode_payload != reference.linked_bytecode_payload or (
+            current.linked_bytecode_region_ends != reference.linked_bytecode_region_ends):
+        raise BunFormatError("reference linked-bytecode descriptor differs")
+    if reference.linked_bytecode_record_off is not None:
+        expected_record = (expected_optional_end if prelink_disabled
+                           else reference.linked_bytecode_record_off)
+        if current.linked_bytecode_record_off != expected_record:
+            raise BunFormatError("reference linked-bytecode record placement differs")
+        if prelink_disabled:
+            expected_optional_end += BUN_LINKED_BYTECODE_RECORD_SIZE
+            masks.append((expected_record, expected_optional_end))
     if (current.compile_argv_off, current.compile_argv_len,
             current.optional_tail_off, current.optional_tail_end) != (
             reference.compile_argv_off, reference.compile_argv_len,
@@ -2340,6 +2407,9 @@ class _TweakccRebuildImage(BunImage):
         self.runtime_options_record_off = None
         self.runtime_options = None
         self.runtime_options_bytes = b""
+        self.linked_bytecode_record_off = None
+        self.linked_bytecode_payload = (0, 0)
+        self.linked_bytecode_region_ends = ()
 
     def _validate_structure(self):
         fields = _FIELD_ORDER_52 if self.module_struct_size == 52 else _FIELD_ORDER_36

@@ -88,7 +88,7 @@ class GraphFlags278Tests(unittest.TestCase):
     def test_new_flags_have_exact_known_values(self):
         self.assertEqual(h.BUN_FLAG_HAS_PRELINKED_MODULE_GRAPH,0x800)
         self.assertEqual(h.BUN_FLAG_HAS_RUNTIME_OPTIONS,0x1000)
-        self.assertEqual(h.BUN_KNOWN_FLAGS,0x1fff)
+        self.assertEqual(h.BUN_KNOWN_FLAGS,0x3fff)
 
     def test_active_cache_and_map_are_read(self):
         i=self.image
@@ -269,8 +269,8 @@ class GraphFlags278Tests(unittest.TestCase):
             h.BunImage(bad)
 
     def test_still_refuses_unknown_outer_flag(self):
-        bad=change(self.data,self.image.offsets_off+28,'<I',self.image.flags|0x2000)
-        with self.assertRaisesRegex(NotImplementedError,'unknown flag bits 0x2000'):
+        bad=change(self.data,self.image.offsets_off+28,'<I',self.image.flags|0x4000)
+        with self.assertRaisesRegex(NotImplementedError,'unknown flag bits 0x4000'):
             h.BunImage(bad)
 
     def test_elf_width_matrix(self):

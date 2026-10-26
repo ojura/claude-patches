@@ -115,6 +115,60 @@ differently, so the record layout rests on the binary and on running edited
 copies of it. `reference/schema_reference_status.json` records the retrieval
 attempts.
 
+## Linked bytecode: graph flag 0x2000
+
+Claude Code 2.1.310 sets flags `0x3bff`. Bit `0x2000` adds a 32-byte record
+after runtime options and before `compile_exec_argv`: a u32 payload offset,
+a u32 payload length, and six u32 region ends relative to that payload.
+The ends must be nondecreasing, and the last must equal the payload length.
+The handler requires a nonempty payload inside the blob and checks its
+128-byte runtime alignment.
+
+Module and builtin bytecode pointers refer to entries inside this shared
+payload. Each pointer starts at its entry and extends to the payload's end,
+so these ranges overlap and their starts can be unaligned. The handler checks
+each entry against the descriptor and records the whole payload as one region
+when checking overlaps with source, metadata and other data. It rejects
+zero-length builtin entries: Bun selects these by offset regardless of length,
+so treating them as inactive would change their meaning when the payload moves.
+A zero-length module pointer is inactive and remains valid.
+
+After a source edit, the changed module's bytecode pointer becomes `(0, 0)`
+and Bun compiles that module from source. Other modules and builtins retain
+their entries in the unchanged payload. The writer aligns the payload's start;
+adding padding before individual entries would corrupt the shared bytecode.
+The region ends stay relative to the payload. Disabling the prelinked graph
+removes its map from the record sequence, so both runtime options and the
+linked-bytecode descriptor move immediately after the empty prelink record.
+Compaction checks the descriptor and payload against the reference binary.
+
+The record is defined by `HAS_LINKED_BYTECODE_PAYLOAD` in Bun's
+[`StandaloneModuleGraph.rs`](https://github.com/oven-sh/bun/blob/449877f3e088feb6cc2dd2704ffb803d59be3277/src/standalone_graph/StandaloneModuleGraph.rs),
+with the count of six in
+[`standalone_module_graph.rs`](https://github.com/oven-sh/bun/blob/449877f3e088feb6cc2dd2704ffb803d59be3277/src/resolver/standalone_module_graph.rs).
+These references are at commit `449877f3e088feb6cc2dd2704ffb803d59be3277`.
+The installed 2.1.310 identifies its Bun runtime as 1.4.4, revision `2c2ae6246`,
+which could not be retrieved from the public repository. Its bytes agree with
+the public record layout:
+
+- The payload is 100,235,616 bytes at blob offset 21,499,768.
+- The six ends are 6,739,996; 20,662,014; 20,662,014; 22,498,324;
+  84,658,629; and 100,235,616.
+- All 2,549 module entries and 133 builtin entries start inside that payload
+  and end at its end.
+- The descriptor ends at 176,155,081, where `compile_exec_argv` starts.
+
+`validate_linked_bytecode.py` checks cached importers against edited exporters,
+missing exports, top-level await, empty source and regrowth, builtin bytecode,
+and restoration of the original caches after compaction. It runs edited copies
+of the supplied executable. The synthetic tests cover ELF and PE, both wrapper
+sizes and module-record sizes, malformed descriptors and entries, and edits
+that move the payload.
+
+`pfg/REVISION` remains 9: this adds an executable layout the reader previously
+refused and leaves source decoding unchanged. Extraction from 2.1.304, 2.1.305
+and 2.1.309 matches the reader before this addition.
+
 ## Repairing other tools' output
 
 - `extract` and `modules` read a binary rebuilt by tweakcc's full serializer
@@ -140,15 +194,29 @@ attempts.
 
 ## Tests
 
+Run native checks on disposable copies, from `/`, with a clean environment and
+fresh HOME, XDG, CLAUDE_CONFIG_DIR and TMPDIR directories. Use synthetic
+credentials, `ANTHROPIC_BASE_URL=http://127.0.0.1:9`,
+`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `GIT_SSH_COMMAND=false`,
+`GIT_ALLOW_PROTOCOL=file`, and `DBUS_SESSION_BUS_ADDRESS=disabled:`. Put
+recording `ssh` and `gh` stubs first on PATH, and use the Node executable rather
+than its snap launcher. Point the six uppercase/lowercase HTTP, HTTPS and ALL
+proxy variables at the closed loopback port. Trace `execve`, `connect`, `sendto`,
+`sendmsg` and `sendmmsg` with `strace -f --seccomp-bpf` and inspect the results.
+
 ```sh
-# 349 synthetic tests; none runs a Claude binary.
+# 380 synthetic tests using in-memory executable fixtures.
 python3 -m unittest discover -s bun_handler -v
 
 # 130 synthetic checks plus the gates on a real binary. The gates run patched
 # copies of it. CLAUDE_PFG_STRICT_GATES=gate1,gate2,... turns a skipped gate into
 # a failure. `bun_handler.py selftest <binary>` runs this harness after its
 # byte-stability checks.
-python3 bun_handler/test_bun_handler.py ~/.local/share/claude/versions/<version>
+python3 bun_handler/test_bun_handler.py /path/to/disposable-claude-copy
+
+# Additional runtime checks for linked bytecode, in the same isolated environment.
+python3 bun_handler/validate_linked_bytecode.py /path/to/disposable-claude-copy
 
 # Randomized ELF, PE and new-record fixtures.
 python3 bun_handler/property_probe.py bun_handler
